@@ -15,4 +15,4 @@ categories = [
 license = "MIT"
 
 [dependencies]
-sumtype = "0.2.5"
+parametrized = "0.1.7"
