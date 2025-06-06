@@ -2,11 +2,12 @@ use super::Parse;
 
 pub trait ParseStream {
     type Atom;
+    type Error;
     type Sep: Parse<Self::Atom>;
 
     // Required
-    fn next(&mut self) -> Option<Self::Atom>;
-    fn peek(&mut self) -> Option<&Self::Atom>;
+    fn next(&mut self) -> Result<Option<Self::Atom>, Self::Error>;
+    fn peek(&mut self) -> Result<Option<&Self::Atom>, Self::Error>;
     fn push(&mut self, _: Self::Atom);
 
     // Pre-defined
@@ -63,20 +64,24 @@ where
     A: Clone,
 {
     type Atom = A;
+    type Error = S::Error;
     type Sep = S::Sep;
-    fn next(&mut self) -> Option<Self::Atom> {
+    fn next(&mut self) -> Result<Option<Self::Atom>, Self::Error> {
         if let Some(item) = self.push_buf.pop() {
-            Some(item)
+            Ok(Some(item))
         } else {
-            let item = self.slot.next()?;
-            self.take_buf.push(item.clone());
-            Some(item)
+            if let Some(item) = self.slot.next()? {
+                self.take_buf.push(item.clone());
+                Ok(Some(item))
+            } else {
+                Ok(None)
+            }
         }
     }
 
-    fn peek(&mut self) -> Option<&Self::Atom> {
+    fn peek(&mut self) -> Result<Option<&Self::Atom>, Self::Error> {
         if let Some(last) = self.push_buf.last() {
-            Some(last)
+            Ok(Some(last))
         } else {
             self.slot.peek()
         }
@@ -92,13 +97,14 @@ where
     T: ParseStream,
 {
     type Atom = T::Atom;
+    type Error = T::Error;
     type Sep = T::Sep;
 
-    fn next(&mut self) -> Option<Self::Atom> {
+    fn next(&mut self) -> Result<Option<Self::Atom>, Self::Error> {
         T::next(self)
     }
 
-    fn peek(&mut self) -> Option<&Self::Atom> {
+    fn peek(&mut self) -> Result<Option<&Self::Atom>, Self::Error> {
         T::peek(self)
     }
 
