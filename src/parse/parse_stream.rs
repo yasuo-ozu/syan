@@ -1,18 +1,19 @@
-use super::Parse;
-
 pub trait ParseStream {
     type Atom;
     type Error;
-    type Sep: Parse<Self::Atom>;
 
     // Required
-    fn next(&mut self) -> Result<Option<Self::Atom>, Self::Error>;
-    fn peek(&mut self) -> Result<Option<&Self::Atom>, Self::Error>;
+    fn next(&mut self) -> Option<Self::Atom>;
+    fn peek(&mut self) -> Option<&Self::Atom>;
     fn push(&mut self, _: Self::Atom);
+
+    fn get_error(&mut self) -> Result<(), Self::Error> {
+        todo!()
+    }
 
     // Pre-defined
     fn skip_sep(&mut self) -> bool {
-        Self::Sep::parse(self).is_ok()
+        todo!()
     }
 
     /// Run sub parser with a duplicated stream.
@@ -65,23 +66,19 @@ where
 {
     type Atom = A;
     type Error = S::Error;
-    type Sep = S::Sep;
-    fn next(&mut self) -> Result<Option<Self::Atom>, Self::Error> {
+    fn next(&mut self) -> Option<Self::Atom> {
         if let Some(item) = self.push_buf.pop() {
-            Ok(Some(item))
+            Some(item)
         } else {
-            if let Some(item) = self.slot.next()? {
-                self.take_buf.push(item.clone());
-                Ok(Some(item))
-            } else {
-                Ok(None)
-            }
+            let item = self.slot.next()?;
+            self.take_buf.push(item.clone());
+            Some(item)
         }
     }
 
-    fn peek(&mut self) -> Result<Option<&Self::Atom>, Self::Error> {
+    fn peek(&mut self) -> Option<&Self::Atom> {
         if let Some(last) = self.push_buf.last() {
-            Ok(Some(last))
+            Some(last)
         } else {
             self.slot.peek()
         }
@@ -98,13 +95,12 @@ where
 {
     type Atom = T::Atom;
     type Error = T::Error;
-    type Sep = T::Sep;
 
-    fn next(&mut self) -> Result<Option<Self::Atom>, Self::Error> {
+    fn next(&mut self) -> Option<Self::Atom> {
         T::next(self)
     }
 
-    fn peek(&mut self) -> Result<Option<&Self::Atom>, Self::Error> {
+    fn peek(&mut self) -> Option<&Self::Atom> {
         T::peek(self)
     }
 

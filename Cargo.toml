@@ -16,3 +16,4 @@ license = "MIT"
 
 [dependencies]
 parametrized = "0.1.7"
+newer-type = "0.1.1"
