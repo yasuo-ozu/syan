@@ -1,6 +1,17 @@
 use crate::parse::{IntoParseStream, Parse, ParseStream};
 pub struct Joint<Tuple>(pub Tuple);
 
+mod _joint_impl {
+    #[macro_export]
+    macro_rules! _joint_impl {
+        ($($t:ty),* $(,)?) => {
+            $xrate::nested::Joint<($($t,)*)>
+        };
+    }
+    pub use _joint_impl as Joint;
+}
+pub use _joint_impl::*;
+
 impl<Tuple> core::ops::Deref for Joint<Tuple> {
     type Target = Tuple;
     fn deref(&self) -> &Self::Target {

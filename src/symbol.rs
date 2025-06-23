@@ -7,12 +7,12 @@ pub mod chars {
             pub struct $name;
         };
         ((@add_doc $_:lifetime $name:ident $(($token:tt))?  $char:literal)) => {
-            #[doc = stringify!("Represents '", $char, "'")]
+            #[doc = concat!("Represents ", stringify!($char), "")]
             #[doc = ""]
             #[doc = "```"]
             #[doc = "# use syan::symbol::chars::*;"]
-            #[doc = stringify!("assert_eq!(\"", $char, "\", &format!(\"{}\", ", $name, "));")]
-            #[doc = stringify!("assert_eq!(\"", $char, "\", &format!(\"{}\", Char!('", $char, "')));")]
+            #[doc = concat!("assert_eq!(&format!(\"{}\", ", stringify!($char), "), &format!(\"{}\", ", stringify!($name), "));")]
+            #[doc = concat!("assert_eq!(&format!(\"{}\",", stringify!($char), "), &format!(\"{}\", Char!(", stringify!($char), ")));")]
             $(
                 #[doc = stringify!("assert_eq!(\"", $char, "\", &format!(\"{}\", Char!(", $token, ")));")]
             )?
@@ -47,25 +47,8 @@ pub mod chars {
                     )?
                     ($char) => { $dollar crate::symbol::chars::$name };
                 )*
-                // ($dollar) => { $dollar crate::symbol::chars::Dollar };
+                ($dollar) => { $dollar crate::symbol::chars::Dollar };
             }
-
-            /// Emit a type-level char from given token or char literal
-            ///
-            /// # Example
-            ///
-            /// ```
-            /// # use syan::symbol::*;
-            /// assert_eq!(Char!('*'), Star);
-            /// assert_eq!(Char!(*), Star);
-            /// assert_eq!(Char!('('), OpenParen);
-            ///
-            /// fn take_dollar(dollar: Char!['$']) {
-            ///     assert_eq!(dollar, Char!('$'));
-            /// }
-            /// take_dollar(Dollar);
-            /// ```
-            pub use __Char as Char;
         };
     }
 
@@ -113,12 +96,35 @@ pub mod chars {
         '_ CloseBracket@']'
     );
 
+    /// Represents '<'
     pub type OpenAngle = Lt;
     #[allow(non_upper_case_globals)]
+    /// Represents '<'
     pub const OpenAngle: OpenAngle = Lt;
+    /// Represents '>'
     pub type CloseAngle = Gt;
     #[allow(non_upper_case_globals)]
+    /// Represents '>'
     pub const CloseAngle: CloseAngle = Gt;
+
+    /// Emit a type-level char from given token or char literal
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use syan::symbol::*;
+    /// # use syan::symbol::chars::{Star, OpenParen, Dollar, Char};
+    /// assert_eq!(Char!('*'), Star);
+    /// assert_eq!(Char!(*), Star);
+    /// assert_eq!(Char!('('), OpenParen);
+    ///
+    /// fn take_dollar(dollar: Char!['$']) {
+    ///     assert_eq!(dollar, Char!($));
+    /// }
+    /// take_dollar(Dollar);
+    /// ```
+    #[doc(inline)]
+    pub use __Char as Char;
 }
 
 #[doc(hidden)]

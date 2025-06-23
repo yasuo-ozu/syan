@@ -5,17 +5,6 @@ pub trait Parse<Atom>: Sized {
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error>;
 }
 
-mod _joint_impl {
-    #[macro_export]
-    macro_rules! _joint_impl {
-        ($($t:ty),* $(,)?) => {
-            $xrate::nested::Joint<($($t,)*)>
-        };
-    }
-    pub use _joint_impl as Joint;
-}
-pub use _joint_impl::*;
-
 macro_rules! impl_for_collection {
     () => {};
     ([$item:ident $($p:tt)*] $self:ty, $($t:tt)*) => {

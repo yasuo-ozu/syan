@@ -11,6 +11,19 @@ impl Span for () {
     }
 }
 
+impl<S> Span for Option<S>
+where
+    S: Span,
+{
+    fn migrate(self, other: Self) -> Self {
+        match (self, other) {
+            (None, rhs) => rhs,
+            (Some(lhs), None) => Some(lhs),
+            (Some(lhs), Some(rhs)) => Some(lhs.migrate(rhs)),
+        }
+    }
+}
+
 pub trait Spanned {
     type Span: Span;
     type Map<S>: Spanned
