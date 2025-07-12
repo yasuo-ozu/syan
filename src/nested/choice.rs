@@ -1,62 +1,131 @@
-use crate::parse::{IntoParseStream, Parse, ParseStream};
+use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
+use core::{marker::PhantomData, mem::transmute};
+use std::any::Any;
 
-mod _choice_impl {
-    #[macro_export]
-    macro_rules! _choice_impl {
-        ($t:ty$(,)?) => {
-            $t
-        };
-        ($t0:ty, $t1:ty $(,$t:ty)*$(,)?) => {
-            $crate::nested::choice::Choice<
-                $t0,
-                $crate::nested::choice::Choice!($t1 $(,$t)*)
-            >
-        };
-    }
-
-    pub use _choice_impl as Choice;
+#[macro_export]
+macro_rules! _Choice {
+    (@impl) => {()};
+    (@impl $t0:ty $(,$t:ty)*) => {
+        ($t0, $crate::nested::choice::Choice!($($t),*))
+    };
+    ($($t:ty),*$(,)?) => {
+        $crate::nested::choice::Choice<$crate::nested::choice::Choice!(@impl $($t:ty),*)>
+    };
 }
-pub use _choice_impl::*;
+pub use _Choice as Choice;
 
-// TODO: implement deref
+pub struct Choice<HList>(Box<dyn Any>, PhantomData<HList>);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Choice<L, R> {
-    Left(L),
-    Right(R),
-}
+impl<Atom: Clone, T: 'static + Parse<Atom>> Parse<Atom> for Choice<(T, ())> {
+    type Error = T::Error;
 
-impl<L: Default, R> Default for Choice<L, R> {
-    fn default() -> Self {
-        Self::Left(Default::default())
+    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+        let stream = stream.into_parse_stream();
+        Ok(Self(
+            Box::new(T::parse(stream)?) as Box<dyn Any>,
+            PhantomData,
+        ))
     }
 }
 
-impl<L: std::fmt::Display, R: std::fmt::Display> core::fmt::Display for Choice<L, R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Left(left) => left.fmt(f),
-            Self::Right(right) => right.fmt(f),
+impl<Atom: Clone, T: 'static + Parse<Atom>, U, HList> Parse<Atom> for Choice<(T, (U, HList))>
+where
+    Choice<(U, HList)>: Parse<Atom, Error = T::Error>,
+{
+    type Error = T::Error;
+
+    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+        let mut stream = stream.into_parse_stream();
+        if let Ok(result) = stream.dup(|stream| T::parse(stream)) {
+            Ok(Self(Box::new(result) as Box<dyn Any>, PhantomData))
+        } else {
+            let result = <Choice<(U, HList)>>::parse(stream)?;
+            Ok(unsafe {
+                core::mem::transmute::<Choice<(U, HList)>, Choice<(T, (U, HList))>>(result)
+            })
+        }
+    }
+}
+impl<Atom: Clone> Unparse<Atom> for Choice<()> {
+    fn unparse<S: crate::parse::unparse::Emitter<Atom>>(
+        &self,
+        _sink: &mut S,
+    ) -> Result<(), S::Error> {
+        unreachable!()
+    }
+}
+
+impl<Atom: Clone, T: 'static + Unparse<Atom>, HList> Unparse<Atom> for Choice<(T, HList)>
+where
+    Choice<HList>: Unparse<Atom>,
+{
+    fn unparse<S: crate::parse::unparse::Emitter<Atom>>(
+        &self,
+        sink: &mut S,
+    ) -> Result<(), S::Error> {
+        if let Some(r) = self.0.downcast_ref::<T>() {
+            r.unparse::<S>(sink)
+        } else {
+            let this = unsafe { transmute::<&Choice<(T, HList)>, &Choice<HList>>(self) };
+            this.unparse(sink)
         }
     }
 }
 
-impl<L, R, Atom, Error, LError> Parse<Atom> for Choice<L, R>
-where
-    L: Parse<Atom, Error = LError>,
-    R: Parse<Atom>,
-    LError: crate::error::Merge<R::Error, Output = Error>,
-    Atom: Clone,
-{
-    type Error = Error;
+impl Clone for Choice<()> {
+    fn clone(&self) -> Self {
+        Self(Box::new(()) as _, PhantomData)
+    }
+}
 
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Error> {
-        let mut stream = stream.into_parse_stream();
-        match stream.dup(|mut stream| L::parse(&mut stream).map_err(LError::from_left)) {
-            Ok(o) => Ok(Choice::Left(o)),
-            Err(_e) => Ok(Choice::Right(
-                R::parse(&mut stream).map_err(LError::from_right)?,
-            )),
+impl<T: 'static + Clone, HList> Clone for Choice<(T, HList)>
+where
+    Choice<HList>: Clone,
+{
+    fn clone(&self) -> Self {
+        if let Some(r) = self.0.downcast_ref::<T>() {
+            Self(Box::new(r.clone()) as _, PhantomData)
+        } else {
+            let this = unsafe { transmute::<&Choice<(T, HList)>, &Choice<HList>>(self) };
+            Self(this.clone().0, PhantomData)
+        }
+    }
+}
+
+impl core::fmt::Display for Choice<()> {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unreachable!()
+    }
+}
+
+impl<T: 'static + core::fmt::Display, HList> core::fmt::Display for Choice<(T, HList)>
+where
+    Choice<HList>: core::fmt::Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(rf) = self.0.downcast_ref::<T>() {
+            rf.fmt(f)
+        } else {
+            unsafe { core::mem::transmute::<_, &Choice<HList>>(self).fmt(f) }
+        }
+    }
+}
+
+impl core::fmt::Debug for Choice<()> {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unreachable!()
+    }
+}
+
+impl<T: 'static + core::fmt::Debug, HList> core::fmt::Debug for Choice<(T, HList)>
+where
+    Choice<HList>: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(rf) = self.0.downcast_ref::<T>() {
+            rf.fmt(f)
+        } else {
+            unsafe { core::mem::transmute::<_, &Choice<HList>>(self).fmt(f) }
         }
     }
 }

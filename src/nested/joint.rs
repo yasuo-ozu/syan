@@ -3,6 +3,7 @@ pub struct Joint<Tuple>(pub Tuple);
 
 mod _joint_impl {
     #[macro_export]
+    #[doc(hidden)]
     macro_rules! _joint_impl {
         ($($t:ty),* $(,)?) => {
             $xrate::nested::Joint<($($t,)*)>
@@ -10,6 +11,7 @@ mod _joint_impl {
     }
     pub use _joint_impl as Joint;
 }
+#[doc(inline)]
 pub use _joint_impl::*;
 
 impl<Tuple> core::ops::Deref for Joint<Tuple> {

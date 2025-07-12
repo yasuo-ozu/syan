@@ -12,6 +12,11 @@ pub trait ParseStream {
     }
 
     // Pre-defined
+
+    /// Skip the separator atoms if exists. Returns whether we skipped some separators.
+    ///
+    /// This function may or may not returns `true` with multiple calling.
+    /// If the input streams fall into an error, it returns `true`.
     fn skip_sep(&mut self) -> bool {
         todo!()
     }
