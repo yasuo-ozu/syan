@@ -18,7 +18,6 @@ pub struct Choice<HList>(Box<dyn Any>, PhantomData<HList>);
 
 impl<Atom: Clone, T: 'static + Parse<Atom>> Parse<Atom> for Choice<(T, ())> {
     type Error = T::Error;
-
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let stream = stream.into_parse_stream();
         Ok(Self(
@@ -30,19 +29,22 @@ impl<Atom: Clone, T: 'static + Parse<Atom>> Parse<Atom> for Choice<(T, ())> {
 
 impl<Atom: Clone, T: 'static + Parse<Atom>, U, HList> Parse<Atom> for Choice<(T, (U, HList))>
 where
-    Choice<(U, HList)>: Parse<Atom, Error = T::Error>,
+    Choice<(U, HList)>: Parse<Atom>,
+    T::Error: crate::error::UnionWith<<Choice<(U, HList)> as Parse<Atom>>::Error>,
 {
-    type Error = T::Error;
-
+    type Error =
+        <T::Error as crate::error::UnionWith<<Choice<(U, HList)> as Parse<Atom>>::Error>>::Output;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
-        if let Ok(result) = stream.dup(|stream| T::parse(stream)) {
-            Ok(Self(Box::new(result) as Box<dyn Any>, PhantomData))
-        } else {
-            let result = <Choice<(U, HList)>>::parse(stream)?;
-            Ok(unsafe {
-                core::mem::transmute::<Choice<(U, HList)>, Choice<(T, (U, HList))>>(result)
-            })
+        match stream.dup(|stream| T::parse(stream)) {
+            Ok(result) => Ok(Self(Box::new(result) as Box<dyn Any>, PhantomData)),
+            Err(t_err) => {
+                let result = <Choice<(U, HList)>>::parse(stream)
+                    .map_err(|u_err| <T::Error as crate::error::UnionWith<_>>::from_right(u_err))?;
+                Ok(unsafe {
+                    core::mem::transmute::<Choice<(U, HList)>, Choice<(T, (U, HList))>>(result)
+                })
+            }
         }
     }
 }

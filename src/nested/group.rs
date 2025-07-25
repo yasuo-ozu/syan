@@ -1,0 +1,173 @@
+use crate::parse::{Parse, ParseStream};
+use crate::span::WithSpan;
+use crate::symbol::chars as punct;
+use std::fmt::Display;
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Group<T, O, C> {
+    pub open: O,
+    pub slot: T,
+    pub close: C,
+}
+
+pub type GroupParen<T, S> = Group<T, WithSpan<punct::OpenParen, S>, WithSpan<punct::CloseParen, S>>;
+pub type GroupBrace<T, S> = Group<T, WithSpan<punct::OpenBrace, S>, WithSpan<punct::CloseBrace, S>>;
+pub type GroupBracket<T, S> =
+    Group<T, WithSpan<punct::OpenBracket, S>, WithSpan<punct::CloseBracket, S>>;
+pub type GroupAngle<T, S> = Group<T, WithSpan<punct::OpenAngle, S>, WithSpan<punct::CloseAngle, S>>;
+
+pub trait EmptyGroup: Clone {
+    type Fill<Slot>;
+
+    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>;
+    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self);
+}
+
+impl<T, O, C> std::fmt::Display for Group<T, O, C>
+where
+    T: std::fmt::Display,
+    O: std::fmt::Display,
+    C: std::fmt::Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.open.fmt(f)?;
+        self.slot.fmt(f)?;
+        self.close.fmt(f)
+    }
+}
+
+impl<T, O, C> std::ops::Deref for Group<T, O, C> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.slot
+    }
+}
+
+impl<O: Clone, C: Clone> EmptyGroup for Group<(), O, C> {
+    type Fill<Slot> = Group<Slot, O, C>;
+
+    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self) {
+        (
+            group.slot,
+            Group {
+                slot: (),
+                open: group.open,
+                close: group.close,
+            },
+        )
+    }
+    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot> {
+        Group {
+            slot,
+            open: self.open,
+            close: self.close,
+        }
+    }
+}
+
+impl<K, T, O, C> Parse<K> for Group<T, O, C>
+where
+    T: Parse<K>,
+    O: Parse<K> + Clone + Display,
+    C: Parse<K> + Clone + Display,
+    O::Error: crate::error::UnionWith<T::Error>,
+    <O::Error as crate::error::UnionWith<T::Error>>::Output: crate::error::UnionWith<C::Error>,
+{
+    type Error =
+        <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
+            C::Error,
+        >>::Output;
+    //fn parse(stream: &mut impl ParseStream<Atom = K>) -> crate::error::Result<Self, K> {
+    //}
+
+    fn parse(stream: impl crate::parse::IntoParseStream<Atom = K>) -> Result<Self, Self::Error> {
+        let mut stream = stream.into_parse_stream();
+        let open = O::parse(&mut stream).map_err(|o_err| {
+            <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
+                C::Error,
+            >>::from_left(<O::Error as crate::error::UnionWith<T::Error>>::from_left(
+                o_err,
+            ))
+        })?;
+        // TODO: The proper bracket-aware parsing logic is complex and needs more work
+        // For now, just parse T directly from the stream
+        let slot = T::parse(&mut stream).map_err(|t_err| {
+            <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
+                C::Error,
+            >>::from_left(<O::Error as crate::error::UnionWith<T::Error>>::from_right(
+                t_err,
+            ))
+        })?;
+        let close = C::parse(&mut stream).map_err(|c_err| {
+            <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
+                C::Error,
+            >>::from_right(c_err)
+        })?;
+        Ok(Group { slot, open, close })
+    }
+}
+
+// TODO: ToAtoms trait not defined
+// impl<K, T, O, C> ToAtoms<K> for Group<T, O, C> { ... }
+
+#[derive(Clone)]
+struct LevelledStream<I, O, C> {
+    level: usize,
+    slot: I,
+    _phantom: core::marker::PhantomData<(O, C)>,
+}
+
+impl<I, O, C> LevelledStream<I, O, C> {
+    fn new(slot: I) -> Self {
+        Self {
+            level: 0,
+            slot,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<I, O, C> core::iter::Iterator for LevelledStream<I, O, C>
+where
+    I: ParseStream,
+    O: Parse<I::Atom>,
+    C: Parse<I::Atom>,
+{
+    type Item = I::Atom;
+    fn next(&mut self) -> Option<Self::Item> {
+        // TODO: peek_parse is not defined in ParseStream trait
+        // Need to implement proper bracket tracking logic
+        self.slot.next()
+    }
+}
+
+impl<I, O, C> crate::parse::ParseStream for LevelledStream<I, O, C>
+where
+    I: ParseStream,
+    O: Parse<I::Atom> + Display,
+    C: Parse<I::Atom>,
+    Self: Clone,
+{
+    type Atom = I::Atom;
+    type Error = I::Error;
+
+    fn next(&mut self) -> Option<Self::Atom> {
+        // TODO: peek_parse is not defined in ParseStream trait
+        // Need to implement proper bracket tracking logic
+        self.slot.next()
+    }
+
+    fn peek(&mut self) -> Option<&Self::Atom> {
+        // TODO: peek_parse is not defined in ParseStream trait
+        self.slot.peek()
+    }
+
+    fn push(&mut self, token: Self::Atom) {
+        // TODO: peek_parse is not defined in ParseStream trait
+        self.slot.push(token);
+    }
+
+    // TODO: These methods are not part of the ParseStream trait interface
+    // fn eat_with_gap(&mut self) -> Option<(Option<crate::parse::Gap>, Self::Atom)> { ... }
+    // fn at_gap(&mut self) -> Option<crate::parse::Gap> { ... }
+    // fn at_beginning(&mut self) -> bool { ... }
+}

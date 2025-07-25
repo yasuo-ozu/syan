@@ -33,34 +33,31 @@ impl<Tuple> core::convert::From<Tuple> for Joint<Tuple> {
     }
 }
 
-impl<Atom, Tuple, Head, Rem, Error, HeadError, RemError> Parse<Atom> for Joint<Tuple>
+impl<Atom, Tuple, Head, Rem> Parse<Atom> for Joint<Tuple>
 where
     Tuple: crate::tuple::PopHead<Head = Head, Rem = Rem>,
-    Joint<Rem>: Parse<Atom, Error = RemError>,
+    Joint<Rem>: Parse<Atom, Error = ()>,
     Rem: crate::tuple::PopHead,
-    Head: Parse<Atom, Error = HeadError>,
-    HeadError: crate::error::Merge<RemError, Output = Error>,
+    Head: Parse<Atom, Error = ()>,
 {
-    type Error = Error;
+    type Error = ();
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
-        let head = Head::parse(&mut stream).map_err(HeadError::from_left)?;
+        let head = Head::parse(&mut stream)?;
         if stream.skip_sep() {
             // TODO:
             panic!();
         }
-        let rem = <Joint<Rem>>::parse(&mut stream)
-            .map_err(HeadError::from_right)?
-            .0;
+        let rem = <Joint<Rem>>::parse(&mut stream)?.0;
         Ok(Joint(Tuple::unsplit(head, rem)))
     }
 }
 
 impl<Atom, T> Parse<Atom> for Joint<(T,)>
 where
-    T: Parse<Atom>,
+    T: Parse<Atom, Error = ()>,
 {
-    type Error = T::Error;
+    type Error = ();
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok(Joint((T::parse(stream)?,)))
     }

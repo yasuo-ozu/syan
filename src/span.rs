@@ -70,10 +70,12 @@ impl<T, S: Span> Spanned for WithSpan<T, S> {
 
 impl<Atom, T, S: Span> Parse<WithSpan<Atom, S>> for WithSpan<T, S>
 where
-    T: Parse<Atom>,
+    T: Parse<Atom, Error = ()>,
 {
-    type Error = T::Error;
-    fn parse(stream: impl IntoParseStream<Atom = WithSpan<Atom, S>>) -> Result<Self, Self::Error> {
+    type Error = ();
+    fn parse(
+        stream: impl IntoParseStream<Atom = WithSpan<Atom, S>>,
+    ) -> Result<Self, Self::Error> {
         struct SubStream<Slot, S>(Slot, S);
 
         impl<Slot, Atom, S: Span> ParseStream for SubStream<Slot, S>

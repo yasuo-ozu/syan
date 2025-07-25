@@ -1,5 +1,5 @@
 [package]
-name = "syan"
+name = "syan-macro"
 description = "Syntactic and structural parser fundamentals, reimplementing syn crate"
 version = "0.1.0"
 edition = "2021"
@@ -14,11 +14,18 @@ categories = [
 ]
 license = "MIT"
 
-[dependencies]
-parametrized = "0.1.7"
-newer-type = "0.1.1"
-syan-macro = { path = "macro" }
+[lib]
+proc-macro = true
+path = "lib.rs"
 
-[workspace]
-members = [".", "macro"]
-resolver = "2"
+[dependencies]
+proc-macro2 = "1.0"
+template-quote = "0.4"
+proc-macro-error = { version = "1.0", default-features = false }
+derive-syn-parse = "0.2.0"
+type-leak = "0.2.0"
+itertools = "0.14.0"
+
+[dependencies.syn]
+version = "2.0"
+features = ["full", "derive", "printing", "extra-traits", "visit", "visit-mut"]

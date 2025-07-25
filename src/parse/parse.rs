@@ -1,8 +1,12 @@
 use super::{IntoParseStream, ParseStream};
 
+pub use syan_macro::Parse;
+
 pub trait Parse<Atom>: Sized {
     type Error;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error>;
+
+    // TODO: add rollback_subsequent_error()
 }
 
 macro_rules! impl_for_collection {
@@ -10,9 +14,9 @@ macro_rules! impl_for_collection {
     ([$item:ident $($p:tt)*] $self:ty, $($t:tt)*) => {
         impl<Atom: Clone, $item $($p)*> Parse<Atom> for $self
         where
-            $item: Parse<Atom>,
+            $item: Parse<Atom, Error = ()>,
         {
-            type Error = core::convert::Infallible;
+            type Error = ();
             fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
                 let mut v: Self = Default::default();
                 let mut stream = stream.into_parse_stream();
@@ -38,16 +42,16 @@ macro_rules! impl_for_map {
     ([$key:ident $($pk:tt)*][$value:ident $($pv:tt)*] $self:ty, $($t:tt)*) => {
         impl<Atom: Clone, $key $($pk)*, $value $($pv)*> Parse<Atom> for $self
         where
-            $key: Parse<Atom>,
-            $value: Parse<Atom>,
+            $key: Parse<Atom, Error = ()>,
+            $value: Parse<Atom, Error = ()>,
         {
-            type Error = core::convert::Infallible;
+            type Error = ();
             fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
                 let mut ret: Self = Default::default();
                 let mut stream = stream.into_parse_stream();
                 while let Ok((k, v)) = stream.dup(|mut stream| {
-                    if let Ok(k) = K::parse(&mut stream) {
-                        if let Ok(v) = V::parse(&mut stream) {
+                    if let Ok(k) = $key::parse(&mut stream) {
+                        if let Ok(v) = $value::parse(&mut stream) {
                             return Ok((k, v));
                         }
                     }
@@ -69,7 +73,7 @@ impl_for_map! {
 
 impl<Atom: Clone, Item> Parse<Atom> for Option<Item>
 where
-    Item: Parse<Atom>,
+    Item: Parse<Atom, Error = ()>,
 {
     type Error = core::convert::Infallible;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
@@ -80,9 +84,9 @@ where
 
 impl<const N: usize, Atom, T> Parse<Atom> for [T; N]
 where
-    T: Parse<Atom>,
+    T: Parse<Atom, Error = ()>,
 {
-    type Error = T::Error;
+    type Error = ();
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
         let mut v = Vec::new();
@@ -93,18 +97,20 @@ where
     }
 }
 
-impl<Atom, Tuple, Head, Rem, Error, HeadError> Parse<Atom> for Tuple
+impl<Atom, Tuple, Head, Rem> Parse<Atom> for Tuple
 where
     Tuple: crate::tuple::PopHead<Head = Head, Rem = Rem>,
     Rem: Parse<Atom>,
-    Head: Parse<Atom, Error = HeadError>,
-    HeadError: crate::error::Merge<Rem::Error, Output = Error>,
+    Head: Parse<Atom>,
+    Head::Error: crate::error::UnionWith<Rem::Error>,
 {
-    type Error = Error;
+    type Error = <Head::Error as crate::error::UnionWith<Rem::Error>>::Output;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
-        let head = Head::parse(&mut stream).map_err(HeadError::from_left)?;
-        let rem = Rem::parse(&mut stream).map_err(HeadError::from_right)?;
+        let head =
+            Head::parse(&mut stream).map_err(|head_err| <Head::Error as crate::error::UnionWith<Rem::Error>>::from_left(head_err))?;
+        let rem =
+            Rem::parse(&mut stream).map_err(|rem_err| <Head::Error as crate::error::UnionWith<Rem::Error>>::from_right(rem_err))?;
         Ok(Tuple::unsplit(head, rem))
     }
 }
@@ -116,9 +122,9 @@ impl<Atom> Parse<Atom> for () {
     }
 }
 
-impl<Atom, T, Error> Parse<Atom> for Result<T, Error>
+impl<Atom, T> Parse<Atom> for Result<T, ()>
 where
-    T: Parse<Atom, Error = Error>,
+    T: Parse<Atom, Error = ()>,
 {
     type Error = core::convert::Infallible;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {

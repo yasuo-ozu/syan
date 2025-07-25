@@ -1,3 +1,5 @@
+pub use syan_macro::Unparse;
+
 pub trait Unparse<Atom> {
     fn unparse<S: Emitter<Atom>>(&self, sink: &mut S) -> Result<(), S::Error>;
 }
