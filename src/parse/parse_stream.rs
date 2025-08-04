@@ -1,3 +1,4 @@
+use crate::span::{Span, Spanned};
 pub trait ParseStream {
     type Atom;
     type Error;
@@ -19,6 +20,27 @@ pub trait ParseStream {
     /// If the input streams fall into an error, it returns `true`.
     fn skip_sep(&mut self) -> bool {
         todo!()
+    }
+
+    fn validate_spacing<S: Span>(
+        &mut self,
+        is_joint: bool,
+    ) -> Result<(), crate::error::ParseError<S>>
+    where
+        Self::Atom: Spanned<Span = S>,
+    {
+        let first_peek = self.peek().map(|a| a.span()).unwrap_or(Default::default());
+        if self.skip_sep() == is_joint {
+            let last_peek = self.peek().map(|a| a.span()).unwrap_or(Default::default());
+            let span = first_peek.migrate(last_peek);
+            if is_joint {
+                Err(crate::error::ParseError::new(span, "not joint"))
+            } else {
+                Err(crate::error::ParseError::new(span, "not alone"))
+            }
+        } else {
+            Ok(())
+        }
     }
 
     /// Run sub parser with a duplicated stream.

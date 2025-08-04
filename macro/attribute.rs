@@ -1,4 +1,4 @@
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::{Spacing, Span, TokenStream};
 use proc_macro_error::abort;
 use std::collections::{HashSet, VecDeque};
 use syn::punctuated::Punctuated;
@@ -152,7 +152,7 @@ trait Adt {
         &self,
         syan: &Path,
         ident: &Ident,
-        tp_error_final: &Ident,
+        tp_error_final: &Type,
         f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream;
 
@@ -195,10 +195,23 @@ trait Adt {
                 Ident::new(&format!("__SyanErrorMerged_{n}"), Span::call_site()),
             )
         });
+
+        let error_fixed = self
+            .all_fields()
+            .iter()
+            .any(|f| f.find_attribute("joint").is_some() || f.find_attribute("alone").is_some());
+
         let mut tp_error_merged_last = tp_error_final.clone();
+
+        let tp_error_final = if error_fixed {
+            where_predicates.push(parse_quote!(#tp_atom: #syan::span::Spanned));
+            parse_quote!(#syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>)
+        } else {
+            generic_params.push(parse_quote!(#tp_error_final));
+            parse_quote!(#tp_error_final)
+        };
         let mut tp_error_hist = Vec::new();
         let mut substructs: Vec<ItemStruct> = Vec::new();
-        generic_params.push(parse_quote!(#tp_error_final));
 
         fn generate_error_mapper(
             syan: &Path,
@@ -233,11 +246,25 @@ trait Adt {
                 tp_error_hist.push(tp_error.clone());
 
                 let v_error = quote!(e);
-                let err_mapper = generate_error_mapper(syan, &tp_error_hist, &v_error);
+                let err_mapper = if error_fixed {
+                    quote!(#syan::error::UnionWith::<::core::core::convert::Infallible>::from_left(#v_stream))
+                } else {
+                    generate_error_mapper(syan, &tp_error_hist, &v_error)
+                };
+
+                let spacing = match (field.find_attribute("joint"), field.find_attribute("alone")) {
+                    (None, None) => None,
+                    (Some(_),None) => Some(Spacing::Joint),
+                    (None, Some(_)) => Some(Spacing::Alone),
+                    (Some(o1), Some(o2)) => abort!(quote!{#o1, #o2}, "Cannot implement both #[joint] and #[alone] to field `{}`", quote!{#{&field.ident}}),
+                };
 
                 let to_parse_ty = if let Some((substruct, subfields)) =
                     generate_substruct(&member, generics, ident, &field_ident, &mut fields, nonce, false)
                 {
+                    if spacing.is_some() {
+                        abort!(&field, "Cannot specify #[joint] or #[alonw] to field {}", quote!(#{&field.ident}));
+                    }
                     let field_ty = &field.ty;
                     let substruct_ident = &substruct.ident;
                     let field_ty_to_parse = parse_quote! {<#field_ty as #syan::nested::group::EmptyGroup>::Fill<
@@ -258,25 +285,36 @@ trait Adt {
                     field_ty_to_parse
                 } else {
                     ret.extend(quote!(
+                        #(if let Some(spacing) = spacing) {
+                            let #field_ident = #syan::parse::parse_stream::ParseStream::validate_spacing(
+                                &mut #v_stream,
+                                #{spacing == Spacing::Joint}
+                            )?;
+                        }
                         let #field_ident = ::core::result::Result::map_err(
                             #syan::parse::parse::Parse::parse(&mut #v_stream),
                             |#v_error| #err_mapper
                         )?;
                     ));
-
                     field.ty.clone()
                 };
 
-                where_predicates.push(parse_quote!(#to_parse_ty: #syan::parse::parse::Parse<#tp_atom, Error = #tp_error>));
-                where_predicates.push(parse_quote!(#tp_error: #syan::error::UnionWith<#tp_error_merged, Output = #tp_error_merged_last>));
-                generic_params.push(parse_quote!(#tp_error));
-                generic_params.push(parse_quote!(#tp_error_merged));
-                tp_error_merged_last = tp_error_merged;
+                if !error_fixed {
+                    where_predicates.push(parse_quote!(#to_parse_ty: #syan::parse::parse::Parse<#tp_atom, Error = #tp_error>));
+                    generic_params.push(parse_quote!(#tp_error));
+                    where_predicates.push(parse_quote!(#tp_error: #syan::error::UnionWith<#tp_error_merged, Output = #tp_error_merged_last>));
+                    generic_params.push(parse_quote!(#tp_error_merged));
+                    tp_error_merged_last = tp_error_merged;
+                } else {
+                    where_predicates.push(parse_quote!(#to_parse_ty: #syan::parse::parse::Parse<#tp_atom>));
+                }
             }
             ret
         });
-        where_predicates.push(parse_quote!(::core::convert::Infallible: #syan::error::UnionWith<::core::convert::Infallible, Output = #tp_error_merged_last>));
-        where_predicates.push(parse_quote!(#tp_error_final: #syan::error::Error));
+        if !error_fixed {
+            where_predicates.push(parse_quote!(::core::convert::Infallible: #syan::error::UnionWith<::core::convert::Infallible, Output = #tp_error_merged_last>));
+            where_predicates.push(parse_quote!(#tp_error_final: #syan::error::Error));
+        }
         quote! {
             #(for substruct in &substructs) {
                 #[derive(#syan::parse::parse::Parse)]
@@ -408,7 +446,7 @@ impl Adt for DataStruct {
         &self,
         _syan: &Path,
         ident: &Ident,
-        _tp_error_final: &Ident,
+        _tp_error_final: &Type,
         mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream {
         let fields = map_fields_to_idents(&self.fields);
@@ -459,7 +497,7 @@ impl Adt for DataEnum {
         &self,
         syan: &Path,
         ident: &Ident,
-        tp_error_final: &Ident,
+        tp_error_final: &Type,
         mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream {
         let variants = self.variants.iter().map(|v| {
