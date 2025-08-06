@@ -1,7 +1,15 @@
 pub trait PopHead: Sized {
     type Head;
     type Rem;
+    fn pop_head(self) -> (Self::Head, Self::Rem);
     fn unsplit(head: Self::Head, rem: Self::Rem) -> Self;
+}
+
+pub trait AsRef: PopHead {
+    type AsRef<'a>: PopHead<Head = &'a Self::Head>
+    where
+        Self: 'a;
+    fn as_ref(&self) -> Self::AsRef<'_>;
 }
 
 macro_rules! impl_for_tup {
@@ -9,8 +17,21 @@ macro_rules! impl_for_tup {
         impl<$A0: Sized $(,$A: Sized)*> PopHead for ($A0, $($A),*) {
             type Head = $A0;
             type Rem = ($($A,)*);
+            fn pop_head(self) -> (Self::Head, Self::Rem) {
+                let ($a0,$($a,)*) = self;
+                ($a0, ($($a,)*))
+            }
             fn unsplit($a0: Self::Head, ($($a,)*): Self::Rem) -> Self {
                 ($a0, $($a,)*)
+            }
+        }
+
+        impl<$A0 $(,$A)*> AsRef for ($A0, $($A),*) {
+            type AsRef<'a> = (&'a $A0, $(&'a $A),*) where Self: 'a;
+
+            fn as_ref(&self) -> Self::AsRef<'_> {
+                let ($a0, $($a),*) = self;
+                ($a0, $($a),*)
             }
         }
     };

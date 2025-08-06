@@ -61,7 +61,7 @@ impl<S> ParseError<S> {
         S: UnionWith<T>,
     {
         ParseError {
-            span: S::from_left(self.span),
+            span: S::use_left(self.span),
             message: self.message,
             sub_errors: self
                 .sub_errors
@@ -76,7 +76,7 @@ impl<S> ParseError<S> {
         T: UnionWith<S>,
     {
         ParseError {
-            span: T::from_right(self.span),
+            span: T::use_right(self.span),
             message: self.message,
             sub_errors: self
                 .sub_errors
@@ -109,46 +109,46 @@ pub type Result<T, S> = core::result::Result<T, ParseError<S>>;
 
 pub trait UnionWith<Rhs>: Sized {
     type Output;
-    fn from_left(self) -> Self::Output;
-    fn from_right(rhs: Rhs) -> Self::Output;
+    fn use_left(self) -> Self::Output;
+    fn use_right(rhs: Rhs) -> Self::Output;
 }
 
 impl UnionWith<Infallible> for Infallible {
     type Output = Infallible;
-    fn from_left(self) -> Self::Output {
+    fn use_left(self) -> Self::Output {
         unreachable!()
     }
-    fn from_right(rhs: Infallible) -> Self::Output {
+    fn use_right(_rhs: Infallible) -> Self::Output {
         unreachable!()
     }
 }
 
 impl<S> UnionWith<ParseError<S>> for Infallible {
     type Output = ParseError<S>;
-    fn from_left(self) -> Self::Output {
+    fn use_left(self) -> Self::Output {
         unreachable!()
     }
-    fn from_right(rhs: ParseError<S>) -> Self::Output {
+    fn use_right(rhs: ParseError<S>) -> Self::Output {
         rhs
     }
 }
 
 impl<S> UnionWith<Infallible> for ParseError<S> {
     type Output = ParseError<S>;
-    fn from_left(self) -> Self::Output {
+    fn use_left(self) -> Self::Output {
         self
     }
-    fn from_right(_: Infallible) -> Self::Output {
+    fn use_right(_: Infallible) -> Self::Output {
         unreachable!()
     }
 }
 
 impl<S> UnionWith<ParseError<S>> for ParseError<S> {
     type Output = ParseError<S>;
-    fn from_left(self) -> Self::Output {
+    fn use_left(self) -> Self::Output {
         self
     }
-    fn from_right(rhs: ParseError<S>) -> Self::Output {
+    fn use_right(rhs: ParseError<S>) -> Self::Output {
         rhs
     }
 }

@@ -16,7 +16,8 @@ where
 {
     type Error = core::convert::Infallible;
     fn write_one(&mut self, atom: Atom) -> Result<(), Self::Error> {
-        Ok(self.extend(core::iter::once(atom)))
+        self.extend(core::iter::once(atom));
+        Ok(())
     }
 
     fn write_sep(&mut self) -> Result<(), Self::Error> {

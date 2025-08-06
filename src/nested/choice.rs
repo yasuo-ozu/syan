@@ -38,9 +38,9 @@ where
         let mut stream = stream.into_parse_stream();
         match stream.dup(|stream| T::parse(stream)) {
             Ok(result) => Ok(Self(Box::new(result) as Box<dyn Any>, PhantomData)),
-            Err(t_err) => {
+            Err(_) => {
                 let result = <Choice<(U, HList)>>::parse(stream)
-                    .map_err(|u_err| <T::Error as crate::error::UnionWith<_>>::from_right(u_err))?;
+                    .map_err(<T::Error as crate::error::UnionWith<_>>::use_right)?;
                 Ok(unsafe {
                     core::mem::transmute::<Choice<(U, HList)>, Choice<(T, (U, HList))>>(result)
                 })
@@ -108,7 +108,7 @@ where
         if let Some(rf) = self.0.downcast_ref::<T>() {
             rf.fmt(f)
         } else {
-            unsafe { core::mem::transmute::<_, &Choice<HList>>(self).fmt(f) }
+            unsafe { core::mem::transmute::<&Choice<(T, HList)>, &Choice<HList>>(self).fmt(f) }
         }
     }
 }
@@ -127,7 +127,7 @@ where
         if let Some(rf) = self.0.downcast_ref::<T>() {
             rf.fmt(f)
         } else {
-            unsafe { core::mem::transmute::<_, &Choice<HList>>(self).fmt(f) }
+            unsafe { core::mem::transmute::<&Choice<(T, HList)>, &Choice<HList>>(self).fmt(f) }
         }
     }
 }

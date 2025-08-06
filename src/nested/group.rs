@@ -1,4 +1,4 @@
-use crate::parse::{Parse, ParseStream};
+use crate::parse::Parse;
 use crate::span::WithSpan;
 use crate::symbol::chars as punct;
 use std::fmt::Display;
@@ -84,7 +84,7 @@ where
         let open = O::parse(&mut stream).map_err(|o_err| {
             <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
                 C::Error,
-            >>::from_left(<O::Error as crate::error::UnionWith<T::Error>>::from_left(
+            >>::use_left(<O::Error as crate::error::UnionWith<T::Error>>::use_left(
                 o_err,
             ))
         })?;
@@ -93,81 +93,15 @@ where
         let slot = T::parse(&mut stream).map_err(|t_err| {
             <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
                 C::Error,
-            >>::from_left(<O::Error as crate::error::UnionWith<T::Error>>::from_right(
+            >>::use_left(<O::Error as crate::error::UnionWith<T::Error>>::use_right(
                 t_err,
             ))
         })?;
         let close = C::parse(&mut stream).map_err(|c_err| {
             <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
                 C::Error,
-            >>::from_right(c_err)
+            >>::use_right(c_err)
         })?;
         Ok(Group { slot, open, close })
     }
-}
-
-// TODO: ToAtoms trait not defined
-// impl<K, T, O, C> ToAtoms<K> for Group<T, O, C> { ... }
-
-#[derive(Clone)]
-struct LevelledStream<I, O, C> {
-    level: usize,
-    slot: I,
-    _phantom: core::marker::PhantomData<(O, C)>,
-}
-
-impl<I, O, C> LevelledStream<I, O, C> {
-    fn new(slot: I) -> Self {
-        Self {
-            level: 0,
-            slot,
-            _phantom: core::marker::PhantomData,
-        }
-    }
-}
-
-impl<I, O, C> core::iter::Iterator for LevelledStream<I, O, C>
-where
-    I: ParseStream,
-    O: Parse<I::Atom>,
-    C: Parse<I::Atom>,
-{
-    type Item = I::Atom;
-    fn next(&mut self) -> Option<Self::Item> {
-        // TODO: peek_parse is not defined in ParseStream trait
-        // Need to implement proper bracket tracking logic
-        self.slot.next()
-    }
-}
-
-impl<I, O, C> crate::parse::ParseStream for LevelledStream<I, O, C>
-where
-    I: ParseStream,
-    O: Parse<I::Atom> + Display,
-    C: Parse<I::Atom>,
-    Self: Clone,
-{
-    type Atom = I::Atom;
-    type Error = I::Error;
-
-    fn next(&mut self) -> Option<Self::Atom> {
-        // TODO: peek_parse is not defined in ParseStream trait
-        // Need to implement proper bracket tracking logic
-        self.slot.next()
-    }
-
-    fn peek(&mut self) -> Option<&Self::Atom> {
-        // TODO: peek_parse is not defined in ParseStream trait
-        self.slot.peek()
-    }
-
-    fn push(&mut self, token: Self::Atom) {
-        // TODO: peek_parse is not defined in ParseStream trait
-        self.slot.push(token);
-    }
-
-    // TODO: These methods are not part of the ParseStream trait interface
-    // fn eat_with_gap(&mut self) -> Option<(Option<crate::parse::Gap>, Self::Atom)> { ... }
-    // fn at_gap(&mut self) -> Option<crate::parse::Gap> { ... }
-    // fn at_beginning(&mut self) -> bool { ... }
 }

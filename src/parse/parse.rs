@@ -107,10 +107,12 @@ where
     type Error = <Head::Error as crate::error::UnionWith<Rem::Error>>::Output;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
-        let head =
-            Head::parse(&mut stream).map_err(|head_err| <Head::Error as crate::error::UnionWith<Rem::Error>>::from_left(head_err))?;
-        let rem =
-            Rem::parse(&mut stream).map_err(|rem_err| <Head::Error as crate::error::UnionWith<Rem::Error>>::from_right(rem_err))?;
+        let head = Head::parse(&mut stream).map_err(|head_err| {
+            <Head::Error as crate::error::UnionWith<Rem::Error>>::use_left(head_err)
+        })?;
+        let rem = Rem::parse(&mut stream).map_err(|rem_err| {
+            <Head::Error as crate::error::UnionWith<Rem::Error>>::use_right(rem_err)
+        })?;
         Ok(Tuple::unsplit(head, rem))
     }
 }

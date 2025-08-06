@@ -128,7 +128,7 @@ fn generate_substruct(
             generics.params.insert(0, parse_quote!(#lt))
         }
         let substruct = ItemStruct {
-            attrs: Vec::new(),
+            attrs: vec![parse_quote!(#[allow(non_camel_case_types)])],
             vis: Visibility::Inherited,
             struct_token: Default::default(),
             ident: substruct_ident.clone(),
@@ -220,9 +220,9 @@ trait Adt {
         ) -> TokenStream {
             assert!(!tp_error_hist.is_empty());
             if tp_error_hist.len() == 1 {
-                quote! { <#{&tp_error_hist[0]} as #syan::error::UnionWith<_>>::from_left(#arg) }
+                quote! { <#{&tp_error_hist[0]} as #syan::error::UnionWith<_>>::use_left(#arg) }
             } else {
-                quote! { <#{&tp_error_hist[0]} as #syan::error::UnionWith<_>>::from_right(#{
+                quote! { <#{&tp_error_hist[0]} as #syan::error::UnionWith<_>>::use_right(#{
                     generate_error_mapper(syan, &tp_error_hist[1..], arg)
                 }) }
             }
@@ -247,7 +247,7 @@ trait Adt {
 
                 let v_error = quote!(e);
                 let err_mapper = if error_fixed {
-                    quote!(#syan::error::UnionWith::<::core::core::convert::Infallible>::from_left(#v_stream))
+                    quote!(#syan::error::UnionWith::<::core::core::convert::Infallible>::use_left(#v_stream))
                 } else {
                     generate_error_mapper(syan, &tp_error_hist, &v_error)
                 };

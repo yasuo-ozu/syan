@@ -6,9 +6,7 @@ pub trait Span: Clone + core::fmt::Debug + Default {
 }
 
 impl Span for () {
-    fn migrate(self, _: Self) -> Self {
-        ()
-    }
+    fn migrate(self, _: Self) -> Self {}
 }
 
 impl<S> Span for Option<S>
@@ -24,14 +22,27 @@ where
     }
 }
 
+pub trait Map<S>: Spanned
+where
+    S: Span,
+{
+    type Output: Spanned<Span = S>;
+
+    fn map(self, replacement: impl FnMut(Self::Span) -> S) -> Self::Output;
+}
+
 pub trait Spanned {
     type Span: Span;
-    type Map<S>: Spanned
-    where
-        S: Span;
 
     fn span(&self) -> Self::Span;
-    fn map<S: Span>(self, replacement: S) -> Self::Map<S>;
+}
+
+impl<T: Spanned> Spanned for &'_ T {
+    type Span = T::Span;
+
+    fn span(&self) -> Self::Span {
+        T::span(self)
+    }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -51,19 +62,19 @@ pub struct WithSpan<T, S> {
 
 impl<T, S: Span> Spanned for WithSpan<T, S> {
     type Span = S;
-    type Map<S2>
-        = WithSpan<T, S2>
-    where
-        S2: Span;
 
     fn span(&self) -> Self::Span {
         self.span.clone()
     }
+}
 
-    fn map<S2: Span>(self, replacement: S2) -> Self::Map<S2> {
+impl<T, S: Span, S2: Span> Map<S2> for WithSpan<T, S> {
+    type Output = WithSpan<T, S2>;
+
+    fn map(self, mut replacement: impl FnMut(Self::Span) -> S2) -> Self::Output {
         WithSpan {
             slot: self.slot,
-            span: replacement,
+            span: replacement(self.span),
         }
     }
 }
@@ -73,9 +84,7 @@ where
     T: Parse<Atom, Error = ()>,
 {
     type Error = ();
-    fn parse(
-        stream: impl IntoParseStream<Atom = WithSpan<Atom, S>>,
-    ) -> Result<Self, Self::Error> {
+    fn parse(stream: impl IntoParseStream<Atom = WithSpan<Atom, S>>) -> Result<Self, Self::Error> {
         struct SubStream<Slot, S>(Slot, S);
 
         impl<Slot, Atom, S: Span> ParseStream for SubStream<Slot, S>
@@ -108,3 +117,175 @@ where
         })
     }
 }
+
+impl<T> Spanned for Vec<T>
+where
+    T: Spanned,
+{
+    type Span = T::Span;
+
+    fn span(&self) -> Self::Span {
+        self.iter()
+            .fold(T::Span::default(), |acc, item| acc.migrate(item.span()))
+    }
+}
+
+impl<T, S> Map<S> for Vec<T>
+where
+    T: Map<S>,
+    S: Span,
+{
+    type Output = Vec<T::Output>;
+
+    fn map(self, mut replacement: impl FnMut(Self::Span) -> S) -> Self::Output {
+        let span = self.span();
+        let new_span = replacement(span);
+        self.into_iter()
+            .map(|item| item.map(|_| new_span.clone()))
+            .collect()
+    }
+}
+
+impl<T> Spanned for std::collections::VecDeque<T>
+where
+    T: Spanned,
+{
+    type Span = T::Span;
+
+    fn span(&self) -> Self::Span {
+        self.iter()
+            .fold(T::Span::default(), |acc, item| acc.migrate(item.span()))
+    }
+}
+
+impl<T, S> Map<S> for std::collections::VecDeque<T>
+where
+    T: Map<S>,
+    S: Span,
+{
+    type Output = std::collections::VecDeque<T::Output>;
+
+    fn map(self, mut replacement: impl FnMut(Self::Span) -> S) -> Self::Output {
+        let span = self.span();
+        let new_span = replacement(span);
+        self.into_iter()
+            .map(|item| item.map(|_| new_span.clone()))
+            .collect()
+    }
+}
+
+impl<T> Spanned for Option<T>
+where
+    T: Spanned,
+{
+    type Span = T::Span;
+
+    fn span(&self) -> Self::Span {
+        self.as_ref().map(|item| item.span()).unwrap_or_default()
+    }
+}
+
+impl<T, S> Map<S> for Option<T>
+where
+    T: Map<S>,
+    S: Span,
+{
+    type Output = Option<T::Output>;
+
+    fn map(self, mut replacement: impl FnMut(Self::Span) -> S) -> Self::Output {
+        let span = self.span();
+        let new_span = replacement(span);
+        self.map(|item| item.map(|_| new_span.clone()))
+    }
+}
+
+impl<T, E> Spanned for Result<T, E>
+where
+    T: Spanned,
+{
+    type Span = T::Span;
+
+    fn span(&self) -> Self::Span {
+        self.as_ref()
+            .ok()
+            .map(|item| item.span())
+            .unwrap_or_default()
+    }
+}
+
+impl<T, E, S> Map<S> for Result<T, E>
+where
+    T: Map<S>,
+    S: Span,
+{
+    type Output = Result<T::Output, E>;
+
+    fn map(self, mut replacement: impl FnMut(Self::Span) -> S) -> Self::Output {
+        let span = self.span();
+        let new_span = replacement(span);
+        self.map(|item| item.map(|_| new_span.clone()))
+    }
+}
+
+impl<T, const N: usize> Spanned for [T; N]
+where
+    T: Spanned,
+{
+    type Span = T::Span;
+
+    fn span(&self) -> Self::Span {
+        self.iter()
+            .fold(T::Span::default(), |acc, item| acc.migrate(item.span()))
+    }
+}
+
+impl<T, const N: usize, S> Map<S> for [T; N]
+where
+    T: Map<S>,
+    S: Span,
+{
+    type Output = [T::Output; N];
+
+    fn map(self, mut replacement: impl FnMut(Self::Span) -> S) -> Self::Output {
+        let span = self.span();
+        let new_span = replacement(span);
+        self.map(|item| item.map(|_| new_span.clone()))
+    }
+}
+
+macro_rules! impl_for_tup {
+    (@impl $($a:ident $A:ident)*) => {
+        impl<S: Span$(,$A)*> Spanned for ($($A,)*)
+        where
+            $($A: Spanned<Span = S>,)*
+        {
+            type Span = S;
+
+            fn span(&self) -> Self::Span {
+                let ($($a,)*) = self;
+                let span = S::default();
+                $(
+                    let span = span.migrate($a.span());
+                )*
+                span
+            }
+        }
+        impl<S: Span$(,$A: Map<S, Span = Self::Span>)*> Map<S> for ($($A,)*)
+        where
+            Self: Spanned,
+        {
+            type Output = ($(<$A as Map<S>>::Output,)*);
+
+            fn map(self, mut replacement: impl FnMut(Self::Span) -> S) -> Self::Output {
+                let ($($a,)*) = self;
+                ($($a.map(|m| replacement(m)),)*)
+            }
+        }
+    };
+    () => {};
+    ($a:ident $A:ident $($t:tt)*) => {
+        impl_for_tup!(@impl $a $A $($t)*);
+        impl_for_tup!($($t)*);
+    };
+}
+impl_for_tup!(a0 A0 a1 A1 a2 A2 a3 A3 a4 A4 a5 A5 a6 A6 a7 A7 a8 A8 a9 A9 a10 A10 a11 A11 a12 A12 a13 A13);
