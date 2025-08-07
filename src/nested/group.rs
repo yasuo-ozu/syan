@@ -15,7 +15,7 @@ pub type GroupBracket<T, S> =
     Group<T, WithSpan<punct::OpenBracket, S>, WithSpan<punct::CloseBracket, S>>;
 pub type GroupAngle<T, S> = Group<T, WithSpan<punct::OpenAngle, S>, WithSpan<punct::CloseAngle, S>>;
 
-pub trait EmptyGroup: Clone {
+pub trait EmptyGroup {
     type Fill<Slot>;
 
     fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>;
@@ -42,7 +42,7 @@ impl<T, O, C> std::ops::Deref for Group<T, O, C> {
     }
 }
 
-impl<O: Clone, C: Clone> EmptyGroup for Group<(), O, C> {
+impl<O, C> EmptyGroup for Group<(), O, C> {
     type Fill<Slot> = Group<Slot, O, C>;
 
     fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self) {
@@ -67,8 +67,8 @@ impl<O: Clone, C: Clone> EmptyGroup for Group<(), O, C> {
 impl<K, T, O, C> Parse<K> for Group<T, O, C>
 where
     T: Parse<K>,
-    O: Parse<K> + Clone + Display,
-    C: Parse<K> + Clone + Display,
+    O: Parse<K> + Display,
+    C: Parse<K> + Display,
     O::Error: crate::error::UnionWith<T::Error>,
     <O::Error as crate::error::UnionWith<T::Error>>::Output: crate::error::UnionWith<C::Error>,
 {

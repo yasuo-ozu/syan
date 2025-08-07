@@ -22,3 +22,9 @@ pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
 pub fn unparse(input: TokenStream1) -> TokenStream1 {
     attribute::unparse(&parse_macro_input!(input), random()).into()
 }
+
+#[proc_macro_error]
+#[proc_macro_derive(Spanned)]
+pub fn spanned(input: TokenStream1) -> TokenStream1 {
+    attribute::spanned(&parse_macro_input!(input)).into()
+}

@@ -1,5 +1,6 @@
-use crate::parse::{IntoParseStream, Parse, ParseStream};
+use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
 use newer_type::{implement, traits};
+pub use syan_macro::Spanned;
 
 pub trait Span: Clone + core::fmt::Debug + Default {
     fn migrate(self, other: Self) -> Self;
@@ -45,6 +46,14 @@ impl<T: Spanned> Spanned for &'_ T {
     }
 }
 
+impl<T: Spanned> Spanned for &'_ mut T {
+    type Span = T::Span;
+
+    fn span(&self) -> Self::Span {
+        T::span(self)
+    }
+}
+
 #[derive(Default, Clone, Debug)]
 #[implement]
 pub struct WithSpan<T, S> {
@@ -79,37 +88,52 @@ impl<T, S: Span, S2: Span> Map<S2> for WithSpan<T, S> {
     }
 }
 
-impl<Atom, T, S: Span> Parse<WithSpan<Atom, S>> for WithSpan<T, S>
+impl<T, S, Atom> Unparse<Atom> for WithSpan<T, S>
+where
+    T: Unparse<Atom>,
+{
+    fn unparse<SS: crate::parse::unparse::Emitter<Atom>>(
+        &self,
+        sink: &mut SS,
+    ) -> Result<(), SS::Error> {
+        self.slot.unparse(sink)
+    }
+}
+
+impl<Atom: Spanned, T> Parse<Atom> for WithSpan<T, Atom::Span>
 where
     T: Parse<Atom, Error = ()>,
 {
     type Error = ();
-    fn parse(stream: impl IntoParseStream<Atom = WithSpan<Atom, S>>) -> Result<Self, Self::Error> {
+    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         struct SubStream<Slot, S>(Slot, S);
 
         impl<Slot, Atom, S: Span> ParseStream for SubStream<Slot, S>
         where
-            Slot: ParseStream<Atom = WithSpan<Atom, S>>,
+            Slot: ParseStream<Atom = Atom>,
+            Atom: Spanned<Span = S>,
         {
             type Atom = Atom;
             type Error = Slot::Error;
 
             fn next(&mut self) -> Option<Self::Atom> {
-                self.0.next().map(|a| a.slot)
+                if let Some(atom) = self.0.next() {
+                    self.1 = self.1.clone().migrate(atom.span());
+                    Some(atom)
+                } else {
+                    None
+                }
             }
 
             fn peek(&mut self) -> Option<&Self::Atom> {
-                self.0.peek().map(|ws| &ws.slot)
+                self.0.peek()
             }
 
             fn push(&mut self, token: Self::Atom) {
-                self.0.push(WithSpan {
-                    slot: token,
-                    span: S::default(),
-                })
+                self.0.push(token)
             }
         }
-        let mut stream = SubStream(stream.into_parse_stream(), S::default());
+        let mut stream = SubStream(stream.into_parse_stream(), Atom::Span::default());
         let slot = T::parse(&mut stream)?;
         Ok(WithSpan {
             slot,
@@ -224,6 +248,18 @@ where
         let span = self.span();
         let new_span = replacement(span);
         self.map(|item| item.map(|_| new_span.clone()))
+    }
+}
+
+impl<T> Spanned for [T]
+where
+    T: Spanned,
+{
+    type Span = T::Span;
+
+    fn span(&self) -> Self::Span {
+        self.iter()
+            .fold(T::Span::default(), |acc, item| acc.migrate(item.span()))
     }
 }
 

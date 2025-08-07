@@ -4,6 +4,24 @@ pub trait Unparse<Atom> {
     fn unparse<S: Emitter<Atom>>(&self, sink: &mut S) -> Result<(), S::Error>;
 }
 
+impl<Atom, T> Unparse<Atom> for &'_ T
+where
+    T: Unparse<Atom>,
+{
+    fn unparse<S: Emitter<Atom>>(&self, sink: &mut S) -> Result<(), S::Error> {
+        (*self).unparse(sink)
+    }
+}
+
+impl<Atom, T> Unparse<Atom> for &'_ mut T
+where
+    T: Unparse<Atom>,
+{
+    fn unparse<S: Emitter<Atom>>(&self, sink: &mut S) -> Result<(), S::Error> {
+        (**self).unparse(sink)
+    }
+}
+
 pub trait Emitter<Atom> {
     type Error;
     fn write_one(&mut self, atom: Atom) -> Result<(), Self::Error>;

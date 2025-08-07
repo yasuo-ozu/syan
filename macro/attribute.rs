@@ -81,11 +81,13 @@ impl FindAttribute for Attribute {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_substruct(
     member: &Member,
     generics: &Generics,
     ident: &Ident,
     field_ident: &Ident,
+    field_phantom: &Ident,
     fields: &mut VecDeque<(Member, Ident, &Field)>,
     nonce: u64,
     by_ref: bool,
@@ -123,6 +125,19 @@ fn generate_substruct(
             &format!("__SyanSubstructOf_{field_ident}_{ident}_{nonce}"),
             member.span(),
         );
+        let phantom_args: Punctuated<Type, Token![,]> = generics
+            .params
+            .iter()
+            .filter_map(|param| -> Option<Type> {
+                match param {
+                    GenericParam::Lifetime(LifetimeParam { lifetime, .. }) => {
+                        Some(parse_quote!(&#lifetime ()))
+                    }
+                    GenericParam::Type(TypeParam { ident, .. }) => Some(parse_quote!(#ident)),
+                    GenericParam::Const(_) => None,
+                }
+            })
+            .collect();
         let mut generics = generics.clone();
         if by_ref {
             generics.params.insert(0, parse_quote!(#lt))
@@ -135,7 +150,13 @@ fn generate_substruct(
             generics: generics.clone(),
             fields: Fields::Named(FieldsNamed {
                 brace_token: Default::default(),
-                named: subfields.iter().cloned().collect(),
+                named: subfields
+                    .iter()
+                    .cloned()
+                    .chain(core::iter::once(parse_quote!(
+                        #field_phantom: ::core::marker::PhantomData<#phantom_args>
+                    )))
+                    .collect(),
             }),
             semi_token: None,
         };
@@ -156,7 +177,7 @@ trait Adt {
         f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream;
 
-    fn extract_unparse_inner(
+    fn extract_inner(
         &self,
         ident: &Ident,
         v_self: &TokenStream,
@@ -228,6 +249,7 @@ trait Adt {
             }
         }
 
+        let field_phantom: Ident = parse_quote!(_syan_phantom);
         let inner = self.extract_parse_inner(syan, ident,&tp_error_final, |fields| {
             let mut ret = quote!();
 
@@ -260,7 +282,7 @@ trait Adt {
                 };
 
                 let to_parse_ty = if let Some((substruct, subfields)) =
-                    generate_substruct(&member, generics, ident, &field_ident, &mut fields, nonce, false)
+                    generate_substruct(&member, generics, ident, &field_ident, &field_phantom, &mut fields, nonce, false)
                 {
                     if spacing.is_some() {
                         abort!(&field, "Cannot specify #[joint] or #[alonw] to field {}", quote!(#{&field.ident}));
@@ -277,6 +299,7 @@ trait Adt {
                         )?;
                         let (#{ &substruct.ident } {
                             #(for subfield in &subfields) { #{&subfield.ident.as_ref().unwrap()}, }
+                            #field_phantom: _
                         }, #field_ident) = #syan::nested::group::EmptyGroup::unfill(#field_ident);
                     ));
 
@@ -321,6 +344,7 @@ trait Adt {
                 #[syan(#syan)]
                 #substruct
             }
+            #[automatically_derived]
             impl< #generic_params > #trait_fullpath for #ident #ty_generics
             #(if !where_predicates.is_empty()) { where #where_predicates}
             {
@@ -349,7 +373,7 @@ trait Adt {
         let ty_generics = generics.split_for_impl().1;
         proc_macro_error::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
-                fn unparse<S: #syan::parse::unparse::Emitter<#tp_atom>>(&self, _: &mut S) -> ::core::result::Result<(), S::Error> {
+                fn unparse<__Syan_Emitter: #syan::parse::unparse::Emitter<#tp_atom>>(&self, _: &mut __Syan_Emitter) -> ::core::result::Result<(), __Syan_Emitter::Error> {
                     ::core::unimplemented!()
                 }
             }
@@ -361,7 +385,7 @@ trait Adt {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let where_predicates = field_tys
+        let mut where_predicates = field_tys
             .iter()
             .map(|ty| -> WherePredicate {
                 parse_quote!(#ty: #syan::parse::unparse::Unparse<#tp_atom>)
@@ -370,32 +394,54 @@ trait Adt {
         let v_sink: Ident = parse_quote!(__syan_sink);
         let v_self: TokenStream = quote!(self);
         let mut substructs = Vec::new();
-        let inner = self.extract_unparse_inner(ident, &v_self, |fields| {
+        let field_phantom: Ident = parse_quote!(_syan_phantom);
+        let inner = self.extract_inner(ident, &v_self, |fields| {
             let mut ret = quote!();
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
 
             while let Some((member, field_ident, field)) = fields.pop_front() {
-
+                let field_ty = &field.ty;
                 // Check if this field has grouped subfields (though for unparse we don't generate substructs)
-                if let Some((substruct, subfields)) =
-                    generate_substruct(&member, generics, ident, &field_ident, &mut fields, nonce, true)
-                {
+                if let Some((substruct, subfields)) = generate_substruct(
+                    &member,
+                    generics,
+                    ident,
+                    &field_ident,
+                    &field_phantom,
+                    &mut fields,
+                    nonce,
+                    true,
+                ) {
                     ret.extend(quote! {
                         use #syan::nested::group::EmptyGroup as _;
-                        let #field_ident = <#{&field.ty} as #syan::nested::group::EmptyGroup>::Fill::fill(
-                            #field_ident.clone(),
+                        let #field_ident = <#field_ty as #syan::nested::group::EmptyGroup>::fill(
+                            ::core::clone::Clone::clone(#field_ident),
                             #{&substruct.ident} {
                                 #(for subfield in &subfields) { #{&subfield.ident}, }
+                                #field_phantom: ::core::marker::PhantomData
                             }
                         );
                     });
+
+                    let fill_ty = quote! {
+                        #{&substruct.ident}
+                        <'syan_substruct_ref, #{&generics.params}>
+                    };
+                    where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup + ::core::clone::Clone));
+                    where_predicates.push(parse_quote!(for<'syan_substruct_ref> <#field_ty as #syan::nested::group::EmptyGroup>::Fill<#fill_ty>: #syan::parse::unparse::Unparse<#tp_atom>));
                     substructs.push(substruct);
+                } else {
+                    where_predicates
+                        .push(parse_quote!(#field_ty: #syan::parse::unparse::Unparse<#tp_atom>));
                 }
                 ret.extend(quote!(
                     #syan::parse::unparse::Unparse::unparse(&#field_ident, #v_sink)?;
                 ));
             }
-            ret
+            quote! {
+                #ret
+                ::core::result::Result::Ok(())
+            }
         });
 
         quote! {
@@ -404,11 +450,69 @@ trait Adt {
                 #[syan(#syan)]
                 #substruct
             }
+            #[automatically_derived]
             impl< #generic_params > #trait_fullpath for #ident #ty_generics
             #(if !where_predicates.is_empty()) { where #where_predicates}
             {
-                fn unparse<S: #syan::parse::unparse::Emitter<#tp_atom>>(&self, #v_sink: &mut S) -> ::core::result::Result<(), S::Error> {
+                fn unparse<__Syan_Emitter: #syan::parse::unparse::Emitter<#tp_atom>>(&self, #v_sink: &mut __Syan_Emitter) -> ::core::result::Result<(), __Syan_Emitter::Error> {
                     #inner
+                }
+            }
+        }
+    }
+
+    fn extract_spanned(&self, syan: &Path, generics: &Generics, ident: &Ident) -> TokenStream {
+        let trait_fullpath: Path = parse_quote!(#syan::span::Spanned);
+        let ty_generics = generics.split_for_impl().1;
+        let mut generic_params = generics.params.clone();
+        let tp_span: Ident = parse_quote!(__Syan_Span);
+        generic_params.push(parse_quote!(#tp_span: #syan::span::Span));
+        proc_macro_error::append_dummy(quote! {
+            impl< #generic_params > #trait_fullpath for #ident #ty_generics {
+                type Span = #tp_span;
+
+                fn span(&self) -> Self::Span {
+                    ::core::unimplemented!()
+                }
+            }
+        });
+
+        let fields = self.all_fields();
+
+        if fields.is_empty() {
+            abort!(Span::call_site(), "no field exists");
+        }
+        let field_tys = fields
+            .iter()
+            .map(|field| &field.ty)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let v_self: TokenStream = quote!(self);
+
+        let span_impl = self.extract_inner(ident, &v_self, |fields| {
+            quote! {
+                let __syan_span = <#tp_span as ::core::default::Default>::default();
+                #(for (_, field, _) in fields){
+                    let __syan_span = #syan::span::Span::migrate(
+                        __syan_span,
+                        #syan::span::Spanned::span(#field)
+                    );
+                }
+                __syan_span
+            }
+        });
+
+        quote! {
+            #[automatically_derived]
+            impl <#generic_params> #trait_fullpath for #ident #ty_generics
+            where
+                #(#field_tys: #syan::span::Spanned<Span = #tp_span>,)*
+            {
+                type Span = #tp_span;
+
+                fn span(&self) -> Self::Span {
+                    #span_impl
                 }
             }
         }
@@ -466,7 +570,7 @@ impl Adt for DataStruct {
         }
     }
 
-    fn extract_unparse_inner(
+    fn extract_inner(
         &self,
         ident: &Ident,
         v_self: &TokenStream,
@@ -483,7 +587,6 @@ impl Adt for DataStruct {
                 {#(for (_, field_ident, _) in &fields) {#field_ident,}}
             } = #v_self;
             #inner
-            ::core::result::Result::Ok(())
         }
     }
 }
@@ -532,7 +635,7 @@ impl Adt for DataEnum {
         }
     }
 
-    fn extract_unparse_inner(
+    fn extract_inner(
         &self,
         ident: &Ident,
         v_self: &TokenStream,
@@ -553,10 +656,7 @@ impl Adt for DataEnum {
                     #(if let Fields::Named(_) = &variant.fields) {
                         {#(for (_, field_ident, _) in &fields) {#field_ident,}}
                     } => {
-                        {
-                            #inner
-                        };
-                        ::core::result::Result::Ok(())
+                        #inner
                     }
                 }
             }
@@ -586,6 +686,17 @@ pub fn unparse(input: &DeriveInput, nonce: u64) -> TokenStream {
         Data::Enum(data_enum) => {
             data_enum.extract_unparse(&syan, &input.generics, &input.ident, nonce)
         }
+        _ => abort!(input, "Bad data"),
+    }
+}
+
+pub fn spanned(input: &DeriveInput) -> TokenStream {
+    let syan = input.attrs.get_syan();
+    match &input.data {
+        Data::Struct(data_struct) => {
+            data_struct.extract_spanned(&syan, &input.generics, &input.ident)
+        }
+        Data::Enum(data_enum) => data_enum.extract_spanned(&syan, &input.generics, &input.ident),
         _ => abort!(input, "Bad data"),
     }
 }
