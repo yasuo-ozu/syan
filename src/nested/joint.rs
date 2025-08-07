@@ -1,5 +1,15 @@
 use crate::parse::{IntoParseStream, Parse, ParseStream};
+use crate::tuple::PopHeadRef;
+use newer_type::{implement, traits};
+
+#[implement(traits::Debug)]
 pub struct Joint<Tuple>(pub Tuple);
+
+impl<Tuple: Default> Default for Joint<Tuple> {
+    fn default() -> Self {
+        Joint(Tuple::default())
+    }
+}
 
 mod _joint_impl {
     #[macro_export]
@@ -60,5 +70,38 @@ where
     type Error = ();
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok(Joint((T::parse(stream)?,)))
+    }
+}
+
+impl<Tuple> core::fmt::Display for Joint<Tuple>
+where
+    Tuple: crate::tuple::AsRef,
+    for<'a> <Tuple as crate::tuple::AsRef>::AsRef<'a>: DisplayImpl,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.as_ref().fmt(f)
+    }
+}
+
+trait DisplayImpl {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result;
+}
+
+impl<Tuple, Head, Rem> DisplayImpl for Tuple
+where
+    Tuple: PopHeadRef<Head = Head, Rem = Rem>,
+    Head: core::fmt::Display,
+    Rem: DisplayImpl,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (head, rem) = self.pop_head_ref();
+        head.fmt(f)?;
+        rem.fmt(f)
+    }
+}
+
+impl DisplayImpl for () {
+    fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        Ok(())
     }
 }

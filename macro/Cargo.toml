@@ -20,6 +20,7 @@ path = "lib.rs"
 
 [dependencies]
 proc-macro2 = "1.0"
+quote = "1.0"
 template-quote = "0.4"
 proc-macro-error = { version = "1.0", default-features = false }
 derive-syn-parse = "0.2.0"

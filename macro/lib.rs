@@ -3,6 +3,7 @@ use proc_macro_error::proc_macro_error;
 use syn::*;
 
 mod attribute;
+mod symbol;
 
 fn random() -> u64 {
     use std::hash::{BuildHasher, Hasher};
@@ -27,4 +28,11 @@ pub fn unparse(input: TokenStream1) -> TokenStream1 {
 #[proc_macro_derive(Spanned)]
 pub fn spanned(input: TokenStream1) -> TokenStream1 {
     attribute::spanned(&parse_macro_input!(input)).into()
+}
+
+#[proc_macro_error]
+#[proc_macro]
+pub fn symbol(input: TokenStream1) -> TokenStream1 {
+    let args = parse_macro_input!(input as symbol::SymbolArgs);
+    symbol::symbol(args).into()
 }

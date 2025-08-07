@@ -2,6 +2,7 @@ use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
 use core::{marker::PhantomData, mem::transmute};
 use std::any::Any;
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! _Choice {
     (@impl) => {()};
@@ -12,6 +13,8 @@ macro_rules! _Choice {
         $crate::nested::choice::Choice<$crate::nested::choice::Choice!(@impl $($t:ty),*)>
     };
 }
+
+#[doc(inline)]
 pub use _Choice as Choice;
 
 pub struct Choice<HList>(Box<dyn Any>, PhantomData<HList>);
