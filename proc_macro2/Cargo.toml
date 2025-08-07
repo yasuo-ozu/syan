@@ -1,0 +1,19 @@
+[package]
+name = "syan-proc-macro2"
+description = "proc-macro2 wrapper for syan parser"
+version = "0.1.0"
+edition = "2021"
+authors = ["Yasuo Ozu <yasuo@ozu.email>"]
+repository = "https://github.com/yasuo-ozu/syan"
+keywords = ["macros", "syn", "parser", "proc-macro", "parsing"]
+categories = [
+  "data-structures",
+  "rust-patterns",
+  "parser-implementations",
+]
+license = "MIT"
+
+[dependencies]
+syan = { path = "../core" }
+proc-macro2 = "1.0"
+syn = "2.0"

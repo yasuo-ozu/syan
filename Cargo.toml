@@ -1,24 +1,3 @@
-[package]
-name = "syan"
-description = "Syntactic and structural parser fundamentals, reimplementing syn crate"
-version = "0.1.0"
-edition = "2021"
-authors = ["Yasuo Ozu <yasuo@ozu.email>"]
-repository = "https://github.com/yasuo-ozu/syan"
-keywords = ["macros", "syn", "parser", "proc-macro", "parsing"]
-categories = [
-  "data-structures",
-  "no-std::no-alloc",
-  "rust-patterns",
-  "parser-implementations",
-]
-license = "MIT"
-
-[dependencies]
-parametrized = "0.1.7"
-newer-type = "0.1.1"
-syan-macro = { path = "macro" }
-
 [workspace]
-members = [".", "macro"]
+members = ["core", "macro", "proc_macro2", "rust"]
 resolver = "2"
