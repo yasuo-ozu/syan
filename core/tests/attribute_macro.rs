@@ -2,6 +2,7 @@ use syan::nested::group::GroupParen;
 use syan::parse::{Parse, Unparse};
 use syan::span::{Spanned, WithSpan};
 
+#[allow(unused)]
 #[derive(Clone, Parse, Unparse, Spanned)]
 struct MyStruct<S> {
     a: WithSpan<u32, S>,
@@ -11,6 +12,7 @@ struct MyStruct<S> {
     group_a: WithSpan<String, S>,
 }
 
+#[allow(unused)]
 #[derive(Parse, Unparse, Spanned)]
 enum MyEnum<S> {
     V1 {

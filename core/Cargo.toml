@@ -17,4 +17,12 @@ license = "MIT"
 [dependencies]
 parametrized = "0.1.7"
 newer-type = "0.1.1"
+proc-macro2 = { version = "1.0", optional = true }
 syan-macro = { path = "../macro" }
+
+[dev-dependencies]
+template-quote = "0.4"
+
+[features]
+default = ["proc_macro2"]
+proc_macro2 = ["dep:proc-macro2"]

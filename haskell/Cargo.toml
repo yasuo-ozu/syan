@@ -1,19 +1,23 @@
 [package]
-name = "syan-proc-macro2"
-description = "proc-macro2 wrapper for syan parser"
+name = "syan-haskell"
+description = "Haskell AST definitions and parser implementation using syan"
 version = "0.1.0"
 edition = "2021"
 authors = ["Yasuo Ozu <yasuo@ozu.email>"]
 repository = "https://github.com/yasuo-ozu/syan"
-keywords = ["macros", "syn", "parser", "proc-macro", "parsing"]
+keywords = ["haskell", "ast", "parser", "proc-macro", "parsing"]
 categories = [
   "data-structures",
-  "rust-patterns",
   "parser-implementations",
 ]
 license = "MIT"
 
 [dependencies]
 syan = { path = "../core" }
+syan-macro = { path = "../macro" }
 proc-macro2 = "1.0"
-syn = "2.0"
+quote = "1.0"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

@@ -1,27 +1,43 @@
-use proc_macro2::{Punct, TokenStream};
+use proc_macro2::{Span, TokenStream, TokenTree};
 use syn::parse::{Parse, ParseStream};
 use syn::*;
 use template_quote::quote;
 
 #[derive(Debug)]
-pub enum SymbolToken {
-    Ident(Ident),
-    Punct(Punct),
-    LitInt(LitInt),
-    LitChar(LitChar),
+pub struct SymbolToken {
+    slot: String,
+    span: Span,
 }
 
 impl Parse for SymbolToken {
     fn parse(input: ParseStream) -> Result<Self> {
-        if input.peek(Ident) {
-            Ok(SymbolToken::Ident(input.parse()?))
-        } else if input.peek(LitInt) {
-            Ok(SymbolToken::LitInt(input.parse()?))
+        if input.peek(LitInt) {
+            let litint = input.parse::<LitInt>().unwrap();
+            if !litint.suffix().is_empty() {
+                return Err(Error::new(litint.span(), "cannot contain suffix"));
+            }
+            Ok(SymbolToken {
+                slot: litint.base10_digits().to_owned(),
+                span: litint.span(),
+            })
         } else if input.peek(LitChar) {
-            Ok(SymbolToken::LitChar(input.parse()?))
+            let litchar = input.parse::<LitChar>().unwrap();
+            Ok(SymbolToken {
+                slot: litchar.value().to_string(),
+                span: litchar.span(),
+            })
         } else {
-            // Try to parse as Punct - this handles various punctuation
-            Ok(SymbolToken::Punct(input.parse()?))
+            match input.parse::<TokenTree>()? {
+                TokenTree::Ident(ident) => Ok(SymbolToken {
+                    slot: ident.to_string(),
+                    span: ident.span(),
+                }),
+                TokenTree::Punct(punct) => Ok(SymbolToken {
+                    slot: punct.to_string(),
+                    span: punct.span(),
+                }),
+                o => Err(Error::new(o.span(), "bad token")),
+            }
         }
     }
 }
@@ -130,55 +146,15 @@ fn create_joint_type(char_types: Vec<TokenStream>, syan_path: &Ident) -> TokenSt
     }
 }
 
-fn token_to_char_types(token: &SymbolToken, syan_path: &Ident) -> Vec<TokenStream> {
-    match token {
-        SymbolToken::Ident(ident) => {
-            let ident_str = ident.to_string();
-            ident_str
-                .chars()
-                .map(|c| char_to_type_path(c, syan_path, ident.span()))
-                .collect()
-        }
-        SymbolToken::Punct(punct) => {
-            let punct_char = punct.as_char();
-            vec![char_to_type_path(punct_char, syan_path, punct.span())]
-        }
-        SymbolToken::LitInt(lit_int) => {
-            // Convert to decimal string without suffixes
-            match lit_int.base10_parse::<u64>() {
-                Ok(value) => {
-                    let decimal_str = value.to_string();
-                    decimal_str
-                        .chars()
-                        .map(|c| char_to_type_path(c, syan_path, lit_int.span()))
-                        .collect()
-                }
-                Err(_) => {
-                    // Fallback: use the token string directly, stripping suffixes
-                    let token_str = lit_int.to_string();
-                    let clean_str =
-                        token_str.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '_');
-                    clean_str
-                        .chars()
-                        .map(|c| char_to_type_path(c, syan_path, lit_int.span()))
-                        .collect()
-                }
-            }
-        }
-        SymbolToken::LitChar(lit_char) => {
-            let char_value = lit_char.value();
-            vec![char_to_type_path(char_value, syan_path, lit_char.span())]
-        }
-    }
-}
-
 pub fn symbol(args: SymbolArgs) -> TokenStream {
     let syan_path = &args.syan_path;
 
     // Convert all tokens to character types
     let mut char_types = Vec::new();
     for token in &args.tokens {
-        char_types.extend(token_to_char_types(token, syan_path));
+        for c in token.slot.chars() {
+            char_types.push(char_to_type_path(c, syan_path, token.span));
+        }
     }
 
     // Generate the Joint type using recursive algorithm
