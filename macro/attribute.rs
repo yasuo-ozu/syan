@@ -1,5 +1,6 @@
 use proc_macro2::{Spacing, Span, TokenStream};
 use proc_macro_error::abort;
+use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -154,7 +155,7 @@ fn generate_substruct(
                     .iter()
                     .cloned()
                     .chain(core::iter::once(parse_quote!(
-                        #field_phantom: ::core::marker::PhantomData<#phantom_args>
+                        #field_phantom: ::core::marker::PhantomData<(#phantom_args,)>
                     )))
                     .collect(),
             }),
@@ -195,6 +196,19 @@ trait Adt {
         let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
         let trait_fullpath: Path = parse_quote!(#syan::parse::parse::Parse<#tp_atom>);
         let mut generic_params = generics.params.clone();
+        for param in &mut generic_params {
+            match param {
+                GenericParam::Type(type_param) => {
+                    type_param.eq_token = None;
+                    type_param.default = None;
+                }
+                GenericParam::Const(const_param) => {
+                    const_param.eq_token = None;
+                    const_param.default = None;
+                }
+                _ => (),
+            }
+        }
         generic_params.push(parse_quote!(#tp_atom));
         let ty_generics = generics.split_for_impl().1;
         proc_macro_error::append_dummy(quote! {
@@ -216,6 +230,7 @@ trait Adt {
                 Ident::new(&format!("__SyanErrorMerged_{n}"), Span::call_site()),
             )
         });
+        let mut wrapper_counter = 0usize;
 
         let error_fixed = self
             .all_fields()
@@ -232,6 +247,7 @@ trait Adt {
             parse_quote!(#tp_error_final)
         };
         let mut tp_error_hist = Vec::new();
+        let mut tp_error_map = HashMap::new();
         let mut substructs: Vec<ItemStruct> = Vec::new();
 
         fn generate_error_mapper(
@@ -264,15 +280,6 @@ trait Adt {
                     );
                 }
 
-                let (tp_error, tp_error_merged) = tp_error_combi_generator.next().unwrap();
-                tp_error_hist.push(tp_error.clone());
-
-                let v_error = quote!(e);
-                let err_mapper = if error_fixed {
-                    quote!(#syan::error::UnionWith::<::core::core::convert::Infallible>::use_left(#v_stream))
-                } else {
-                    generate_error_mapper(syan, &tp_error_hist, &v_error)
-                };
 
                 let spacing = match (field.find_attribute("joint"), field.find_attribute("alone")) {
                     (None, None) => None,
@@ -281,31 +288,54 @@ trait Adt {
                     (Some(o1), Some(o2)) => abort!(quote!{#o1, #o2}, "Cannot implement both #[joint] and #[alone] to field `{}`", quote!{#{&field.ident}}),
                 };
 
-                let to_parse_ty = if let Some((substruct, subfields)) =
-                    generate_substruct(&member, generics, ident, &field_ident, &field_phantom, &mut fields, nonce, false)
-                {
+                let substruct = generate_substruct(&member, generics, ident, &field_ident, &field_phantom, &mut fields, nonce, false);
+                    let field_ty = &field.ty;
+
+                let to_parse_ty = if let Some((substruct, _)) = &substruct {
                     if spacing.is_some() {
                         abort!(&field, "Cannot specify #[joint] or #[alonw] to field {}", quote!(#{&field.ident}));
                     }
-                    let field_ty = &field.ty;
                     let substruct_ident = &substruct.ident;
                     let field_ty_to_parse = parse_quote! {<#field_ty as #syan::nested::group::EmptyGroup>::Fill<
                         #substruct_ident  #ty_generics
                     >};
+                    field_ty_to_parse
+                } else {
+                    field.ty.clone()
+                };
+
+                let v_error = quote!(e);
+                let err_mapper = if error_fixed {
+                    where_predicates.push(parse_quote!(#to_parse_ty: #syan::_imp::ParseImpl<#wrapper_counter, #tp_atom>));
+                        quote!(#syan::error::UnionWith::<::core::core::convert::Infallible>::use_left(#v_stream))
+                } else {
+                    tp_error_map.entry(to_parse_ty.clone()).or_insert_with(|| {
+                    let (tp_error, tp_error_merged) = tp_error_combi_generator.next().unwrap();
+                    tp_error_hist.push(tp_error.clone());
+                    where_predicates.push(parse_quote!(#to_parse_ty: #syan::_imp::ParseImpl<#wrapper_counter, #tp_atom, Error = #tp_error>));
+                    generic_params.push(parse_quote!(#tp_error));
+                    where_predicates.push(parse_quote!(#tp_error: #syan::error::UnionWith<#tp_error_merged, Output = #tp_error_merged_last>));
+                    generic_params.push(parse_quote!(#tp_error_merged));
+                    tp_error_merged_last = tp_error_merged;
+
+                        generate_error_mapper(syan, &tp_error_hist, &v_error)
+                    }).clone()
+                };
+
+                if let Some((substruct, subfields)) = substruct {
                     ret.extend(quote!(
-                        let #field_ident: #field_ty_to_parse = ::core::result::Result::map_err(
-                            #syan::parse::parse::Parse::parse(&mut #v_stream),
+                        let #field_ident: #to_parse_ty = ::core::result::Result::map_err(
+                            <#to_parse_ty as #syan::parse::parse::Parse<#tp_atom>>::parse(&mut #v_stream),
                             |#v_error| #err_mapper
                         )?;
                         let (#{ &substruct.ident } {
-                            #(for subfield in &subfields) { #{&subfield.ident.as_ref().unwrap()}, }
+                            #(for subfield in subfields) { #{&subfield.ident.as_ref().unwrap()}, }
                             #field_phantom: _
                         }, #field_ident) = #syan::nested::group::EmptyGroup::unfill(#field_ident);
                     ));
 
                     substructs.push(substruct);
                     where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup));
-                    field_ty_to_parse
                 } else {
                     ret.extend(quote!(
                         #(if let Some(spacing) = spacing) {
@@ -315,22 +345,13 @@ trait Adt {
                             )?;
                         }
                         let #field_ident = ::core::result::Result::map_err(
-                            #syan::parse::parse::Parse::parse(&mut #v_stream),
+                            <#to_parse_ty as #syan::parse::parse::Parse<#tp_atom>>::parse(&mut #v_stream),
                             |#v_error| #err_mapper
                         )?;
                     ));
-                    field.ty.clone()
-                };
-
-                if !error_fixed {
-                    where_predicates.push(parse_quote!(#to_parse_ty: #syan::parse::parse::Parse<#tp_atom, Error = #tp_error>));
-                    generic_params.push(parse_quote!(#tp_error));
-                    where_predicates.push(parse_quote!(#tp_error: #syan::error::UnionWith<#tp_error_merged, Output = #tp_error_merged_last>));
-                    generic_params.push(parse_quote!(#tp_error_merged));
-                    tp_error_merged_last = tp_error_merged;
-                } else {
-                    where_predicates.push(parse_quote!(#to_parse_ty: #syan::parse::parse::Parse<#tp_atom>));
                 }
+                    wrapper_counter += 1;
+
             }
             ret
         });
@@ -369,6 +390,19 @@ trait Adt {
         let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
         let trait_fullpath: Path = parse_quote!(#syan::parse::unparse::Unparse<#tp_atom>);
         let mut generic_params = generics.params.clone();
+        for param in &mut generic_params {
+            match param {
+                GenericParam::Type(type_param) => {
+                    type_param.eq_token = None;
+                    type_param.default = None;
+                }
+                GenericParam::Const(const_param) => {
+                    const_param.eq_token = None;
+                    const_param.default = None;
+                }
+                _ => (),
+            }
+        }
         generic_params.push(parse_quote!(#tp_atom));
         let ty_generics = generics.split_for_impl().1;
         proc_macro_error::append_dummy(quote! {
@@ -423,9 +457,11 @@ trait Adt {
                         );
                     });
 
+                    let mut fill_ty_generics = generics.clone();
+                    fill_ty_generics.params.insert(0, parse_quote!('syan_substruct_ref));
                     let fill_ty = quote! {
                         #{&substruct.ident}
-                        <'syan_substruct_ref, #{&generics.params}>
+                        #{fill_ty_generics.split_for_impl().1}
                     };
                     where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup + ::core::clone::Clone));
                     where_predicates.push(parse_quote!(for<'syan_substruct_ref> <#field_ty as #syan::nested::group::EmptyGroup>::Fill<#fill_ty>: #syan::parse::unparse::Unparse<#tp_atom>));
@@ -465,6 +501,7 @@ trait Adt {
         let trait_fullpath: Path = parse_quote!(#syan::span::Spanned);
         let ty_generics = generics.split_for_impl().1;
         let mut generic_params = generics.params.clone();
+        let mut where_predicates: Punctuated<WherePredicate, token::Comma> = Punctuated::new();
         let tp_span: Ident = parse_quote!(__Syan_Span);
         generic_params.push(parse_quote!(#tp_span: #syan::span::Span));
         proc_macro_error::append_dummy(quote! {
@@ -482,16 +519,16 @@ trait Adt {
         if fields.is_empty() {
             abort!(Span::call_site(), "no field exists");
         }
-        let field_tys = fields
-            .iter()
-            .map(|field| &field.ty)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
         let v_self: TokenStream = quote!(self);
+        let mut wrapper_counter = 0usize;
 
         let span_impl = self.extract_inner(ident, &v_self, |fields| {
-            quote! {
+            for (_, _,Field{ty,..}) in fields {
+            where_predicates.push(parse_quote! {
+                #ty: #syan::span::Spanned<Span = #tp_span>
+            });
+            }
+            let ret = quote! {
                 let __syan_span = <#tp_span as ::core::default::Default>::default();
                 #(for (_, field, _) in fields){
                     let __syan_span = #syan::span::Span::migrate(
@@ -500,14 +537,15 @@ trait Adt {
                     );
                 }
                 __syan_span
-            }
+            };
+            wrapper_counter += 1;
+            ret
         });
 
         quote! {
             #[automatically_derived]
             impl <#generic_params> #trait_fullpath for #ident #ty_generics
-            where
-                #(#field_tys: #syan::span::Spanned<Span = #tp_span>,)*
+            #(if !where_predicates.is_empty()){where #where_predicates}
             {
                 type Span = #tp_span;
 

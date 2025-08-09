@@ -1,136 +1,40 @@
-use syan::span::{Span, Spanned};
+use syan::{
+    span::WithSpan,
+    source::proc_macro2::literal::*,
+    parse::{Parse, Unparse},
+};
+use type_macro_derive_tricks::macro_derive;
+
+/// Wrapper for Float that implements PartialEq, Eq, Hash
+#[derive(Clone, Debug)]
+pub struct FloatWrapper(pub Float);
+
+impl PartialEq for FloatWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_string() == other.0.to_string()
+    }
+}
+
+impl Eq for FloatWrapper {}
+
+impl std::hash::Hash for FloatWrapper {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_string().hash(state);
+    }
+}
 
 /// A Rust literal
-#[derive(Debug, Clone)]
-pub enum Lit<S: Span> {
-    Str(LitStr<S>),
-    ByteStr(LitByteStr<S>),
-    Byte(LitByte<S>),
-    Char(LitChar<S>),
-    Int(LitInt<S>),
-    Float(LitFloat<S>),
-    Bool(LitBool<S>),
-}
-
-impl<S: Span> Spanned for Lit<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        match self {
-            Lit::Str(lit) => lit.span(),
-            Lit::ByteStr(lit) => lit.span(),
-            Lit::Byte(lit) => lit.span(),
-            Lit::Char(lit) => lit.span(),
-            Lit::Int(lit) => lit.span(),
-            Lit::Float(lit) => lit.span(),
-            Lit::Bool(lit) => lit.span(),
-        }
-    }
-}
-
-/// String literal
-#[derive(Debug, Clone)]
-pub struct LitStr<S: Span> {
-    pub value: String,
-    pub span: S,
-}
-
-impl<S: Span> Spanned for LitStr<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.span.clone()
-    }
-}
-
-/// Byte string literal
-#[derive(Debug, Clone)]
-pub struct LitByteStr<S: Span> {
-    pub value: Vec<u8>,
-    pub span: S,
-}
-
-impl<S: Span> Spanned for LitByteStr<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.span.clone()
-    }
-}
-
-/// Byte literal
-#[derive(Debug, Clone)]
-pub struct LitByte<S: Span> {
-    pub value: u8,
-    pub span: S,
-}
-
-impl<S: Span> Spanned for LitByte<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.span.clone()
-    }
-}
-
-/// Character literal
-#[derive(Debug, Clone)]
-pub struct LitChar<S: Span> {
-    pub value: char,
-    pub span: S,
-}
-
-impl<S: Span> Spanned for LitChar<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.span.clone()
-    }
-}
-
-/// Integer literal
-#[derive(Debug, Clone)]
-pub struct LitInt<S: Span> {
-    pub value: u64,
-    pub suffix: Option<String>,
-    pub span: S,
-}
-
-impl<S: Span> Spanned for LitInt<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.span.clone()
-    }
-}
-
-/// Float literal
-#[derive(Debug, Clone)]
-pub struct LitFloat<S: Span> {
-    pub value: f64,
-    pub suffix: Option<String>,
-    pub span: S,
-}
-
-impl<S: Span> Spanned for LitFloat<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.span.clone()
-    }
-}
-
-/// Boolean literal
-#[derive(Debug, Clone)]
-pub struct LitBool<S: Span> {
-    pub value: bool,
-    pub span: S,
-}
-
-impl<S: Span> Spanned for LitBool<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.span.clone()
-    }
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub enum Lit<S> {
+    Str(WithSpan<Str, S>),
+    StrRaw(WithSpan<StrRaw, S>),
+    ByteStr(WithSpan<ByteStr, S>),
+    ByteStrRaw(WithSpan<ByteStrRaw, S>),
+    CStr(WithSpan<CStr, S>),
+    CStrRaw(WithSpan<CStrRaw, S>),
+    Byte(WithSpan<ByteChar, S>),
+    Char(WithSpan<Char, S>),
+    Int(WithSpan<Integer, S>),
+    Float(WithSpan<FloatWrapper, S>),
+    Bool(WithSpan<Bool, S>),
 }

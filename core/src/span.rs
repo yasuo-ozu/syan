@@ -102,9 +102,9 @@ where
 
 impl<Atom: Spanned, T> Parse<Atom> for WithSpan<T, Atom::Span>
 where
-    T: Parse<Atom, Error = ()>,
+    T: Parse<Atom>,
 {
-    type Error = ();
+    type Error = T::Error;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         struct SubStream<Slot, S>(Slot, S);
 

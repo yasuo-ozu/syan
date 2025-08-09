@@ -1,8 +1,9 @@
-use crate::parse::Parse;
+use crate::parse::{Parse, Unparse};
+use crate::span::Spanned;
 use crate::span::WithSpan;
 use crate::symbol::chars as punct;
-use std::fmt::Display;
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Parse, Unparse, Spanned)]
+#[syan(crate)]
 pub struct Group<T, O, C> {
     pub open: O,
     pub slot: T,
@@ -61,47 +62,5 @@ impl<O, C> EmptyGroup for Group<(), O, C> {
             open: self.open,
             close: self.close,
         }
-    }
-}
-
-impl<K, T, O, C> Parse<K> for Group<T, O, C>
-where
-    T: Parse<K>,
-    O: Parse<K> + Display,
-    C: Parse<K> + Display,
-    O::Error: crate::error::UnionWith<T::Error>,
-    <O::Error as crate::error::UnionWith<T::Error>>::Output: crate::error::UnionWith<C::Error>,
-{
-    type Error =
-        <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
-            C::Error,
-        >>::Output;
-    //fn parse(stream: &mut impl ParseStream<Atom = K>) -> crate::error::Result<Self, K> {
-    //}
-
-    fn parse(stream: impl crate::parse::IntoParseStream<Atom = K>) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
-        let open = O::parse(&mut stream).map_err(|o_err| {
-            <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
-                C::Error,
-            >>::use_left(<O::Error as crate::error::UnionWith<T::Error>>::use_left(
-                o_err,
-            ))
-        })?;
-        // TODO: The proper bracket-aware parsing logic is complex and needs more work
-        // For now, just parse T directly from the stream
-        let slot = T::parse(&mut stream).map_err(|t_err| {
-            <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
-                C::Error,
-            >>::use_left(<O::Error as crate::error::UnionWith<T::Error>>::use_right(
-                t_err,
-            ))
-        })?;
-        let close = C::parse(&mut stream).map_err(|c_err| {
-            <<O::Error as crate::error::UnionWith<T::Error>>::Output as crate::error::UnionWith<
-                C::Error,
-            >>::use_right(c_err)
-        })?;
-        Ok(Group { slot, open, close })
     }
 }

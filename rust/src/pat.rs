@@ -1,9 +1,14 @@
-use syan::span::{Span, Spanned};
-use crate::{Path, Type, token::*};
+use crate::{tokens::*, Path};
+use syan::{
+    nested::group::{GroupBrace, GroupBracket, GroupParen},
+    parse::{Parse, Unparse},
+    symbol::Token,
+};
+use type_macro_derive_tricks::macro_derive;
 
 /// A Rust pattern
-#[derive(Debug, Clone)]
-pub enum Pat<S: Span> {
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub enum Pat<S, Tokens = std::convert::Infallible> {
     Ident(PatIdent<S>),
     Struct(PatStruct<S>),
     TupleStruct(PatTupleStruct<S>),
@@ -11,144 +16,178 @@ pub enum Pat<S: Span> {
     Tuple(PatTuple<S>),
     Box(PatBox<S>),
     Ref(PatRef<S>),
-    Lit(PatLit<S>),
-    Range(PatRange<S>),
+    // Lit(PatLit<S, Tokens>),
+    Range(PatRange<S, Tokens>),
     Slice(PatSlice<S>),
     Rest(PatRest<S>),
     Paren(PatParen<S>),
-    Wild(UnderscoreToken<S>),
+    Wild(Token![S => _]),
     Macro(PatMacro<S>),
     Or(PatOr<S>),
-}
-
-impl<S: Span> Spanned for Pat<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        match self {
-            Pat::Ident(p) => p.span(),
-            Pat::Struct(p) => p.span(),
-            Pat::TupleStruct(p) => p.span(),
-            Pat::Path(p) => p.span(),
-            Pat::Tuple(p) => p.span(),
-            Pat::Box(p) => p.span(),
-            Pat::Ref(p) => p.span(),
-            Pat::Lit(p) => p.span(),
-            Pat::Range(p) => p.span(),
-            Pat::Slice(p) => p.span(),
-            Pat::Rest(p) => p.span(),
-            Pat::Paren(p) => p.span(),
-            Pat::Wild(p) => p.span(),
-            Pat::Macro(p) => p.span(),
-            Pat::Or(p) => p.span(),
-        }
-    }
+    // Additional patterns from rustc_ast
+    Never(PatNever<S>),
+    Err(PatErr<S>),
 }
 
 /// Identifier pattern with optional binding mode and subpattern
-#[derive(Debug, Clone)]
-pub struct PatIdent<S: Span> {
-    pub by_ref: Option<RefToken<S>>,
-    pub mutability: Option<MutToken<S>>,
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatIdent<S> {
+    pub by_ref: Option<Token![S => ref]>,
+    pub mutability: Option<Token![S => mut]>,
     pub ident: Ident<S>,
-    pub subpat: Option<(AtToken<S>, Box<Pat<S>>)>,
-}
-
-impl<S: Span> Spanned for PatIdent<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        let start = self.by_ref.as_ref()
-            .map(|r| r.span())
-            .or_else(|| self.mutability.as_ref().map(|m| m.span()))
-            .unwrap_or_else(|| self.ident.span());
-        
-        let end = self.subpat.as_ref()
-            .map(|(_, pat)| pat.span())
-            .unwrap_or_else(|| self.ident.span());
-        
-        start.migrate(end)
-    }
+    pub subpat: Option<(Token![S => @], Box<Pat<S>>)>,
 }
 
 /// Struct pattern
-#[derive(Debug, Clone)]
-pub struct PatStruct<S: Span> {
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatStruct<S> {
     pub path: Path<S>,
-    pub brace_token: BraceToken<S>,
+    pub brace_token: GroupBrace<(), S>,
     pub fields: Vec<FieldPat<S>>,
-    pub dot2_token: Option<Dot2Token<S>>,
-}
-
-impl<S: Span> Spanned for PatStruct<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.path.span().migrate(self.brace_token.span())
-    }
+    pub dot2_token: Option<Token![S => ..]>,
 }
 
 /// Field pattern in struct pattern
-#[derive(Debug, Clone)]
-pub struct FieldPat<S: Span> {
-    pub member: Member<S>,
-    pub colon_token: Option<ColonToken<S>>,
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct FieldPat<S> {
+    pub member: PatMember<S>,
+    pub colon_token: Option<Token![S => :]>,
     pub pat: Box<Pat<S>>,
 }
 
-impl<S: Span> Spanned for FieldPat<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.member.span().migrate(self.pat.span())
-    }
-}
-
-/// Struct field member (identifier or index)
-#[derive(Debug, Clone)]
-pub enum Member<S: Span> {
+/// Pattern struct field member (identifier or index)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub enum PatMember<S> {
     Named(Ident<S>),
-    Unnamed(crate::LitInt<S>),
+    Unnamed(syan::span::WithSpan<syan::source::proc_macro2::literal::Integer, S>),
 }
 
-impl<S: Span> Spanned for Member<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        match self {
-            Member::Named(ident) => ident.span(),
-            Member::Unnamed(index) => index.span(),
-        }
-    }
+
+/// Tuple struct pattern (Foo(a, b, c))
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatTupleStruct<S> {
+    pub path: crate::Path<S>,
+    pub paren_token: GroupParen<(), S>,
+    pub elems: Vec<crate::Pat<S>>,
 }
 
-// Placeholder implementations for other pattern types
-macro_rules! define_pat_stub {
-    ($name:ident) => {
-        #[derive(Debug, Clone)]
-        pub struct $name<S: Span> {
-            pub span: S,
-        }
-        
-        impl<S: Span> Spanned for $name<S> {
-            type Span = S;
-            
-            fn span(&self) -> Self::Span {
-                self.span.clone()
-            }
-        }
-    };
+/// Path pattern
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatPath<S> {
+    pub qself: Option<crate::expr::QSelf<S>>,
+    pub path: crate::Path<S>,
 }
 
-define_pat_stub!(PatTupleStruct);
-define_pat_stub!(PatPath);
-define_pat_stub!(PatTuple);
-define_pat_stub!(PatBox);
-define_pat_stub!(PatRef);
-define_pat_stub!(PatLit);
-define_pat_stub!(PatRange);
-define_pat_stub!(PatSlice);
-define_pat_stub!(PatRest);
-define_pat_stub!(PatParen);
-define_pat_stub!(PatMacro);
-define_pat_stub!(PatOr);
+/// Tuple pattern (a, b, c)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatTuple<S> {
+    pub paren_token: GroupParen<(), S>,
+    pub elems: Vec<crate::Pat<S>>,
+}
+
+/// Box pattern (box pat)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatBox<S> {
+    pub box_token: Token![S => box],
+    pub pat: Box<crate::Pat<S>>,
+}
+
+/// Reference pattern (&pat or &mut pat)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatRef<S> {
+    pub and_token: Token![S => &],
+    pub mutability: Option<Token![S => mut]>,
+    pub pat: Box<crate::Pat<S>>,
+}
+
+/// Literal pattern (42, "hello", true)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatLit<S, Tokens = std::convert::Infallible> {
+    pub expr: Box<crate::Expr<S, Tokens>>,
+}
+/// Range pattern (1..=10, ..=10, 1..)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatRange<S, Tokens = std::convert::Infallible> {
+    pub lo: Option<Box<crate::Expr<S, Tokens>>>,
+    pub limits: crate::expr::RangeLimits<S>,
+    pub hi: Option<Box<crate::Expr<S, Tokens>>>,
+}
+
+/// Slice pattern ([a, b, ..rest])
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatSlice<S> {
+    pub bracket_token: GroupBracket<(), S>,
+    pub elems: Vec<crate::Pat<S>>,
+}
+
+/// Rest pattern (..)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatRest<S> {
+    pub dot2_token: Token![S => ..],
+}
+
+/// Parenthesized pattern
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatParen<S> {
+    pub paren_token: GroupParen<(), S>,
+    pub pat: Box<crate::Pat<S>>,
+}
+
+/// Macro pattern
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatMacro<S> {
+    pub mac: crate::expr::Macro<S>,
+}
+
+/// Or pattern (A | B | C)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatOr<S> {
+    pub cases: Vec<crate::Pat<S>>,
+}
+
+/// Never pattern (!)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatNever<S> {
+    pub bang_token: Token![S => !],
+}
+
+/// Error pattern (for error recovery)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PatErr<S> {
+    pub span: S,
+}
+
+/// Binding annotation (ref/mut combinations)
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct BindingAnnotation<S> {
+    pub by_ref: ByRef<S>,
+    pub mutbl: PatMutability<S>,
+}
+
+/// Reference binding
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub enum ByRef<S> {
+    Yes(Token![S => ref]),
+    No,
+}
+
+/// Pattern mutability
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub enum PatMutability<S> {
+    Mut(Token![S => mut]),
+    Not,
+}
+
+/// Range end syntax
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub enum RangeEnd<S> {
+    Included(Token![S => ..=]),
+    Excluded(Token![S => ..]),
+}
+
+/// Range syntax  
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub enum RangeSyntax<S> {
+    DotDotDot(Token![S => ...]),
+    DotDotEq(Token![S => ..=]),
+}

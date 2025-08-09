@@ -1,70 +1,32 @@
-use syan::{
-    parse::{Parse, ParseStream, Unparse, IntoParseStream},
-    span::{Span, Spanned},
-    nested::{Choice, Punctuated},
-};
 
-pub mod item;
+pub mod attr;
 pub mod expr;
-pub mod stmt;
-pub mod ty;
+pub mod generics;
+pub mod item;
+pub mod lit;
 pub mod pat;
 pub mod path;
-pub mod lit;
-pub mod token;
+pub mod stmt;
+pub mod tokens;
+pub mod ty;
+pub mod vis;
 
-pub use item::*;
+pub use attr::*;
 pub use expr::*;
-pub use stmt::*;
-pub use ty::*;
+pub use generics::*;
+pub use item::*;
+pub use lit::*;
 pub use pat::*;
 pub use path::*;
-pub use lit::*;
-pub use token::*;
+pub use stmt::*;
+pub use tokens::*;
+pub use ty::*;
+pub use vis::*;
 
 /// Top-level Rust source file
-#[derive(Debug, Clone)]
-pub struct File<S: Span> {
-    pub items: Vec<Item<S>>,
-}
 
-impl<S: Span> Spanned for File<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.items.span()
-    }
-}
-
-impl<Atom: Spanned<Span = S>, S: Span> Parse<Atom> for File<S>
-where
-    Item<S>: Parse<Atom, Error = ()>,
-{
-    type Error = ();
-    
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
-        let mut items = Vec::new();
-        
-        while stream.peek().is_some() {
-            items.push(Item::parse(&mut stream)?);
-        }
-        
-        Ok(File { items })
-    }
-}
-
-impl<Atom, S: Span> Unparse<Atom> for File<S>
-where
-    Item<S>: Unparse<Atom>,
-{
-    fn unparse<SS: syan::parse::unparse::Emitter<Atom>>(
-        &self,
-        sink: &mut SS,
-    ) -> Result<(), SS::Error> {
-        for item in &self.items {
-            item.unparse(sink)?;
-        }
-        Ok(())
-    }
+pub struct File<S, Tokens = std::convert::Infallible> {
+    pub shebang: Option<String>,
+    pub attrs: Vec<Attribute<S>>,
+    pub items: Vec<Item<S, Tokens>>,
 }

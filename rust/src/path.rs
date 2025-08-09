@@ -1,159 +1,62 @@
-use syan::span::{Span, Spanned};
-use crate::{Type, token::*};
+use crate::{tokens::*, Type};
+use syan::{
+    nested::group::GroupParen,
+    parse::{Parse, Unparse},
+    symbol::Token,
+};
+use type_macro_derive_tricks::macro_derive;
 
 /// A path like `std::collections::HashMap`
-#[derive(Debug, Clone)]
-pub struct Path<S: Span> {
-    pub leading_colon: Option<ColonColonToken<S>>,
-    pub segments: Vec<PathSegment<S>>,
-}
-
-impl<S: Span> Spanned for Path<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        let start = self.leading_colon.as_ref()
-            .map(|c| c.span())
-            .unwrap_or_else(|| {
-                self.segments.first()
-                    .map(|s| s.span())
-                    .unwrap_or_default()
-            });
-        
-        let end = self.segments.last()
-            .map(|s| s.span())
-            .unwrap_or_else(|| start.clone());
-        
-        start.migrate(end)
-    }
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct Path<S, Tokens = std::convert::Infallible> {
+    pub leading_colon: Option<Token![S => ::]>,
+    pub segments: Vec<PathSegment<S, Tokens>>,
 }
 
 /// A segment of a path like `HashMap` in `std::collections::HashMap`
-#[derive(Debug, Clone)]
-pub struct PathSegment<S: Span> {
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct PathSegment<S, Tokens = std::convert::Infallible> {
     pub ident: Ident<S>,
-    pub arguments: Option<PathArguments<S>>,
-}
-
-impl<S: Span> Spanned for PathSegment<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        let end = self.arguments.as_ref()
-            .map(|a| a.span())
-            .unwrap_or_else(|| self.ident.span());
-        self.ident.span().migrate(end)
-    }
+    pub arguments: Option<PathArguments<S, Tokens>>,
 }
 
 /// Path arguments like `<T, U>` in `HashMap<T, U>`
-#[derive(Debug, Clone)]
-pub enum PathArguments<S: Span> {
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub enum PathArguments<S, Tokens = std::convert::Infallible> {
     None,
-    AngleBracketed(AngleBracketedGenericArguments<S>),
+    AngleBracketed(AngleBracketedGenericArguments<S, Tokens>),
     Parenthesized(ParenthesizedGenericArguments<S>),
 }
 
-impl<S: Span> Spanned for PathArguments<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        match self {
-            PathArguments::None => S::default(),
-            PathArguments::AngleBracketed(args) => args.span(),
-            PathArguments::Parenthesized(args) => args.span(),
-        }
-    }
-}
-
 /// Angle-bracketed generic arguments `<T, U>`
-#[derive(Debug, Clone)]
-pub struct AngleBracketedGenericArguments<S: Span> {
-    pub lt_token: LtToken<S>,
-    pub args: Vec<GenericArgument<S>>,
-    pub gt_token: GtToken<S>,
-}
-
-impl<S: Span> Spanned for AngleBracketedGenericArguments<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.lt_token.span().migrate(self.gt_token.span())
-    }
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct AngleBracketedGenericArguments<S, Tokens = std::convert::Infallible> {
+    pub lt_token: Token![S => <],
+    pub args: Vec<crate::GenericArgument<S, Tokens>>,
+    pub gt_token: Token![S => >],
 }
 
 /// Parenthesized generic arguments `(A, B) -> C`
-#[derive(Debug, Clone)]
-pub struct ParenthesizedGenericArguments<S: Span> {
-    pub paren_token: ParenToken<S>,
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct ParenthesizedGenericArguments<S> {
+    pub paren_token: GroupParen<(), S>,
     pub inputs: Vec<Type<S>>,
-    pub output: Option<(RArrowToken<S>, Type<S>)>,
-}
-
-impl<S: Span> Spanned for ParenthesizedGenericArguments<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        let end = self.output.as_ref()
-            .map(|(_, ty)| ty.span())
-            .unwrap_or_else(|| self.paren_token.span());
-        self.paren_token.span().migrate(end)
-    }
-}
-
-/// A generic argument
-#[derive(Debug, Clone)]
-pub enum GenericArgument<S: Span> {
-    Type(Type<S>),
-    Const(crate::Expr<S>),
-    Lifetime(Lifetime<S>),
-    Binding(Binding<S>),
-    Constraint(Constraint<S>),
-}
-
-impl<S: Span> Spanned for GenericArgument<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        match self {
-            GenericArgument::Type(ty) => ty.span(),
-            GenericArgument::Const(expr) => expr.span(),
-            GenericArgument::Lifetime(lt) => lt.span(),
-            GenericArgument::Binding(binding) => binding.span(),
-            GenericArgument::Constraint(constraint) => constraint.span(),
-        }
-    }
+    pub output: Option<(Token![S => ->], Type<S>)>,
 }
 
 /// Lifetime like `'a`
-#[derive(Debug, Clone)]
-pub struct Lifetime<S: Span> {
-    pub apostrophe: ApostropheToken<S>,
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+pub struct Lifetime<S> {
+    pub apostrophe: Token![S => '\''],
     pub ident: Ident<S>,
-}
-
-impl<S: Span> Spanned for Lifetime<S> {
-    type Span = S;
-    
-    fn span(&self) -> Self::Span {
-        self.apostrophe.span().migrate(self.ident.span())
-    }
 }
 
 // Placeholder implementations
 macro_rules! define_path_stub {
     ($name:ident) => {
-        #[derive(Debug, Clone)]
-        pub struct $name<S: Span> {
+        #[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
+        pub struct $name<S> {
             pub span: S,
-        }
-        
-        impl<S: Span> Spanned for $name<S> {
-            type Span = S;
-            
-            fn span(&self) -> Self::Span {
-                self.span.clone()
-            }
         }
     };
 }

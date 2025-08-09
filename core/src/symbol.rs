@@ -1,4 +1,6 @@
 pub mod chars {
+    pub unsafe trait AtomParsedToAllChars {}
+
     macro_rules! impl_char {
         ((@add_doc $name:ident $(($token:tt))?  $char:literal)) => {
             #[doc(hidden)]
@@ -37,6 +39,11 @@ pub mod chars {
                     }
                 }
             )*
+
+            unsafe impl<Atom> AtomParsedToAllChars for Atom
+            where
+                $($name: crate::parse::Parse<Atom>,)*
+            {}
 
             #[doc(hidden)]
             #[macro_export]
@@ -130,6 +137,7 @@ pub mod chars {
 
 mod imp {
     #[doc(hidden)]
+    #[derive(Copy, Clone, PartialEq, Eq, Hash)]
     pub enum _Symbol<T> {
         /// The symbol instance variant.
         ///
@@ -167,6 +175,36 @@ mod imp {
     impl<T: Default + core::fmt::Debug> core::fmt::Debug for _Symbol<T> {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             T::default().fmt(f)
+        }
+    }
+
+    impl<Atom, T> crate::parse::Parse<Atom> for _Symbol<T>
+    where
+        Atom: crate::span::Spanned + super::chars::AtomParsedToAllChars,
+        T: crate::parse::Parse<Atom>,
+    {
+        type Error = T::Error;
+
+        fn parse(
+            stream: impl crate::parse::IntoParseStream<Atom = Atom>,
+        ) -> Result<Self, Self::Error> {
+            T::parse(stream)?;
+            Ok(Self::Symbol)
+        }
+    }
+
+    impl<Atom, T> crate::parse::Unparse<Atom> for _Symbol<T>
+    where
+        T: Default + core::fmt::Display,
+        Atom: From<String> + super::chars::AtomParsedToAllChars,
+    {
+        fn unparse<S: crate::parse::unparse::Emitter<Atom>>(
+            &self,
+            sink: &mut S,
+        ) -> Result<(), S::Error> {
+            let symbol_str = T::default().to_string();
+            let atom = Atom::from(symbol_str);
+            sink.write_one(atom)
         }
     }
 }
@@ -231,6 +269,14 @@ pub use imp::*;
 macro_rules! _Symbol {
     ($($t:tt)*) => {
         $crate::_imp::syan_macro::symbol!($crate, $($t)*)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! _Token {
+    ($s:ty => $($t:tt)*) => {
+        $crate::span::WithSpan<$crate::_imp::syan_macro::symbol!($crate, $($t)*), $s>
     };
 }
 
@@ -316,3 +362,6 @@ macro_rules! _Symbol {
 /// - Proc-macro implementation in `syan_macro::symbol`
 #[doc(inline)]
 pub use crate::_Symbol as Symbol;
+
+#[doc(inline)]
+pub use crate::_Token as Token;

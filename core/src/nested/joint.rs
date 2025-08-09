@@ -2,6 +2,7 @@ use crate::parse::{IntoParseStream, Parse, ParseStream};
 use crate::tuple::PopHeadRef;
 use newer_type::{implement, traits};
 
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[implement(traits::Debug)]
 pub struct Joint<Tuple>(pub Tuple);
 

@@ -14,9 +14,9 @@ macro_rules! impl_for_collection {
     ([$item:ident $($p:tt)*] $self:ty, $($t:tt)*) => {
         impl<Atom: Clone, $item $($p)*> Parse<Atom> for $self
         where
-            $item: Parse<Atom, Error = ()>,
+            $item: Parse<Atom>,
         {
-            type Error = ();
+            type Error = $item::Error;
             fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
                 let mut v: Self = Default::default();
                 let mut stream = stream.into_parse_stream();
@@ -40,12 +40,13 @@ impl_for_collection!(
 macro_rules! impl_for_map {
     () => {};
     ([$key:ident $($pk:tt)*][$value:ident $($pv:tt)*] $self:ty, $($t:tt)*) => {
-        impl<Atom: Clone, $key $($pk)*, $value $($pv)*> Parse<Atom> for $self
+        impl<Atom: Clone, Err, $key $($pk)*, $value $($pv)*> Parse<Atom> for $self
         where
-            $key: Parse<Atom, Error = ()>,
-            $value: Parse<Atom, Error = ()>,
+            $key: Parse<Atom>,
+            $value: Parse<Atom>,
+            <$key as Parse<Atom>>::Error: crate::error::UnionWith<$value::Error, Output = Err>,
         {
-            type Error = ();
+            type Error = Err;
             fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
                 let mut ret: Self = Default::default();
                 let mut stream = stream.into_parse_stream();
@@ -71,9 +72,19 @@ impl_for_map! {
     [K: std::cmp::Ord] [V] std::collections::BTreeMap<K, V>,
 }
 
+impl<Atom, Item> Parse<Atom> for Box<Item>
+where
+    Item: Parse<Atom>,
+{
+    type Error = Item::Error;
+    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+        Ok(Box::new(Item::parse(stream)?))
+    }
+}
+
 impl<Atom: Clone, Item> Parse<Atom> for Option<Item>
 where
-    Item: Parse<Atom, Error = ()>,
+    Item: Parse<Atom>,
 {
     type Error = core::convert::Infallible;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
@@ -84,9 +95,9 @@ where
 
 impl<const N: usize, Atom, T> Parse<Atom> for [T; N]
 where
-    T: Parse<Atom, Error = ()>,
+    T: Parse<Atom>,
 {
-    type Error = ();
+    type Error = T::Error;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
         let mut v = Vec::new();
@@ -97,39 +108,28 @@ where
     }
 }
 
-impl<Atom, Tuple, Head, Rem> Parse<Atom> for Tuple
+impl<Atom, T, E> Parse<Atom> for Result<T, E>
 where
-    Tuple: crate::tuple::PopHead<Head = Head, Rem = Rem>,
-    Rem: Parse<Atom>,
-    Head: Parse<Atom>,
-    Head::Error: crate::error::UnionWith<Rem::Error>,
-{
-    type Error = <Head::Error as crate::error::UnionWith<Rem::Error>>::Output;
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
-        let head = Head::parse(&mut stream).map_err(|head_err| {
-            <Head::Error as crate::error::UnionWith<Rem::Error>>::use_left(head_err)
-        })?;
-        let rem = Rem::parse(&mut stream).map_err(|rem_err| {
-            <Head::Error as crate::error::UnionWith<Rem::Error>>::use_right(rem_err)
-        })?;
-        Ok(Tuple::unsplit(head, rem))
-    }
-}
-
-impl<Atom> Parse<Atom> for () {
-    type Error = core::convert::Infallible;
-    fn parse(_: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        Ok(())
-    }
-}
-
-impl<Atom, T> Parse<Atom> for Result<T, ()>
-where
-    T: Parse<Atom, Error = ()>,
+    T: Parse<Atom, Error = E>,
 {
     type Error = core::convert::Infallible;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok(T::parse(stream))
     }
 }
+
+impl<Atom: crate::span::Spanned, T> Parse<Atom> for core::marker::PhantomData<T> {
+    type Error = core::convert::Infallible;
+    fn parse(_stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+        Ok(Default::default())
+    }
+}
+
+impl<Atom: crate::span::Spanned> Parse<Atom> for core::convert::Infallible {
+    type Error = crate::error::ParseError<Atom::Span>;
+    fn parse(_stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+        panic!()
+    }
+}
+
+impl<const COUNT: usize, Atom, T> crate::_imp::ParseImpl<COUNT, Atom> for T where T: Parse<Atom> {}

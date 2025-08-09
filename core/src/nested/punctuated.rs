@@ -1,11 +1,25 @@
+use crate::parse::{Parse, Unparse};
+use crate::span::Spanned;
 use parametrized::{Parametrized, ParametrizedIntoIter, ParametrizedIterMut};
 
 #[parametrized::parametrized(default = 0, iter_mut = 0, into_iter = 0)]
-struct PunctuatedInner<Item, Punct>(Option<(Item, Vec<(Punct, Item)>)>);
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse, Spanned)]
+#[syan(crate)]
+struct PunctuatedInner<Item, Punct>(Option<(Box<Item>, Vec<(Punct, Item)>)>);
 
 /// An punctuated list representation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse, Spanned)]
+#[syan(crate)]
 pub struct Punctuated<Item, Punct> {
     inner: PunctuatedInner<Item, Punct>,
+}
+
+impl<Item, Punct> Default for Punctuated<Item, Punct> {
+    fn default() -> Self {
+        Self {
+            inner: PunctuatedInner(None),
+        }
+    }
 }
 
 impl<Item, Punct> Punctuated<Item, Punct> {
@@ -15,6 +29,104 @@ impl<Item, Punct> Punctuated<Item, Punct> {
 
     pub fn iter_mut(&mut self) -> IterMut<'_, Item, Punct> {
         self.into_iter()
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.inner.0 {
+            None => 0,
+            Some((_, vec)) => 1 + vec.len(),
+        }
+    }
+
+    pub fn first(&self) -> Option<&Item> {
+        self.inner.0.as_ref().map(|(first, _)| first.as_ref())
+    }
+
+    pub fn last(&self) -> Option<&Item> {
+        match &self.inner.0 {
+            None => None,
+            Some((first, vec)) => {
+                if vec.is_empty() {
+                    Some(first.as_ref())
+                } else {
+                    vec.last().map(|(_, item)| item)
+                }
+            }
+        }
+    }
+
+    pub fn first_mut(&mut self) -> Option<&mut Item> {
+        self.inner.0.as_mut().map(|(first, _)| first.as_mut())
+    }
+
+    pub fn last_mut(&mut self) -> Option<&mut Item> {
+        match &mut self.inner.0 {
+            None => None,
+            Some((first, vec)) => {
+                if vec.is_empty() {
+                    Some(first.as_mut())
+                } else {
+                    vec.last_mut().map(|(_, item)| item)
+                }
+            }
+        }
+    }
+
+    pub fn remove(&mut self, index: usize) -> Option<Item> {
+        match self.inner.0.take() {
+            None => None,
+            Some((first_item, mut vec)) => {
+                if index == 0 {
+                    let removed = *first_item;
+                    if vec.is_empty() {
+                        // List becomes empty
+                    } else {
+                        let (_, new_first) = vec.remove(0);
+                        self.inner.0 = Some((Box::new(new_first), vec));
+                    }
+                    Some(removed)
+                } else if index <= vec.len() {
+                    let removed = vec.remove(index - 1).1;
+                    self.inner.0 = Some((first_item, vec));
+                    Some(removed)
+                } else {
+                    // Index out of bounds, restore the original state
+                    self.inner.0 = Some((first_item, vec));
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl<Item, Punct: Default> Punctuated<Item, Punct> {
+    pub fn push(&mut self, item: Item) {
+        match &mut self.inner.0 {
+            None => {
+                self.inner.0 = Some((Box::new(item), Vec::new()));
+            }
+            Some((_, ref mut vec)) => {
+                vec.push((Punct::default(), item));
+            }
+        }
+    }
+
+    pub fn insert(&mut self, index: usize, item: Item) {
+        match (&mut self.inner.0, index) {
+            (None, 0) => {
+                self.inner.0 = Some((Box::new(item), Vec::new()));
+            }
+            (Some((first_item, ref mut vec)), 0) => {
+                let old_first = std::mem::replace(first_item, Box::new(item));
+                vec.insert(0, (Punct::default(), *old_first));
+            }
+            (Some((_, ref mut vec)), i) if i <= vec.len() + 1 => {
+                vec.insert(i - 1, (Punct::default(), item));
+            }
+            _ => {
+                panic!("Index out of bounds");
+            }
+        }
     }
 }
 
@@ -111,5 +223,21 @@ impl<Item: Sized, Punct> std::iter::IntoIterator for Punctuated<Item, Punct> {
         IntoIter(
             <PunctuatedInner<Item, Punct> as ParametrizedIntoIter<0>>::param_into_iter(self.inner),
         )
+    }
+}
+
+impl<Item, Punct: Default> std::iter::FromIterator<Item> for Punctuated<Item, Punct> {
+    fn from_iter<T: IntoIterator<Item = Item>>(iter: T) -> Self {
+        let mut punctuated = Self::default();
+        punctuated.extend(iter);
+        punctuated
+    }
+}
+
+impl<Item, Punct: Default> std::iter::Extend<Item> for Punctuated<Item, Punct> {
+    fn extend<T: IntoIterator<Item = Item>>(&mut self, iter: T) {
+        for item in iter {
+            self.push(item);
+        }
     }
 }
