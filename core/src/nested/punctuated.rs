@@ -1,14 +1,15 @@
-use crate::parse::{Parse, Unparse};
+use crate::error::{ParseError, UnionWith};
+use crate::parse::{Parse, ParseStream, Unparse};
 use crate::span::Spanned;
 use parametrized::{Parametrized, ParametrizedIntoIter, ParametrizedIterMut};
 
 #[parametrized::parametrized(default = 0, iter_mut = 0, into_iter = 0)]
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse, Spanned)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Unparse, Spanned)]
 #[syan(crate)]
 struct PunctuatedInner<Item, Punct>(Option<(Box<Item>, Vec<(Punct, Item)>)>);
 
 /// An punctuated list representation.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse, Spanned)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Unparse, Spanned)]
 #[syan(crate)]
 pub struct Punctuated<Item, Punct> {
     inner: PunctuatedInner<Item, Punct>,
@@ -239,5 +240,57 @@ impl<Item, Punct: Default> std::iter::Extend<Item> for Punctuated<Item, Punct> {
         for item in iter {
             self.push(item);
         }
+    }
+}
+
+impl<Atom: Clone + Spanned, Item, Punct> Parse<Atom> for Punctuated<Item, Punct>
+where
+    Item: Parse<Atom>,
+    Punct: Parse<Atom>,
+    Item::Error: crate::error::UnionWith<Punct::Error>,
+    <Item::Error as crate::error::UnionWith<Punct::Error>>::Output: Into<ParseError<<Atom as Spanned>::Span>>,
+{
+    type Error = <Item::Error as crate::error::UnionWith<Punct::Error>>::Output;
+
+    fn parse(stream: impl crate::parse::IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+        let mut stream = stream.into_parse_stream();
+
+        // Try to parse the first item
+        let first_item = match stream.dup(|stream| Item::parse(stream)) {
+            Ok(item) => item,
+            Err(_) => {
+                // No items, return empty punctuated list
+                return Ok(Self::default());
+            }
+        };
+
+        let mut pairs = Vec::new();
+
+        // Parse subsequent (punct, item) pairs
+        loop {
+            let pair: Result<_, Self::Error> = stream.dup(|mut stream| {
+                let punct = Punct::parse(&mut stream)
+                    .map_err(<Item::Error as UnionWith<Punct::Error>>::use_right)?;
+                let item = Item::parse(&mut stream)
+                    .map_err(<Item::Error as UnionWith<Punct::Error>>::use_left)?;
+                Ok((punct, item))
+            });
+
+            match pair {
+                Ok((punct, item)) => pairs.push((punct, item)),
+                Err(_) => break,
+            }
+        }
+
+        Ok(Self {
+            inner: PunctuatedInner(Some((Box::new(first_item), pairs))),
+        })
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        error.into()
     }
 }

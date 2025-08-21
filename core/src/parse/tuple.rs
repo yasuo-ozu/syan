@@ -1,4 +1,6 @@
 use super::{IntoParseStream, Parse};
+use crate::error::ParseError;
+use crate::span::Spanned;
 
 #[doc(hidden)]
 macro_rules! __syan_wrap_err {
@@ -37,7 +39,7 @@ macro_rules! __syan_tuple_parse_impl_one {
      ($($a:ident),+)) => {
         impl<
             $($A,)+
-            __SyanMacroAtom,
+            __SyanMacroAtom: Spanned,
             __SyanError,
             $($E,)+
             $($M,)+
@@ -50,7 +52,7 @@ macro_rules! __syan_tuple_parse_impl_one {
             // Infallible: UnionWith<Infallible, Output = last M>
             ::core::convert::Infallible:
                 crate::error::UnionWith<::core::convert::Infallible, Output = $MLast>,
-            __SyanError: crate::error::Error,
+            __SyanError: crate::error::Error + Into<ParseError<<__SyanMacroAtom as Spanned>::Span>>,
         {
             type Error = __SyanError;
             fn parse(
@@ -59,6 +61,29 @@ macro_rules! __syan_tuple_parse_impl_one {
                 let mut __syan_stream = __syan_stream.into_parse_stream();
                 __syan_parse_bindings!(@inner __syan_stream []; [ $($E),+ ]; [ $($a),+ ]);
                 ::core::result::Result::Ok( ( $($a),+ ) )
+            }
+
+            fn convert_error(error: Self::Error) -> ParseError<<__SyanMacroAtom as Spanned>::Span>
+            where
+                __SyanMacroAtom: Spanned,
+            {
+                error.into()
+            }
+        }
+        impl<
+            $($A,)+
+            __SyanMacroAtom,
+        > crate::parse::unparse::Unparse<__SyanMacroAtom> for ( $($A),+ )
+        where
+            // A_i: Parse<Atom, Error = E_i>
+            $( $A: crate::parse::unparse::Unparse<__SyanMacroAtom>, )+
+        {
+            fn unparse<__SyanMacroS: crate::parse::unparse::Emitter<__SyanMacroAtom>>(&self, sink: &mut __SyanMacroS) -> ::core::result::Result<(), __SyanMacroS::Error> {
+                let ($($a),+) = self;
+                $(
+                    $A::unparse($a, sink)?;
+                )*
+                Ok(())
             }
         }
     };
@@ -90,6 +115,13 @@ impl<Atom> Parse<Atom> for () {
     fn parse(_: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok(())
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        match error {}
+    }
 }
 
 impl<T, Atom> Parse<Atom> for (T,)
@@ -99,5 +131,12 @@ where
     type Error = T::Error;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok((T::parse(stream)?,))
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        T::convert_error(error)
     }
 }

@@ -89,6 +89,13 @@ impl Parse<proc_macro2::TokenTree> for Bool {
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
+    }
 }
 
 impl Parse<proc_macro2::TokenTree> for ByteChar {
@@ -131,6 +138,13 @@ impl Parse<proc_macro2::TokenTree> for ByteChar {
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
     }
 }
 
@@ -175,6 +189,13 @@ impl Parse<proc_macro2::TokenTree> for Char {
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
     }
 }
 
@@ -235,6 +256,13 @@ impl Parse<proc_macro2::TokenTree> for Integer {
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
+    }
 }
 
 impl Parse<proc_macro2::TokenTree> for Float {
@@ -285,6 +313,13 @@ impl Parse<proc_macro2::TokenTree> for Float {
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
+    }
 }
 
 impl Parse<proc_macro2::TokenTree> for Str {
@@ -317,6 +352,13 @@ impl Parse<proc_macro2::TokenTree> for Str {
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
     }
 }
 
@@ -358,6 +400,13 @@ impl Parse<proc_macro2::TokenTree> for StrRaw {
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
+    }
 }
 
 impl Parse<proc_macro2::TokenTree> for ByteStr {
@@ -389,6 +438,13 @@ impl Parse<proc_macro2::TokenTree> for ByteStr {
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
     }
 }
 
@@ -431,6 +487,13 @@ impl Parse<proc_macro2::TokenTree> for ByteStrRaw {
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
+    }
 }
 
 impl Parse<proc_macro2::TokenTree> for CStr {
@@ -461,6 +524,13 @@ impl Parse<proc_macro2::TokenTree> for CStr {
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
     }
 }
 
@@ -501,6 +571,13 @@ impl Parse<proc_macro2::TokenTree> for CStrRaw {
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
+    where
+        proc_macro2::TokenTree: crate::span::Spanned,
+    {
+        error.map_span(|span| span.into())
     }
 }
 

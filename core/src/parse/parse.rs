@@ -1,10 +1,16 @@
 use super::{IntoParseStream, ParseStream};
+use crate::error::ParseError;
+use crate::span::Spanned;
 
 pub use syan_macro::Parse;
 
 pub trait Parse<Atom>: Sized {
     type Error;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error>;
+
+    fn convert_error(_: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned;
 
     // TODO: add rollback_subsequent_error()
 }
@@ -25,6 +31,13 @@ macro_rules! impl_for_collection {
                 }
                 Ok(v)
             }
+
+            fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+            where
+                Atom: Spanned,
+            {
+                $item::convert_error(error)
+            }
         }
         impl_for_collection!($($t)*);
     };
@@ -40,11 +53,12 @@ impl_for_collection!(
 macro_rules! impl_for_map {
     () => {};
     ([$key:ident $($pk:tt)*][$value:ident $($pv:tt)*] $self:ty, $($t:tt)*) => {
-        impl<Atom: Clone, Err, $key $($pk)*, $value $($pv)*> Parse<Atom> for $self
+        impl<Atom: Clone + Spanned, Err, $key $($pk)*, $value $($pv)*> Parse<Atom> for $self
         where
             $key: Parse<Atom>,
             $value: Parse<Atom>,
             <$key as Parse<Atom>>::Error: crate::error::UnionWith<$value::Error, Output = Err>,
+            Err: Into<ParseError<<Atom as Spanned>::Span>>,
         {
             type Error = Err;
             fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
@@ -61,6 +75,13 @@ macro_rules! impl_for_map {
                     ret.insert(k, v);
                 }
                 Ok(ret)
+            }
+
+            fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+            where
+                Atom: Spanned,
+            {
+                error.into()
             }
         }
         impl_for_map!($($t)*);
@@ -80,6 +101,13 @@ where
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok(Box::new(Item::parse(stream)?))
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        Item::convert_error(error)
+    }
 }
 
 impl<Atom: Clone, Item> Parse<Atom> for Option<Item>
@@ -90,6 +118,13 @@ where
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
         Ok(stream.dup(|stream| Item::parse(stream)).ok())
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        match error {}
     }
 }
 
@@ -106,6 +141,13 @@ where
         }
         Ok(v.try_into().unwrap_or_else(|_| panic!()))
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        T::convert_error(error)
+    }
 }
 
 impl<Atom, T, E> Parse<Atom> for Result<T, E>
@@ -116,6 +158,13 @@ where
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok(T::parse(stream))
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        match error {}
+    }
 }
 
 impl<Atom: crate::span::Spanned, T> Parse<Atom> for core::marker::PhantomData<T> {
@@ -123,12 +172,26 @@ impl<Atom: crate::span::Spanned, T> Parse<Atom> for core::marker::PhantomData<T>
     fn parse(_stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok(Default::default())
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        match error {}
+    }
 }
 
 impl<Atom: crate::span::Spanned> Parse<Atom> for core::convert::Infallible {
     type Error = crate::error::ParseError<Atom::Span>;
     fn parse(_stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         panic!()
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        error
     }
 }
 

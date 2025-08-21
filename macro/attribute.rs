@@ -1,9 +1,9 @@
 use proc_macro2::{Spacing, Span, TokenStream};
 use proc_macro_error::abort;
-use std::collections::HashMap;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
+use syn::visit::Visit;
 use syn::*;
 use template_quote::quote;
 
@@ -41,6 +41,99 @@ trait FindAttribute {
                 self.find_attribute("group").unwrap(),
                 "#[group(..)] format error"
             ),
+        }
+    }
+
+    fn has_default(&self) -> bool {
+        self.find_attribute("default").is_some()
+    }
+}
+
+fn extract_symbol_token_type_params(ty: &Type, collected: &mut std::collections::HashSet<Ident>) {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                // Check if this looks like a Symbol or Token macro invocation
+                if segment.ident == "Symbol" || segment.ident == "Token" {
+                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                        for arg in &args.args {
+                            if let GenericArgument::Type(Type::Path(inner_path)) = arg {
+                                if let Some(ident) = inner_path.path.get_ident() {
+                                    collected.insert(ident.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Type::Array(array) => extract_symbol_token_type_params(&array.elem, collected),
+        Type::Slice(slice) => extract_symbol_token_type_params(&slice.elem, collected),
+        Type::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                extract_symbol_token_type_params(elem, collected);
+            }
+        }
+        Type::Group(group) => extract_symbol_token_type_params(&group.elem, collected),
+        Type::Paren(paren) => extract_symbol_token_type_params(&paren.elem, collected),
+        Type::Ptr(ptr) => extract_symbol_token_type_params(&ptr.elem, collected),
+        Type::Reference(reference) => extract_symbol_token_type_params(&reference.elem, collected),
+        _ => {}
+    }
+}
+
+fn collect_primitive_tys(ty: &Type) -> impl Iterator<Item = Type> {
+    #[derive(Default)]
+    struct TypeCollector {
+        types: Vec<Type>,
+    }
+
+    impl<'ast> Visit<'ast> for TypeCollector {
+        fn visit_type(&mut self, ty: &'ast Type) {
+            if let Type::Macro(type_macro) = ty {
+                self.types.push(ty.clone());
+            } else {
+                syn::visit::visit_type(self, ty);
+            }
+        }
+    }
+
+    let mut collector = TypeCollector::default();
+    collector.visit_type(ty);
+    collector.types.into_iter()
+}
+
+fn add_type_param_predicates(
+    where_predicates: &mut Punctuated<WherePredicate, Token![,]>,
+    generics: &Generics,
+    syan: &Path,
+    tp_atom: &Ident,
+    for_parse: bool,
+    for_unparse: bool,
+    for_spanned: bool,
+    tp_span: Option<&Ident>,
+) {
+    for param in &generics.params {
+        if let GenericParam::Type(type_param) = param {
+            // Check if the type parameter has any bounds
+            if type_param.bounds.is_empty() {
+                let ty = &type_param.ident;
+                if for_parse {
+                    where_predicates.push(parse_quote!(#ty: #syan::parse::parse::Parse<#tp_atom>));
+                }
+                if for_unparse {
+                    where_predicates
+                        .push(parse_quote!(#ty: #syan::parse::unparse::Unparse<#tp_atom>));
+                }
+                if for_spanned {
+                    if let Some(span) = tp_span {
+                        where_predicates
+                            .push(parse_quote!(#ty: #syan::span::Spanned<Span = #span>));
+                    } else {
+                        where_predicates.push(parse_quote!(#ty: #syan::span::Spanned));
+                    }
+                }
+            }
         }
     }
 }
@@ -191,6 +284,7 @@ trait Adt {
         generics: &Generics,
         ident: &Ident,
         nonce: u64,
+        _input_attrs: &[Attribute],
     ) -> TokenStream {
         assert!(generics.where_clause.is_none());
         let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
@@ -219,51 +313,34 @@ trait Adt {
                 ) -> ::core::result::Result<Self, Self::Error> {
                     ::core::unimplemented!()
                 }
+                fn convert_error(_: Self::Error) -> #syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>
+                where
+                    #tp_atom: #syan::span::Spanned,
+                {
+                    ::core::unimplemented!()
+                }
             }
         });
         let mut where_predicates: Punctuated<WherePredicate, token::Comma> = Punctuated::new();
         let v_stream: Ident = parse_quote!(__syan_stream);
-        let tp_error_final: Ident = parse_quote!(__SyanError);
-        let mut tp_error_combi_generator = (0..).map(|n| {
-            (
-                Ident::new(&format!("__SyanError_{n}"), Span::call_site()),
-                Ident::new(&format!("__SyanErrorMerged_{n}"), Span::call_site()),
-            )
-        });
         let mut wrapper_counter = 0usize;
 
-        let error_fixed = self
-            .all_fields()
-            .iter()
-            .any(|f| f.find_attribute("joint").is_some() || f.find_attribute("alone").is_some());
-
-        let mut tp_error_merged_last = tp_error_final.clone();
-
-        let tp_error_final = if error_fixed {
-            where_predicates.push(parse_quote!(#tp_atom: #syan::span::Spanned));
-            parse_quote!(#syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>)
-        } else {
-            generic_params.push(parse_quote!(#tp_error_final));
-            parse_quote!(#tp_error_final)
-        };
-        let mut tp_error_hist = Vec::new();
-        let mut tp_error_map = HashMap::new();
+        where_predicates.push(parse_quote!(#tp_atom: #syan::span::Spanned));
+        let tp_error_final: Type =
+            parse_quote!(#syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>);
         let mut substructs: Vec<ItemStruct> = Vec::new();
 
-        fn generate_error_mapper(
-            syan: &Path,
-            tp_error_hist: &[Ident],
-            arg: &TokenStream,
-        ) -> TokenStream {
-            assert!(!tp_error_hist.is_empty());
-            if tp_error_hist.len() == 1 {
-                quote! { <#{&tp_error_hist[0]} as #syan::error::UnionWith<_>>::use_left(#arg) }
-            } else {
-                quote! { <#{&tp_error_hist[0]} as #syan::error::UnionWith<_>>::use_right(#{
-                    generate_error_mapper(syan, &tp_error_hist[1..], arg)
-                }) }
-            }
-        }
+        // Add where predicates for unbounded type parameters
+        add_type_param_predicates(
+            &mut where_predicates,
+            generics,
+            syan,
+            &tp_atom,
+            true,
+            false,
+            false,
+            None,
+        );
 
         let field_phantom: Ident = parse_quote!(_syan_phantom);
         let inner = self.extract_parse_inner(syan, ident,&tp_error_final, |fields| {
@@ -271,6 +348,20 @@ trait Adt {
 
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
             while let Some((member, field_ident, field)) = fields.pop_front() {
+                // Skip fields with #[default] attribute - they use Default::default()
+                if field.has_default() {
+                    ret.extend(quote!(
+                        let #field_ident = ::core::default::Default::default();
+                    ));
+                    continue;
+                }
+
+                for ty in collect_primitive_tys(&field.ty) {
+                    where_predicates.push(parse_quote!{
+                        #ty: #trait_fullpath
+                    });
+                }
+
                 // check if the toplevel field has no `#[group(..)]` attr
                 if let Some(group_member) = field.find_group() {
                     abort!(
@@ -279,7 +370,6 @@ trait Adt {
                         quote!(#group_member)
                     );
                 }
-
 
                 let spacing = match (field.find_attribute("joint"), field.find_attribute("alone")) {
                     (None, None) => None,
@@ -305,22 +395,7 @@ trait Adt {
                 };
 
                 let v_error = quote!(e);
-                let err_mapper = if error_fixed {
-                    where_predicates.push(parse_quote!(#to_parse_ty: #syan::_imp::ParseImpl<#wrapper_counter, #tp_atom>));
-                        quote!(#syan::error::UnionWith::<::core::core::convert::Infallible>::use_left(#v_stream))
-                } else {
-                    tp_error_map.entry(to_parse_ty.clone()).or_insert_with(|| {
-                    let (tp_error, tp_error_merged) = tp_error_combi_generator.next().unwrap();
-                    tp_error_hist.push(tp_error.clone());
-                    where_predicates.push(parse_quote!(#to_parse_ty: #syan::_imp::ParseImpl<#wrapper_counter, #tp_atom, Error = #tp_error>));
-                    generic_params.push(parse_quote!(#tp_error));
-                    where_predicates.push(parse_quote!(#tp_error: #syan::error::UnionWith<#tp_error_merged, Output = #tp_error_merged_last>));
-                    generic_params.push(parse_quote!(#tp_error_merged));
-                    tp_error_merged_last = tp_error_merged;
-
-                        generate_error_mapper(syan, &tp_error_hist, &v_error)
-                    }).clone()
-                };
+                let err_mapper = quote!(<#to_parse_ty as #syan::parse::parse::Parse<#tp_atom>>::convert_error(#v_error));
 
                 if let Some((substruct, subfields)) = substruct {
                     ret.extend(quote!(
@@ -355,10 +430,6 @@ trait Adt {
             }
             ret
         });
-        if !error_fixed {
-            where_predicates.push(parse_quote!(::core::convert::Infallible: #syan::error::UnionWith<::core::convert::Infallible, Output = #tp_error_merged_last>));
-            where_predicates.push(parse_quote!(#tp_error_final: #syan::error::Error));
-        }
         quote! {
             #(for substruct in &substructs) {
                 #[derive(#syan::parse::parse::Parse)]
@@ -376,6 +447,12 @@ trait Adt {
                     let mut #v_stream = #v_stream.into_parse_stream();
                     #inner
                 }
+                fn convert_error(_: Self::Error) -> #syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>
+                where
+                    #tp_atom: #syan::span::Spanned,
+                {
+                    ::core::unimplemented!()
+                }
             }
         }
     }
@@ -386,6 +463,7 @@ trait Adt {
         generics: &Generics,
         ident: &Ident,
         nonce: u64,
+        _input_attrs: &[Attribute],
     ) -> TokenStream {
         let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
         let trait_fullpath: Path = parse_quote!(#syan::parse::unparse::Unparse<#tp_atom>);
@@ -412,19 +490,20 @@ trait Adt {
                 }
             }
         });
-        let field_tys = self
-            .all_fields()
-            .into_iter()
-            .map(|field| field.ty.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut where_predicates = field_tys
-            .iter()
-            .map(|ty| -> WherePredicate {
-                parse_quote!(#ty: #syan::parse::unparse::Unparse<#tp_atom>)
-            })
-            .collect::<Punctuated<WherePredicate, Token![,]>>();
+        let mut where_predicates: Punctuated<WherePredicate, Token![,]> = Punctuated::new();
+
+        // Add where predicates for unbounded type parameters
+        add_type_param_predicates(
+            &mut where_predicates,
+            generics,
+            syan,
+            &tp_atom,
+            false,
+            true,
+            false,
+            None,
+        );
+
         let v_sink: Ident = parse_quote!(__syan_sink);
         let v_self: TokenStream = quote!(self);
         let mut substructs = Vec::new();
@@ -434,6 +513,17 @@ trait Adt {
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
 
             while let Some((member, field_ident, field)) = fields.pop_front() {
+                // Skip fields with #[default] attribute - they are not unparsed
+                if field.has_default() {
+                    continue;
+                }
+
+                for ty in collect_primitive_tys(&field.ty) {
+                    where_predicates.push(parse_quote!{
+                        #ty: #trait_fullpath
+                    });
+                }
+
                 let field_ty = &field.ty;
                 // Check if this field has grouped subfields (though for unparse we don't generate substructs)
                 if let Some((substruct, subfields)) = generate_substruct(
@@ -466,9 +556,6 @@ trait Adt {
                     where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup + ::core::clone::Clone));
                     where_predicates.push(parse_quote!(for<'syan_substruct_ref> <#field_ty as #syan::nested::group::EmptyGroup>::Fill<#fill_ty>: #syan::parse::unparse::Unparse<#tp_atom>));
                     substructs.push(substruct);
-                } else {
-                    where_predicates
-                        .push(parse_quote!(#field_ty: #syan::parse::unparse::Unparse<#tp_atom>));
                 }
                 ret.extend(quote!(
                     #syan::parse::unparse::Unparse::unparse(&#field_ident, #v_sink)?;
@@ -497,12 +584,31 @@ trait Adt {
         }
     }
 
-    fn extract_spanned(&self, syan: &Path, generics: &Generics, ident: &Ident) -> TokenStream {
+    fn extract_spanned(
+        &self,
+        syan: &Path,
+        generics: &Generics,
+        ident: &Ident,
+        _input_attrs: &[Attribute],
+    ) -> TokenStream {
         let trait_fullpath: Path = parse_quote!(#syan::span::Spanned);
         let ty_generics = generics.split_for_impl().1;
         let mut generic_params = generics.params.clone();
         let mut where_predicates: Punctuated<WherePredicate, token::Comma> = Punctuated::new();
+
         let tp_span: Ident = parse_quote!(__Syan_Span);
+
+        // Add where predicates for unbounded type parameters
+        add_type_param_predicates(
+            &mut where_predicates,
+            generics,
+            syan,
+            &tp_span,
+            false,
+            false,
+            true,
+            Some(&tp_span),
+        );
         generic_params.push(parse_quote!(#tp_span: #syan::span::Span));
         proc_macro_error::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
@@ -523,18 +629,22 @@ trait Adt {
         let mut wrapper_counter = 0usize;
 
         let span_impl = self.extract_inner(ident, &v_self, |fields| {
-            for (_, _,Field{ty,..}) in fields {
-            where_predicates.push(parse_quote! {
-                #ty: #syan::span::Spanned<Span = #tp_span>
-            });
+            for (_, _, Field { attrs, .. }) in fields {
+                // Skip fields with #[default] attribute - they don't contribute to span
+                if attrs.has_default() {
+                    continue;
+                }
             }
             let ret = quote! {
                 let __syan_span = <#tp_span as ::core::default::Default>::default();
-                #(for (_, field, _) in fields){
-                    let __syan_span = #syan::span::Span::migrate(
-                        __syan_span,
-                        #syan::span::Spanned::span(#field)
-                    );
+                #(for (_, field, Field{attrs, ..}) in fields){
+                    // Skip fields with #[default] attribute
+                    #(if !attrs.has_default()) {
+                        let __syan_span = #syan::span::Span::migrate(
+                            __syan_span,
+                            #syan::span::Spanned::span(#field)
+                        );
+                    }
                 }
                 __syan_span
             };
@@ -706,10 +816,10 @@ pub fn parse(input: &DeriveInput, nonce: u64) -> TokenStream {
     let syan = input.attrs.get_syan();
     match &input.data {
         Data::Struct(data_struct) => {
-            data_struct.extract_parse(&syan, &input.generics, &input.ident, nonce)
+            data_struct.extract_parse(&syan, &input.generics, &input.ident, nonce, &input.attrs)
         }
         Data::Enum(data_enum) => {
-            data_enum.extract_parse(&syan, &input.generics, &input.ident, nonce)
+            data_enum.extract_parse(&syan, &input.generics, &input.ident, nonce, &input.attrs)
         }
         _ => abort!(input, "Bad data"),
     }
@@ -719,10 +829,10 @@ pub fn unparse(input: &DeriveInput, nonce: u64) -> TokenStream {
     let syan = input.attrs.get_syan();
     match &input.data {
         Data::Struct(data_struct) => {
-            data_struct.extract_unparse(&syan, &input.generics, &input.ident, nonce)
+            data_struct.extract_unparse(&syan, &input.generics, &input.ident, nonce, &input.attrs)
         }
         Data::Enum(data_enum) => {
-            data_enum.extract_unparse(&syan, &input.generics, &input.ident, nonce)
+            data_enum.extract_unparse(&syan, &input.generics, &input.ident, nonce, &input.attrs)
         }
         _ => abort!(input, "Bad data"),
     }
@@ -732,9 +842,11 @@ pub fn spanned(input: &DeriveInput) -> TokenStream {
     let syan = input.attrs.get_syan();
     match &input.data {
         Data::Struct(data_struct) => {
-            data_struct.extract_spanned(&syan, &input.generics, &input.ident)
+            data_struct.extract_spanned(&syan, &input.generics, &input.ident, &input.attrs)
         }
-        Data::Enum(data_enum) => data_enum.extract_spanned(&syan, &input.generics, &input.ident),
+        Data::Enum(data_enum) => {
+            data_enum.extract_spanned(&syan, &input.generics, &input.ident, &input.attrs)
+        }
         _ => abort!(input, "Bad data"),
     }
 }

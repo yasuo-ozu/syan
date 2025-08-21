@@ -1,3 +1,4 @@
+use crate::error::ParseError;
 use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
 use newer_type::{implement, traits};
 pub use syan_macro::Spanned;
@@ -139,6 +140,13 @@ where
             slot,
             span: stream.1,
         })
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        T::convert_error(error)
     }
 }
 
@@ -325,3 +333,11 @@ macro_rules! impl_for_tup {
     };
 }
 impl_for_tup!(a0 A0 a1 A1 a2 A2 a3 A3 a4 A4 a5 A5 a6 A6 a7 A7 a8 A8 a9 A9 a10 A10 a11 A11 a12 A12 a13 A13);
+
+impl<T: Spanned> Spanned for Box<T> {
+    type Span = T::Span;
+    
+    fn span(&self) -> Self::Span {
+        self.as_ref().span()
+    }
+}

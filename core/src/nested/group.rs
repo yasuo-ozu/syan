@@ -1,13 +1,38 @@
-use crate::parse::{Parse, Unparse};
+use crate::error::ParseError;
+use crate::parse::{IntoParseStream, Parse, Unparse};
 use crate::span::Spanned;
 use crate::span::WithSpan;
 use crate::symbol::chars as punct;
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Parse, Unparse, Spanned)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Unparse, Spanned)]
 #[syan(crate)]
 pub struct Group<T, O, C> {
     pub open: O,
     pub slot: T,
     pub close: C,
+}
+
+impl<Atom: Spanned, T, O, C> Parse<Atom> for Group<T, O, C>
+where
+    T: Parse<Atom, Error = ParseError<Atom::Span>>,
+    O: Parse<Atom, Error = ParseError<Atom::Span>>,
+    C: Parse<Atom, Error = ParseError<Atom::Span>>,
+{
+    type Error = ParseError<Atom::Span>;
+
+    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+        let mut stream = stream.into_parse_stream();
+        let open = O::parse(&mut stream)?;
+        let slot = T::parse(&mut stream)?;
+        let close = C::parse(&mut stream)?;
+        Ok(Group { open, slot, close })
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        error
+    }
 }
 
 pub type GroupParen<T, S> = Group<T, WithSpan<punct::OpenParen, S>, WithSpan<punct::CloseParen, S>>;

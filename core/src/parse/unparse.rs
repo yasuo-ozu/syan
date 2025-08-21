@@ -43,3 +43,33 @@ where
         Ok(())
     }
 }
+
+impl<Atom, T: Unparse<Atom>> Unparse<Atom> for Box<T> {
+    fn unparse<E: Emitter<Atom>>(&self, emitter: &mut E) -> Result<(), E::Error> {
+        self.as_ref().unparse(emitter)
+    }
+}
+
+impl<Atom, T: Unparse<Atom>> Unparse<Atom> for Option<T> {
+    fn unparse<E: Emitter<Atom>>(&self, emitter: &mut E) -> Result<(), E::Error> {
+        match self {
+            Some(value) => value.unparse(emitter),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<Atom, T: Unparse<Atom>> Unparse<Atom> for Vec<T> {
+    fn unparse<E: Emitter<Atom>>(&self, emitter: &mut E) -> Result<(), E::Error> {
+        for item in self {
+            item.unparse(emitter)?;
+        }
+        Ok(())
+    }
+}
+
+impl<Atom, T> Unparse<Atom> for core::marker::PhantomData<T> {
+    fn unparse<E: Emitter<Atom>>(&self, _emitter: &mut E) -> Result<(), E::Error> {
+        Ok(())
+    }
+}

@@ -152,3 +152,9 @@ impl<S> UnionWith<ParseError<S>> for ParseError<S> {
         rhs
     }
 }
+
+impl<S: Default> From<Infallible> for ParseError<S> {
+    fn from(infallible: Infallible) -> Self {
+        match infallible {}
+    }
+}

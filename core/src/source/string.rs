@@ -1,5 +1,6 @@
+use crate::error::ParseError;
 use crate::parse::{IntoParseStream, Parse, ParseStream};
-use crate::span::WithSpan;
+use crate::span::{Spanned, WithSpan};
 use crate::symbol::Symbol;
 use core::convert::Infallible;
 
@@ -107,12 +108,11 @@ impl IntoParseStream for String {
     }
 }
 
-
 macro_rules! impl_parse_for_char {
     ($($name:ident),* $(,)?) => {
         $(
             impl Parse<WithSpan<char, Span>> for Symbol<crate::symbol::chars::$name> {
-                type Error = ();
+                type Error = ParseError<Span>;
 
                 fn parse(
                     stream: impl IntoParseStream<Atom = WithSpan<char, Span>>,
@@ -126,10 +126,17 @@ macro_rules! impl_parse_for_char {
                         }
                         Some(atom) => {
                             stream.push(atom);
-                            Err(())
+                            Err(ParseError::new(Span::default(), "expected character"))
                         }
-                        None => Err(()),
+                        None => Err(ParseError::new(Span::default(), "unexpected end of input")),
                     }
+                }
+
+                fn convert_error(error: Self::Error) -> ParseError<<WithSpan<char, Span> as Spanned>::Span>
+                where
+                    WithSpan<char, Span>: Spanned,
+                {
+                   error
                 }
             }
         )*
@@ -137,10 +144,100 @@ macro_rules! impl_parse_for_char {
 }
 
 impl_parse_for_char!(
-    _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z,
-    _A, _B, _C, _D, _E, _F, _G, _H, _I, _J, _K, _L, _M, _N, _O, _P, _Q, _R, _S, _T, _U, _V, _W, _X, _Y, _Z,
-    _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, __,
-    Not, Quot, Pound, Dollar, Percnt, And, Apos, Star, Plus, Comma, Minus, Dot, Slash, Colon, Semi,
-    Lt, Eq, Gt, Question, Commat, Backslash, Caret, Underscore, Grave, Or, Tilde,
-    OpenParen, CloseParen, OpenBrace, CloseBrace, OpenBracket, CloseBracket, Space
+    _a,
+    _b,
+    _c,
+    _d,
+    _e,
+    _f,
+    _g,
+    _h,
+    _i,
+    _j,
+    _k,
+    _l,
+    _m,
+    _n,
+    _o,
+    _p,
+    _q,
+    _r,
+    _s,
+    _t,
+    _u,
+    _v,
+    _w,
+    _x,
+    _y,
+    _z,
+    _A,
+    _B,
+    _C,
+    _D,
+    _E,
+    _F,
+    _G,
+    _H,
+    _I,
+    _J,
+    _K,
+    _L,
+    _M,
+    _N,
+    _O,
+    _P,
+    _Q,
+    _R,
+    _S,
+    _T,
+    _U,
+    _V,
+    _W,
+    _X,
+    _Y,
+    _Z,
+    _0,
+    _1,
+    _2,
+    _3,
+    _4,
+    _5,
+    _6,
+    _7,
+    _8,
+    _9,
+    __,
+    Not,
+    Quot,
+    Pound,
+    Dollar,
+    Percnt,
+    And,
+    Apos,
+    Star,
+    Plus,
+    Comma,
+    Minus,
+    Dot,
+    Slash,
+    Colon,
+    Semi,
+    Lt,
+    Eq,
+    Gt,
+    Question,
+    Commat,
+    Backslash,
+    Caret,
+    Underscore,
+    Grave,
+    Or,
+    Tilde,
+    OpenParen,
+    CloseParen,
+    OpenBrace,
+    CloseBrace,
+    OpenBracket,
+    CloseBracket,
+    Space
 );

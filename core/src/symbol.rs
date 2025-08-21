@@ -191,6 +191,13 @@ mod imp {
             T::parse(stream)?;
             Ok(Self::Symbol)
         }
+
+        fn convert_error(error: Self::Error) -> crate::error::ParseError<<Atom as crate::span::Spanned>::Span>
+        where
+            Atom: crate::span::Spanned,
+        {
+            T::convert_error(error)
+        }
     }
 
     impl<Atom, T> crate::parse::Unparse<Atom> for _Symbol<T>

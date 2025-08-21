@@ -1,4 +1,6 @@
+use crate::error::ParseError;
 use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
+use crate::span::Spanned;
 use core::{marker::PhantomData, mem::transmute};
 use std::any::Any;
 
@@ -28,12 +30,22 @@ impl<Atom: Clone, T: 'static + Parse<Atom>> Parse<Atom> for Choice<(T, ())> {
             PhantomData,
         ))
     }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        T::convert_error(error)
+    }
 }
 
-impl<Atom: Clone, T: 'static + Parse<Atom>, U, HList> Parse<Atom> for Choice<(T, (U, HList))>
+impl<Atom: Clone + Spanned, T: 'static + Parse<Atom>, U, HList> Parse<Atom>
+    for Choice<(T, (U, HList))>
 where
     Choice<(U, HList)>: Parse<Atom>,
     T::Error: crate::error::UnionWith<<Choice<(U, HList)> as Parse<Atom>>::Error>,
+    <T::Error as crate::error::UnionWith<<Choice<(U, HList)> as Parse<Atom>>::Error>>::Output:
+        Into<ParseError<<Atom as Spanned>::Span>>,
 {
     type Error =
         <T::Error as crate::error::UnionWith<<Choice<(U, HList)> as Parse<Atom>>::Error>>::Output;
@@ -49,6 +61,13 @@ where
                 })
             }
         }
+    }
+
+    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
+    where
+        Atom: Spanned,
+    {
+        error.into()
     }
 }
 impl<Atom: Clone> Unparse<Atom> for Choice<()> {
