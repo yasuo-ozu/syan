@@ -47,8 +47,156 @@ trait FindAttribute {
     fn has_default(&self) -> bool {
         self.find_attribute("default").is_some()
     }
+
+    fn has_ignore_bounds(&self) -> bool {
+        self.find_attribute("ignore_bounds").is_some()
+    }
+
+    fn get_fundamental_tys(&self) -> Option<Punctuated<Type, Token![,]>> {
+        let attr = self.find_attribute("fundamental_tys")?;
+        match &attr.meta {
+            Meta::List(MetaList { tokens, .. }) => {
+                match syn::parse::Parser::parse2(
+                    Punctuated::<Type, Token![,]>::parse_terminated,
+                    tokens.clone(),
+                ) {
+                    Ok(types) => Some(types),
+                    Err(_) => abort!(
+                        attr,
+                        "should be formatted as #[fundamental_tys(Type1, Type2, ...)]"
+                    ),
+                }
+            }
+            _ => abort!(attr, "#[fundamental_tys(...)] format error"),
+        }
+    }
+
+    fn get_predicate_parse(&self, tp_atom: &Ident) -> Vec<WherePredicate> {
+        let mut predicates = Vec::new();
+
+        // Collect all #[predicate(..)] attributes
+        for attr in self.iter_attributes("predicate") {
+            predicates.extend(self.parse_predicate_attr(attr, tp_atom));
+        }
+
+        // Collect all #[predicate_parse(..)] attributes
+        for attr in self.iter_attributes("predicate_parse") {
+            predicates.extend(self.parse_predicate_attr(attr, tp_atom));
+        }
+
+        predicates
+    }
+
+    fn get_predicate_unparse(&self, tp_atom: &Ident) -> Vec<WherePredicate> {
+        let mut predicates = Vec::new();
+
+        // Collect all #[predicate(..)] attributes
+        for attr in self.iter_attributes("predicate") {
+            predicates.extend(self.parse_predicate_attr(attr, tp_atom));
+        }
+
+        // Collect all #[predicate_unparse(..)] attributes
+        for attr in self.iter_attributes("predicate_unparse") {
+            predicates.extend(self.parse_predicate_attr(attr, tp_atom));
+        }
+
+        predicates
+    }
+
+    fn iter_attributes<I: ?Sized>(&self, name: &I) -> impl Iterator<Item = &Attribute>
+    where
+        Ident: PartialEq<I>;
+
+    fn parse_predicate_attr(&self, attr: &Attribute, tp_atom: &Ident) -> Vec<WherePredicate> {
+        match &attr.meta {
+            Meta::List(MetaList { tokens, .. }) => {
+                // Parse tokens manually without trying WherePredicate first
+                use proc_macro2::{TokenTree, Delimiter};
+                let mut token_iter = tokens.clone().into_iter();
+                
+                // Check if first token is $ (dollar sign for $atom)
+                if let Some(TokenTree::Punct(punct)) = token_iter.next() {
+                    if punct.as_char() == '$' {
+                        // Next should be 'atom'
+                        if let Some(TokenTree::Ident(ident)) = token_iter.next() {
+                            if ident == "atom" {
+                                // Next should be ':'
+                                if let Some(TokenTree::Punct(colon)) = token_iter.next() {
+                                    if colon.as_char() == ':' {
+                                        // Remaining tokens are the trait bound
+                                        let remaining_tokens: TokenStream = token_iter.collect();
+                                        if let Ok(trait_bound) = parse2::<TypeParamBound>(remaining_tokens) {
+                                            // Create type for tp_atom parameter
+                                            let mut segments = Punctuated::new();
+                                            segments.push(PathSegment {
+                                                ident: tp_atom.clone(),
+                                                arguments: PathArguments::None,
+                                            });
+                                            let atom_path = Path { leading_colon: None, segments };
+                                            let dollar_atom_type = Type::Path(TypePath { qself: None, path: atom_path });
+                                            
+                                            let predicate = WherePredicate::Type(PredicateType {
+                                                lifetimes: None,
+                                                bounded_ty: dollar_atom_type,
+                                                colon_token: Token![:](Span::call_site()),
+                                                bounds: std::iter::once(trait_bound).collect(),
+                                            });
+                                            return vec![predicate];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // If it doesn't start with $, try to parse as a regular type predicate
+                // Reset the iterator and try parsing the whole thing as Type: Trait
+                let mut token_iter = tokens.clone().into_iter();
+                let mut type_tokens = TokenStream::new();
+                let mut found_colon = false;
+                let mut trait_tokens = TokenStream::new();
+                
+                for token in token_iter {
+                    if !found_colon {
+                        if let TokenTree::Punct(punct) = &token {
+                            if punct.as_char() == ':' {
+                                found_colon = true;
+                                continue;
+                            }
+                        }
+                        type_tokens.extend(std::iter::once(token));
+                    } else {
+                        trait_tokens.extend(std::iter::once(token));
+                    }
+                }
+                
+                if found_colon {
+                    if let Ok(bounded_ty) = parse2::<Type>(type_tokens) {
+                        // Try to parse trait bounds (may be multiple separated by +)
+                        if let Ok(bounds) = syn::parse::Parser::parse2(
+                            Punctuated::<TypeParamBound, Token![+]>::parse_separated_nonempty,
+                            trait_tokens
+                        ) {
+                            let predicate = WherePredicate::Type(PredicateType {
+                                lifetimes: None,
+                                bounded_ty,
+                                colon_token: Token![:](Span::call_site()),
+                                bounds,
+                            });
+                            return vec![predicate];
+                        }
+                    }
+                }
+                
+                abort!(attr, "should be formatted as #[predicate(Type: Trait)]")
+            },
+            _ => abort!(attr, "#[predicate(...)] format error"),
+        }
+    }
 }
 
+#[allow(dead_code)]
 fn extract_symbol_token_type_params(ty: &Type, collected: &mut std::collections::HashSet<Ident>) {
     match ty {
         Type::Path(type_path) => {
@@ -82,6 +230,7 @@ fn extract_symbol_token_type_params(ty: &Type, collected: &mut std::collections:
     }
 }
 
+#[allow(dead_code)]
 fn collect_primitive_tys(ty: &Type) -> impl Iterator<Item = Type> {
     #[derive(Default)]
     struct TypeCollector {
@@ -90,7 +239,7 @@ fn collect_primitive_tys(ty: &Type) -> impl Iterator<Item = Type> {
 
     impl<'ast> Visit<'ast> for TypeCollector {
         fn visit_type(&mut self, ty: &'ast Type) {
-            if let Type::Macro(type_macro) = ty {
+            if let Type::Macro(_type_macro) = ty {
                 self.types.push(ty.clone());
             } else {
                 syn::visit::visit_type(self, ty);
@@ -102,6 +251,7 @@ fn collect_primitive_tys(ty: &Type) -> impl Iterator<Item = Type> {
     collector.visit_type(ty);
     collector.types.into_iter()
 }
+
 
 fn add_type_param_predicates(
     where_predicates: &mut Punctuated<WherePredicate, Token![,]>,
@@ -145,6 +295,13 @@ impl FindAttribute for Field {
     {
         self.attrs[..].find_attribute(name)
     }
+
+    fn iter_attributes<I: ?Sized>(&self, name: &I) -> impl Iterator<Item = &Attribute>
+    where
+        Ident: PartialEq<I>,
+    {
+        self.attrs[..].iter_attributes(name)
+    }
 }
 
 impl FindAttribute for [Attribute] {
@@ -153,6 +310,14 @@ impl FindAttribute for [Attribute] {
         Ident: PartialEq<I>,
     {
         self.iter().find_map(|field| field.find_attribute(name))
+    }
+
+    fn iter_attributes<I: ?Sized>(&self, name: &I) -> impl Iterator<Item = &Attribute>
+    where
+        Ident: PartialEq<I>,
+    {
+        self.iter()
+            .filter_map(move |attr| attr.find_attribute(name))
     }
 }
 
@@ -172,6 +337,13 @@ impl FindAttribute for Attribute {
                 }
             }
         }
+    }
+
+    fn iter_attributes<I: ?Sized>(&self, name: &I) -> impl Iterator<Item = &Attribute>
+    where
+        Ident: PartialEq<I>,
+    {
+        std::iter::once(self).filter_map(move |attr| attr.find_attribute(name))
     }
 }
 
@@ -284,7 +456,7 @@ trait Adt {
         generics: &Generics,
         ident: &Ident,
         nonce: u64,
-        _input_attrs: &[Attribute],
+        input_attrs: &[Attribute],
     ) -> TokenStream {
         assert!(generics.where_clause.is_none());
         let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
@@ -330,17 +502,18 @@ trait Adt {
             parse_quote!(#syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>);
         let mut substructs: Vec<ItemStruct> = Vec::new();
 
-        // Add where predicates for unbounded type parameters
-        add_type_param_predicates(
-            &mut where_predicates,
-            generics,
-            syan,
-            &tp_atom,
-            true,
-            false,
-            false,
-            None,
-        );
+        if let Some(fundamental_tys) = input_attrs.get_fundamental_tys() {
+            for ty in fundamental_tys {
+                where_predicates.push(parse_quote! {
+                    #ty: #trait_fullpath
+                });
+            }
+        }
+
+        // Add predicates from #[predicate] and #[predicate_parse] attributes
+        for predicate in input_attrs.get_predicate_parse(&tp_atom) {
+            where_predicates.push(predicate);
+        }
 
         let field_phantom: Ident = parse_quote!(_syan_phantom);
         let inner = self.extract_parse_inner(syan, ident,&tp_error_final, |fields| {
@@ -356,9 +529,10 @@ trait Adt {
                     continue;
                 }
 
-                for ty in collect_primitive_tys(&field.ty) {
+                if !field.attrs.has_ignore_bounds(){
+                    let field_ty = & field.ty;
                     where_predicates.push(parse_quote!{
-                        #ty: #trait_fullpath
+                        #field_ty: #trait_fullpath
                     });
                 }
 
@@ -463,7 +637,7 @@ trait Adt {
         generics: &Generics,
         ident: &Ident,
         nonce: u64,
-        _input_attrs: &[Attribute],
+        input_attrs: &[Attribute],
     ) -> TokenStream {
         let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
         let trait_fullpath: Path = parse_quote!(#syan::parse::unparse::Unparse<#tp_atom>);
@@ -492,17 +666,18 @@ trait Adt {
         });
         let mut where_predicates: Punctuated<WherePredicate, Token![,]> = Punctuated::new();
 
-        // Add where predicates for unbounded type parameters
-        add_type_param_predicates(
-            &mut where_predicates,
-            generics,
-            syan,
-            &tp_atom,
-            false,
-            true,
-            false,
-            None,
-        );
+        if let Some(fundamental_tys) = input_attrs.get_fundamental_tys() {
+            for ty in fundamental_tys {
+                where_predicates.push(parse_quote! {
+                    #ty: #trait_fullpath
+                });
+            }
+        }
+
+        // Add predicates from #[predicate] and #[predicate_unparse] attributes
+        for predicate in input_attrs.get_predicate_unparse(&tp_atom) {
+            where_predicates.push(predicate);
+        }
 
         let v_sink: Ident = parse_quote!(__syan_sink);
         let v_self: TokenStream = quote!(self);
@@ -518,9 +693,10 @@ trait Adt {
                     continue;
                 }
 
-                for ty in collect_primitive_tys(&field.ty) {
+                if !field.attrs.has_ignore_bounds(){
+                    let field_ty = &field.ty;
                     where_predicates.push(parse_quote!{
-                        #ty: #trait_fullpath
+                        #field_ty: #trait_fullpath
                     });
                 }
 
@@ -584,13 +760,7 @@ trait Adt {
         }
     }
 
-    fn extract_spanned(
-        &self,
-        syan: &Path,
-        generics: &Generics,
-        ident: &Ident,
-        _input_attrs: &[Attribute],
-    ) -> TokenStream {
+    fn extract_spanned(&self, syan: &Path, generics: &Generics, ident: &Ident) -> TokenStream {
         let trait_fullpath: Path = parse_quote!(#syan::span::Spanned);
         let ty_generics = generics.split_for_impl().1;
         let mut generic_params = generics.params.clone();
@@ -842,11 +1012,9 @@ pub fn spanned(input: &DeriveInput) -> TokenStream {
     let syan = input.attrs.get_syan();
     match &input.data {
         Data::Struct(data_struct) => {
-            data_struct.extract_spanned(&syan, &input.generics, &input.ident, &input.attrs)
+            data_struct.extract_spanned(&syan, &input.generics, &input.ident)
         }
-        Data::Enum(data_enum) => {
-            data_enum.extract_spanned(&syan, &input.generics, &input.ident, &input.attrs)
-        }
+        Data::Enum(data_enum) => data_enum.extract_spanned(&syan, &input.generics, &input.ident),
         _ => abort!(input, "Bad data"),
     }
 }

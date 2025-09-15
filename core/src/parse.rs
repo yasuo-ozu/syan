@@ -11,3 +11,5 @@ pub use into_parse_stream::IntoParseStream;
 pub use parse::Parse;
 pub use parse_stream::ParseStream;
 pub use unparse::Unparse;
+
+pub use syan_macro::recurse;

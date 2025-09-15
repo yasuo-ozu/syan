@@ -1,5 +1,6 @@
 use super::{IntoParseStream, Parse};
 use crate::error::ParseError;
+use crate::parse::unparse::{Emitter, Unparse};
 use crate::span::Spanned;
 
 #[doc(hidden)]
@@ -124,6 +125,12 @@ impl<Atom> Parse<Atom> for () {
     }
 }
 
+impl<Atom> Unparse<Atom> for () {
+    fn unparse<S: Emitter<Atom>>(&self, _sink: &mut S) -> Result<(), S::Error> {
+        Ok(())
+    }
+}
+
 impl<T, Atom> Parse<Atom> for (T,)
 where
     T: Parse<Atom>,
@@ -138,5 +145,14 @@ where
         Atom: Spanned,
     {
         T::convert_error(error)
+    }
+}
+
+impl<T, Atom> Unparse<Atom> for (T,)
+where
+    T: Unparse<Atom>,
+{
+    fn unparse<S: Emitter<Atom>>(&self, sink: &mut S) -> Result<(), S::Error> {
+        self.0.unparse(sink)
     }
 }
