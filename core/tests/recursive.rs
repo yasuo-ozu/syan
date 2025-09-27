@@ -39,7 +39,7 @@ pub mod complex_cycles {
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate(K: std::hash::Hash + std::cmp::Eq)]
+    #[predicate(Graph<T, K>: Parse<$atom>)]
     #[predicate($atom: Clone)]
     pub enum TreeNode<T, K> {
         Leaf {

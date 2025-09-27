@@ -110,87 +110,34 @@ trait FindAttribute {
     fn parse_predicate_attr(&self, attr: &Attribute, tp_atom: &Ident) -> Vec<WherePredicate> {
         match &attr.meta {
             Meta::List(MetaList { tokens, .. }) => {
-                // Parse tokens manually without trying WherePredicate first
-                use proc_macro2::{TokenTree, Delimiter};
-                let mut token_iter = tokens.clone().into_iter();
-                
-                // Check if first token is $ (dollar sign for $atom)
-                if let Some(TokenTree::Punct(punct)) = token_iter.next() {
-                    if punct.as_char() == '$' {
-                        // Next should be 'atom'
-                        if let Some(TokenTree::Ident(ident)) = token_iter.next() {
-                            if ident == "atom" {
-                                // Next should be ':'
-                                if let Some(TokenTree::Punct(colon)) = token_iter.next() {
-                                    if colon.as_char() == ':' {
-                                        // Remaining tokens are the trait bound
-                                        let remaining_tokens: TokenStream = token_iter.collect();
-                                        if let Ok(trait_bound) = parse2::<TypeParamBound>(remaining_tokens) {
-                                            // Create type for tp_atom parameter
-                                            let mut segments = Punctuated::new();
-                                            segments.push(PathSegment {
-                                                ident: tp_atom.clone(),
-                                                arguments: PathArguments::None,
-                                            });
-                                            let atom_path = Path { leading_colon: None, segments };
-                                            let dollar_atom_type = Type::Path(TypePath { qself: None, path: atom_path });
-                                            
-                                            let predicate = WherePredicate::Type(PredicateType {
-                                                lifetimes: None,
-                                                bounded_ty: dollar_atom_type,
-                                                colon_token: Token![:](Span::call_site()),
-                                                bounds: std::iter::once(trait_bound).collect(),
-                                            });
-                                            return vec![predicate];
-                                        }
-                                    }
+                use proc_macro2::TokenTree;
+                let mut processed_tokens = TokenStream::new();
+                let mut token_iter = tokens.clone().into_iter().peekable();
+
+                while let Some(token) = token_iter.next() {
+                    match token {
+                        TokenTree::Punct(punct) if punct.as_char() == '$' => {
+                            // Check if next token is 'atom'
+                            if let Some(TokenTree::Ident(ident)) = token_iter.peek() {
+                                if ident == "atom" {
+                                    token_iter.next();
+                                    processed_tokens.extend(quote!(#tp_atom));
+                                    continue;
                                 }
                             }
+                            processed_tokens.extend(std::iter::once(TokenTree::Punct(punct)));
+                        }
+                        _ => {
+                            processed_tokens.extend(std::iter::once(token));
                         }
                     }
                 }
-                
-                // If it doesn't start with $, try to parse as a regular type predicate
-                // Reset the iterator and try parsing the whole thing as Type: Trait
-                let mut token_iter = tokens.clone().into_iter();
-                let mut type_tokens = TokenStream::new();
-                let mut found_colon = false;
-                let mut trait_tokens = TokenStream::new();
-                
-                for token in token_iter {
-                    if !found_colon {
-                        if let TokenTree::Punct(punct) = &token {
-                            if punct.as_char() == ':' {
-                                found_colon = true;
-                                continue;
-                            }
-                        }
-                        type_tokens.extend(std::iter::once(token));
-                    } else {
-                        trait_tokens.extend(std::iter::once(token));
-                    }
+                if let Ok(where_predicate) = parse2::<WherePredicate>(processed_tokens) {
+                    return vec![where_predicate];
                 }
-                
-                if found_colon {
-                    if let Ok(bounded_ty) = parse2::<Type>(type_tokens) {
-                        // Try to parse trait bounds (may be multiple separated by +)
-                        if let Ok(bounds) = syn::parse::Parser::parse2(
-                            Punctuated::<TypeParamBound, Token![+]>::parse_separated_nonempty,
-                            trait_tokens
-                        ) {
-                            let predicate = WherePredicate::Type(PredicateType {
-                                lifetimes: None,
-                                bounded_ty,
-                                colon_token: Token![:](Span::call_site()),
-                                bounds,
-                            });
-                            return vec![predicate];
-                        }
-                    }
-                }
-                
-                abort!(attr, "should be formatted as #[predicate(Type: Trait)]")
-            },
+
+                abort!(attr, "should be formatted as #[predicate(Type: Trait)] or #[predicate($atom: Trait)]")
+            }
             _ => abort!(attr, "#[predicate(...)] format error"),
         }
     }
@@ -251,7 +198,6 @@ fn collect_primitive_tys(ty: &Type) -> impl Iterator<Item = Type> {
     collector.visit_type(ty);
     collector.types.into_iter()
 }
-
 
 fn add_type_param_predicates(
     where_predicates: &mut Punctuated<WherePredicate, Token![,]>,
