@@ -1,4 +1,3 @@
-use crate::error::ParseError;
 use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
 use newer_type::{implement, traits};
 pub use syan_macro::Spanned;
@@ -141,26 +140,8 @@ where
             span: stream.1,
         })
     }
-
-    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
-    where
-        Atom: Spanned,
-    {
-        T::convert_error(error)
-    }
 }
 
-impl<T> Spanned for Vec<T>
-where
-    T: Spanned,
-{
-    type Span = T::Span;
-
-    fn span(&self) -> Self::Span {
-        self.iter()
-            .fold(T::Span::default(), |acc, item| acc.migrate(item.span()))
-    }
-}
 
 impl<T, S> Map<S> for Vec<T>
 where
@@ -178,17 +159,6 @@ where
     }
 }
 
-impl<T> Spanned for std::collections::VecDeque<T>
-where
-    T: Spanned,
-{
-    type Span = T::Span;
-
-    fn span(&self) -> Self::Span {
-        self.iter()
-            .fold(T::Span::default(), |acc, item| acc.migrate(item.span()))
-    }
-}
 
 impl<T, S> Map<S> for std::collections::VecDeque<T>
 where
@@ -336,8 +306,24 @@ impl_for_tup!(a0 A0 a1 A1 a2 A2 a3 A3 a4 A4 a5 A5 a6 A6 a7 A7 a8 A8 a9 A9 a10 A1
 
 impl<T: Spanned> Spanned for Box<T> {
     type Span = T::Span;
-    
+
     fn span(&self) -> Self::Span {
         self.as_ref().span()
+    }
+}
+
+impl Spanned for core::convert::Infallible {
+    type Span = ();
+
+    fn span(&self) -> Self::Span {
+        match *self {}
+    }
+}
+
+impl<T> Spanned for core::marker::PhantomData<T> {
+    type Span = ();
+
+    fn span(&self) -> Self::Span {
+        ()
     }
 }

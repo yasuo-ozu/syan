@@ -3,15 +3,20 @@ use core::convert::Infallible;
 
 pub trait Error: Sized {
     fn from_cause(cause: Vec<Self>) -> Self;
+    fn into_parse_error(self) -> ParseError;
 }
 
-impl<S: Span> Error for ParseError<S> {
+impl Error for ParseError {
     fn from_cause(cause: Vec<Self>) -> Self {
-        let mut ret = Self::new(S::default(), "cannot parse");
+        let mut ret = Self::new((), "cannot parse");
         for c in cause {
             ret.add_sub_error(c);
         }
         ret
+    }
+
+    fn into_parse_error(self) -> ParseError {
+        self
     }
 }
 
@@ -19,19 +24,23 @@ impl Error for Infallible {
     fn from_cause(_cause: Vec<Self>) -> Self {
         unreachable!()
     }
+
+    fn into_parse_error(self) -> ParseError {
+        match self {}
+    }
 }
 
 #[derive(Debug)]
-pub struct ParseError<S> {
-    span: S,
+pub struct ParseError {
+    // span: Box<dyn Span>,
     message: String,
     sub_errors: Vec<Self>,
 }
 
-impl<S> ParseError<S> {
-    pub fn new(span: S, message: impl core::fmt::Display) -> Self {
+impl ParseError {
+    pub fn new(_span: impl Span, message: impl core::fmt::Display) -> Self {
         Self {
-            span,
+            // span: Box::new(span),
             message: format!("{message}"),
             sub_errors: Vec::new(),
         }
@@ -48,67 +57,30 @@ impl<S> ParseError<S> {
         }
         self
     }
-
-    pub fn map_span<T>(self, f: impl Fn(S) -> T + Copy) -> ParseError<T> {
-        ParseError {
-            span: f(self.span),
-            message: self.message,
-            sub_errors: self.sub_errors.into_iter().map(|e| e.map_span(f)).collect(),
-        }
-    }
-    pub fn union_left<T>(self) -> ParseError<<S as UnionWith<T>>::Output>
-    where
-        S: UnionWith<T>,
-    {
-        ParseError {
-            span: S::use_left(self.span),
-            message: self.message,
-            sub_errors: self
-                .sub_errors
-                .into_iter()
-                .map(|e| e.union_left::<T>())
-                .collect(),
-        }
-    }
-
-    pub fn union_right<T>(self) -> ParseError<<T as UnionWith<S>>::Output>
-    where
-        T: UnionWith<S>,
-    {
-        ParseError {
-            span: T::use_right(self.span),
-            message: self.message,
-            sub_errors: self
-                .sub_errors
-                .into_iter()
-                .map(|e| e.union_right::<T>())
-                .collect(),
-        }
-    }
 }
 
-impl<S: Clone> Clone for ParseError<S> {
+impl Clone for ParseError {
     fn clone(&self) -> Self {
         Self {
-            span: self.span.clone(),
+            // span: self.span.clone_box(),
             message: self.message.clone(),
             sub_errors: self.sub_errors.clone(),
         }
     }
 }
 
-impl<S: std::fmt::Debug> std::error::Error for ParseError<S> {}
+impl std::error::Error for ParseError {}
 
-impl<S> core::fmt::Display for ParseError<S> {
+impl core::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-pub type Result<T, S> = core::result::Result<T, ParseError<S>>;
+pub type Result<T> = core::result::Result<T, ParseError>;
 
 pub trait UnionWith<Rhs>: Sized {
-    type Output;
+    type Output: Error;
     fn use_left(self) -> Self::Output;
     fn use_right(rhs: Rhs) -> Self::Output;
 }
@@ -116,44 +88,44 @@ pub trait UnionWith<Rhs>: Sized {
 impl UnionWith<Infallible> for Infallible {
     type Output = Infallible;
     fn use_left(self) -> Self::Output {
-        unreachable!()
+        match self {}
     }
-    fn use_right(_rhs: Infallible) -> Self::Output {
-        unreachable!()
+    fn use_right(rhs: Infallible) -> Self::Output {
+        match rhs {}
     }
 }
 
-impl<S> UnionWith<ParseError<S>> for Infallible {
-    type Output = ParseError<S>;
+impl UnionWith<ParseError> for Infallible {
+    type Output = ParseError;
     fn use_left(self) -> Self::Output {
-        unreachable!()
+        match self {}
     }
-    fn use_right(rhs: ParseError<S>) -> Self::Output {
+    fn use_right(rhs: ParseError) -> Self::Output {
         rhs
     }
 }
 
-impl<S> UnionWith<Infallible> for ParseError<S> {
-    type Output = ParseError<S>;
+impl UnionWith<Infallible> for ParseError {
+    type Output = ParseError;
     fn use_left(self) -> Self::Output {
         self
     }
-    fn use_right(_: Infallible) -> Self::Output {
-        unreachable!()
+    fn use_right(rhs: Infallible) -> Self::Output {
+        match rhs {}
     }
 }
 
-impl<S> UnionWith<ParseError<S>> for ParseError<S> {
-    type Output = ParseError<S>;
+impl UnionWith<ParseError> for ParseError {
+    type Output = ParseError;
     fn use_left(self) -> Self::Output {
         self
     }
-    fn use_right(rhs: ParseError<S>) -> Self::Output {
+    fn use_right(rhs: ParseError) -> Self::Output {
         rhs
     }
 }
 
-impl<S: Default> From<Infallible> for ParseError<S> {
+impl From<Infallible> for ParseError {
     fn from(infallible: Infallible) -> Self {
         match infallible {}
     }

@@ -64,7 +64,7 @@ pub struct CStrRaw {
 }
 
 impl Parse<proc_macro2::TokenTree> for Bool {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -90,16 +90,10 @@ impl Parse<proc_macro2::TokenTree> for Bool {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for ByteChar {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -140,16 +134,10 @@ impl Parse<proc_macro2::TokenTree> for ByteChar {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for Char {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -191,16 +179,10 @@ impl Parse<proc_macro2::TokenTree> for Char {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for Integer {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -257,16 +239,10 @@ impl Parse<proc_macro2::TokenTree> for Integer {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for Float {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -314,16 +290,10 @@ impl Parse<proc_macro2::TokenTree> for Float {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for Str {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -354,16 +324,10 @@ impl Parse<proc_macro2::TokenTree> for Str {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for StrRaw {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -401,16 +365,10 @@ impl Parse<proc_macro2::TokenTree> for StrRaw {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for ByteStr {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -440,16 +398,10 @@ impl Parse<proc_macro2::TokenTree> for ByteStr {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for ByteStrRaw {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -488,16 +440,10 @@ impl Parse<proc_macro2::TokenTree> for ByteStrRaw {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for CStr {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -526,16 +472,10 @@ impl Parse<proc_macro2::TokenTree> for CStr {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Parse<proc_macro2::TokenTree> for CStrRaw {
-    type Error = ParseError<Span>;
+    type Error = ParseError;
 
     fn parse(
         stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
@@ -573,12 +513,6 @@ impl Parse<proc_macro2::TokenTree> for CStrRaw {
         }
     }
 
-    fn convert_error(error: Self::Error) -> ParseError<<proc_macro2::TokenTree as crate::span::Spanned>::Span>
-    where
-        proc_macro2::TokenTree: crate::span::Spanned,
-    {
-        error.map_span(|span| span.into())
-    }
 }
 
 impl Unparse<proc_macro2::TokenTree> for Bool {

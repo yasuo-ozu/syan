@@ -13,11 +13,11 @@ pub struct Group<T, O, C> {
 
 impl<Atom: Spanned, T, O, C> Parse<Atom> for Group<T, O, C>
 where
-    T: Parse<Atom, Error = ParseError<Atom::Span>>,
-    O: Parse<Atom, Error = ParseError<Atom::Span>>,
-    C: Parse<Atom, Error = ParseError<Atom::Span>>,
+    T: Parse<Atom, Error = ParseError>,
+    O: Parse<Atom, Error = ParseError>,
+    C: Parse<Atom, Error = ParseError>,
 {
-    type Error = ParseError<Atom::Span>;
+    type Error = ParseError;
 
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
@@ -25,13 +25,6 @@ where
         let slot = T::parse(&mut stream)?;
         let close = C::parse(&mut stream)?;
         Ok(Group { open, slot, close })
-    }
-
-    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
-    where
-        Atom: Spanned,
-    {
-        error
     }
 }
 

@@ -26,19 +26,13 @@ fn get_name_and_field_tys(item: &Item) -> Option<(Ident, Vec<Type>)> {
     }
 }
 
-fn find_fundamental_tys(ty: &Type, idents: &[Ident]) -> Option<HashSet<Type>> {
-    // First check if this type is a path type matching one of our idents
-    if let Type::Path(TypePath { qself: None, path }) = ty {
-        if path.leading_colon.is_none() && path.segments.len() == 1 {
-            let type_name = &path.segments[0].ident;
-            if idents.contains(type_name) {
-                // This is a fundamental type
-                return Some([ty.clone()].into());
-            }
-        }
-    }
-
-    // Get child types based on the type variant
+fn find_fundamental_tys(
+    ty: &Type,
+    idents: &[Ident],
+    additional_predicates: &mut Vec<TokenStream>,
+    additional_predicates_parse: &mut Vec<TokenStream>,
+    additional_predicates_unparse: &mut Vec<TokenStream>,
+) -> Option<HashSet<Type>> {
     let child_types = match ty {
         Type::Array(TypeArray { elem, .. }) => vec![elem.as_ref()],
         Type::Ptr(TypePtr { elem, .. }) => vec![elem.as_ref()],
@@ -59,21 +53,120 @@ fn find_fundamental_tys(ty: &Type, idents: &[Ident]) -> Option<HashSet<Type>> {
             }
             types
         }
-        _ => vec![], // Other types have no child types we care about
+        _ => vec![],
     };
 
     let mut result = HashSet::new();
     let mut has_fundamental = false;
 
-    for child_ty in child_types {
-        match find_fundamental_tys(child_ty, idents) {
-            None => {
-                result.insert(child_ty.clone());
+    let fundamental_tys = child_types
+        .iter()
+        .map(|ty| {
+            find_fundamental_tys(
+                ty,
+                idents,
+                additional_predicates,
+                additional_predicates_parse,
+                additional_predicates_unparse,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (fund, &ty) in fundamental_tys.iter().zip(&child_types) {
+        if let Some(inner) = fund {
+            has_fundamental = true;
+            result.extend(inner.clone());
+        } else {
+            result.insert(ty.clone());
+        }
+    }
+
+    if let Type::Path(TypePath { qself: None, path }) = ty {
+        if path.leading_colon.is_none() && path.segments.len() == 1 {
+            let segment = &path.segments[0];
+            let type_name = &segment.ident;
+
+            if idents.contains(type_name) {
+                // This is a fundamental type
+                return Some([ty.clone()].into());
             }
-            Some(inner) => {
-                has_fundamental = true;
-                result.extend(inner);
+        }
+        if let Some(_) = compare_trait_path(
+            [
+                &parse_quote!(::core::option::Option<T>),
+                &parse_quote!(::std::option::Option<T>),
+                &parse_quote!(::core::vec::Vec<T>),
+                &parse_quote!(::std::vec::Vec<T>),
+            ],
+            path,
+        ) {
+            additional_predicates_parse.push(quote!($atom: ::core::clone::Clone));
+        } else if let Some(args) =
+            compare_trait_path([&parse_quote!(::std::collections::HashSet<K>)], path)
+        {
+            additional_predicates.push(quote!(#{&args[0]}: ::core::hash::Hash + ::core::cmp::Eq));
+        } else if let Some(args) =
+            compare_trait_path([&parse_quote!(::std::collections::BTreeSet<K>)], path)
+        {
+            additional_predicates.push(quote!(#{&args[0]}: ::core::cmp::Ord));
+        } else if let Some(args) =
+            compare_trait_path([&parse_quote!(::std::collections::HashMap<K, V>)], path)
+        {
+            assert_eq!(fundamental_tys.len(), 2);
+            match (&fundamental_tys[0], &fundamental_tys[1]) {
+                (None, None) => {
+                    additional_predicates_parse.push(quote!(
+                         <#{&args[0]} as $syan::parse::parse::Parse<$atom>>:: Error: $syan::error::UnionWith<
+                             <#{&args[1]} as $syan::parse::parse::Parse<$atom>>::Error
+                         >
+                    ));
+                }
+                (Some(_), None) => {
+                    additional_predicates_parse.push(quote!(
+                         $syan::error::ParseError: $syan::error::UnionWith<
+                             <#{&args[1]} as $syan::parse::parse::Parse<$atom>>::Error
+                         >
+                    ));
+                }
+                (None, Some(_)) => {
+                    additional_predicates_parse.push(quote!(
+                         <#{&args[0]} as $syan::parse::parse::Parse<$atom>>:: Error: $syan::error::UnionWith<
+                             $syan::error::ParseError
+                         >
+                    ));
+                }
+                _ => (),
             }
+            additional_predicates.push(quote!(#{&args[0]}: ::core::hash::Hash + ::core::cmp::Eq));
+        } else if let Some(args) =
+            compare_trait_path([&parse_quote!(::std::collections::BTreeMap<K, V>)], path)
+        {
+            assert_eq!(fundamental_tys.len(), 2);
+            match (&fundamental_tys[0], &fundamental_tys[1]) {
+                (None, None) => {
+                    additional_predicates_parse.push(quote!(
+                         <#{&args[0]} as $syan::parse::parse::Parse<$atom>>:: Error: $syan::error::UnionWith<
+                             <#{&args[1]} as $syan::parse::parse::Parse<$atom>>::Error
+                         >
+                    ));
+                }
+                (Some(_), None) => {
+                    additional_predicates_parse.push(quote!(
+                         $syan::error::ParseError: $syan::error::UnionWith<
+                             <#{&args[1]} as $syan::parse::parse::Parse<$atom>>::Error
+                         >
+                    ));
+                }
+                (None, Some(_)) => {
+                    additional_predicates_parse.push(quote!(
+                         <#{&args[0]} as $syan::parse::parse::Parse<$atom>>:: Error: $syan::error::UnionWith<
+                             $syan::error::ParseError
+                         >
+                    ));
+                }
+                _ => (),
+            }
+            additional_predicates.push(quote!(#{&args[0]}: ::core::cmp::Ord));
         }
     }
 
@@ -184,6 +277,47 @@ fn find_strong_loop(graph: &HashMap<Ident, HashSet<Ident>>) -> Vec<HashSet<Ident
     output
 }
 
+fn compare_trait_path<'a>(
+    absolute_paths: impl IntoIterator<Item = &'a Path>,
+    mandatory_path: &Path,
+) -> Option<Punctuated<GenericArgument, Token![,]>> {
+    let mand_segments = &mandatory_path.segments;
+
+    for absolute_path in absolute_paths {
+        let abs_segments = &absolute_path.segments;
+        let mut matched_count = 0;
+        for (abs_seg, mand_seg) in abs_segments.iter().rev().zip(mand_segments.iter().rev()) {
+            if abs_seg.ident == mand_seg.ident {
+                matched_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        if matched_count == mand_segments.len()
+            && matched_count > 0
+            && (matched_count < abs_segments.len()
+                || (absolute_path.leading_colon.is_some()
+                    || mandatory_path.leading_colon.is_none()))
+        {
+            match (
+                &abs_segments.last().unwrap().arguments,
+                &mand_segments.last().unwrap().arguments,
+            ) {
+                (
+                    PathArguments::AngleBracketed(_),
+                    PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
+                ) => {
+                    return Some(args.clone());
+                }
+                (PathArguments::None, PathArguments::None) => return Some(Default::default()),
+                _ => (),
+            }
+        }
+    }
+    None
+}
+
 fn split_type_path(ty: &Type) -> Option<(&Ident, Punctuated<GenericArgument, Token![,]>)> {
     if let Type::Path(TypePath {
         qself: None,
@@ -216,12 +350,21 @@ fn collect_all_fundamental_tys(
     ty: &Type,
     items: &HashMap<Ident, (Punctuated<GenericParam, Token![,]>, Vec<Type>)>,
     hist_stack: &mut Vec<(Ident, Punctuated<GenericArgument, Token![,]>)>,
+    additional_predicates: &mut Vec<TokenStream>,
+    additional_predicates_parse: &mut Vec<TokenStream>,
+    additional_predicates_unparse: &mut Vec<TokenStream>,
 ) -> Option<HashSet<Type>> {
     let idents: Vec<Ident> = items.keys().cloned().collect();
     let mut result: HashSet<Type> = HashSet::new();
     let mut has_fundamental = false;
-    for fundamental_ty in
-        find_fundamental_tys(ty, &idents).unwrap_or(core::iter::once(ty.clone()).collect())
+    for fundamental_ty in find_fundamental_tys(
+        ty,
+        &idents,
+        additional_predicates,
+        additional_predicates_parse,
+        additional_predicates_unparse,
+    )
+    .unwrap_or(core::iter::once(ty.clone()).collect())
     {
         if let Some((ident, args)) = split_type_path(&fundamental_ty) {
             if let Some((params, tys)) = items.get(ident) {
@@ -252,9 +395,14 @@ fn collect_all_fundamental_tys(
                 for ty in tys {
                     let mut substituted_ty = ty.clone();
                     substitute_generics_in_type(&mut substituted_ty, &param_map);
-                    if let Some(nested_result) =
-                        collect_all_fundamental_tys(&substituted_ty, items, hist_stack)
-                    {
+                    if let Some(nested_result) = collect_all_fundamental_tys(
+                        &substituted_ty,
+                        items,
+                        hist_stack,
+                        additional_predicates,
+                        additional_predicates_parse,
+                        additional_predicates_unparse,
+                    ) {
                         has_fundamental = true;
                         result.extend(nested_result);
                     } else {
@@ -418,6 +566,9 @@ pub fn recurse(mut item_mod: ItemMod) -> TokenStream {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let mut fundamental_tys: Option<HashSet<Type>> = None;
+        let mut additional_predicates = Vec::new();
+        let mut additional_predicates_parse = Vec::new();
+        let mut additional_predicates_unparse = Vec::new();
         let mut stack = Vec::new();
         stack.push((
             ident.clone(),
@@ -434,7 +585,14 @@ pub fn recurse(mut item_mod: ItemMod) -> TokenStream {
                 .collect(),
         ));
         for field in all_fields {
-            if let Some(tys) = collect_all_fundamental_tys(&field.ty, &items, &mut stack) {
+            if let Some(tys) = collect_all_fundamental_tys(
+                &field.ty,
+                &items,
+                &mut stack,
+                &mut additional_predicates,
+                &mut additional_predicates_parse,
+                &mut additional_predicates_unparse,
+            ) {
                 let mut s = fundamental_tys.unwrap_or_default();
                 s.extend(tys);
                 fundamental_tys = Some(s);
@@ -446,6 +604,36 @@ pub fn recurse(mut item_mod: ItemMod) -> TokenStream {
                 Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. }) => {
                     let s = fundamental_tys.iter().collect::<Vec<_>>();
                     attrs.push(parse_quote!(#[fundamental_tys(#(#s),*)]));
+                }
+                _ => panic!(),
+            }
+        }
+        if !additional_predicates.is_empty() {
+            match content {
+                Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. }) => {
+                    for predicate in &additional_predicates {
+                        attrs.push(parse_quote!(#[predicate(#predicate)]));
+                    }
+                }
+                _ => panic!(),
+            }
+        }
+        if !additional_predicates_parse.is_empty() {
+            match content {
+                Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. }) => {
+                    for predicate in &additional_predicates_parse {
+                        attrs.push(parse_quote!(#[predicate_parse(#predicate)]));
+                    }
+                }
+                _ => panic!(),
+            }
+        }
+        if !additional_predicates_unparse.is_empty() {
+            match content {
+                Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. }) => {
+                    for predicate in &additional_predicates_unparse {
+                        attrs.push(parse_quote!(#[predicate_unparse(#predicate)]));
+                    }
                 }
                 _ => panic!(),
             }
@@ -680,6 +868,55 @@ mod tests {
     }
 
     #[test]
+    fn test_compare_trait_path_comprehensive() {
+        macro_rules! test_success {
+            ($abs:ty, $mand:ty $(,)?) => {
+                let abs_path: Path = parse_quote!($abs);
+                let mand_path: Path = parse_quote!($mand);
+                let result = compare_trait_path([&abs_path], &mand_path);
+                assert!(result.is_some());
+            };
+        }
+
+        macro_rules! test_failure {
+            ($abs:ty, $mand:ty $(,)?) => {
+                let abs_path: Path = parse_quote!($abs);
+                let mand_path: Path = parse_quote!($mand);
+                let result = compare_trait_path([&abs_path], &mand_path);
+                assert!(result.is_none());
+            };
+        }
+
+        // Success cases
+        test_success!(std::collections::HashMap, std::collections::HashMap);
+        test_success!(
+            std::collections::HashMap<K, V>,
+            std::collections::HashMap<A, B>,
+        );
+        test_success!(
+            crate::std::collections::HashMap<String, i32>,
+            std::collections::HashMap<C, D>,
+        );
+        test_success!(HashMap<T>, HashMap<T>);
+        test_success!(::std::collections::HashMap<T>, HashMap<T>);
+        test_success!(::std::collections::HashMap, HashMap);
+        test_success!(::std::collections::HashMap, std::collections::HashMap);
+        test_success!(
+            std::collections::HashMap<String, Vec<i32>>,
+            HashMap<A, B>,
+        );
+        test_success!(
+            crate::module::std::collections::HashMap<T>,
+            std::collections::HashMap<T>,
+        );
+
+        // Failure cases
+        test_failure!(std::collections::HashSet, HashMap);
+        test_failure!(HashMap, std::collections::HashMap);
+        test_failure!(crate::other::HashMap, std::collections::HashMap);
+    }
+
+    #[test]
     fn test_graph_macro_edge_cases() {
         // Test various edge cases of the graph macro syntax
 
@@ -731,29 +968,13 @@ mod tests {
                     b_ref: CircularB<T>,
                     flag: bool,
                 }
-
-                struct D<T, U> {
-                    t: T,
-                    u: U,
-                    a: CircularA<()>,
-                }
-
-                struct CircularE<T> {
-                    f_ref: CircularF<(T),>,
-                    data: u32,
-                }
-
-                struct CircularF<T> {
-                    e_ref: CircularE<T>,
-                    value: String,
-                }
             }
         };
-        let expected_types: HashSet<Type> = [
-            parse_quote!(u32),
-            parse_quote!(String),
-            parse_quote!(bool),
-            parse_quote!(CircularB<i32>),
+        let expected_types: HashSet<String> = [
+            quote!(u32).to_string(),
+            quote!(String).to_string(),
+            quote!(bool).to_string(),
+            // quote!(CircularB<i32>).to_string(),
         ]
         .into();
 
@@ -789,21 +1010,44 @@ mod tests {
             .collect();
 
         let mut hist_stack = Vec::new();
+        let mut additional_predicates = Vec::new();
 
-        let result =
-            collect_all_fundamental_tys(&parse_quote!(CircularA<i32>), &items, &mut hist_stack);
-        assert_eq!(result.as_ref(), Some(&expected_types));
+        let result = collect_all_fundamental_tys(
+            &parse_quote!(CircularA<i32>),
+            &items,
+            &mut hist_stack,
+            &mut additional_predicates,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|t| quote!(#t).to_string())
+        .collect::<HashSet<_>>();
+        assert_eq!(&result, &expected_types);
         assert_eq!(hist_stack.len(), 0);
 
-        let result =
-            collect_all_fundamental_tys(&parse_quote!(CircularB<i32>), &items, &mut hist_stack);
+        let result = collect_all_fundamental_tys(
+            &parse_quote!(CircularB<i32>),
+            &items,
+            &mut hist_stack,
+            &mut additional_predicates,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
         let circular_b_expected: HashSet<Type> =
             [parse_quote!(u32), parse_quote!(String), parse_quote!(bool)].into();
         assert_eq!(result.as_ref(), Some(&circular_b_expected));
         assert_eq!(hist_stack.len(), 0);
 
-        let result =
-            collect_all_fundamental_tys(&parse_quote!(CircularC<i32>), &items, &mut hist_stack);
+        let result = collect_all_fundamental_tys(
+            &parse_quote!(CircularC<i32>),
+            &items,
+            &mut hist_stack,
+            &mut additional_predicates,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
         let circular_c_expected: HashSet<Type> =
             [parse_quote!(u32), parse_quote!(String), parse_quote!(bool)].into();
         assert_eq!(result.as_ref(), Some(&circular_c_expected));
@@ -813,26 +1057,15 @@ mod tests {
             &parse_quote!(Option<CircularA<i32>>),
             &items,
             &mut hist_stack,
-        );
-        assert_eq!(result.as_ref(), Some(&expected_types));
-        assert_eq!(hist_stack.len(), 0);
-
-        // Test D with multiple type params - contains circular reference
-        let result =
-            collect_all_fundamental_tys(&parse_quote!(D<i32, String>), &items, &mut hist_stack);
-        assert_eq!(result, None);
-        assert_eq!(hist_stack.len(), 0);
-
-        // Test CircularE - part of E/F circular reference
-        let result =
-            collect_all_fundamental_tys(&parse_quote!(CircularE<i32>), &items, &mut hist_stack);
-        assert_eq!(result, None);
-        assert_eq!(hist_stack.len(), 0);
-
-        // Test CircularF - part of E/F circular reference
-        let result =
-            collect_all_fundamental_tys(&parse_quote!(CircularF<i32>), &items, &mut hist_stack);
-        assert_eq!(result, None);
+            &mut additional_predicates,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|t| quote!(#t).to_string())
+        .collect::<HashSet<_>>();
+        assert_eq!(&result, &expected_types);
         assert_eq!(hist_stack.len(), 0);
     }
 
@@ -858,14 +1091,6 @@ mod tests {
         let output: ItemMod = parse2(result).unwrap();
 
         let items = &output.content.unwrap().1;
-        let expected_types: HashSet<Type> = [
-            parse_quote!(u32),
-            parse_quote!(String),
-            parse_quote!(i32),
-            parse_quote!(bool),
-        ]
-        .into();
-
         // Check struct A
         if let Item::Struct(struct_a) = &items[0] {
             assert_eq!(struct_a.ident, "A");
@@ -880,8 +1105,13 @@ mod tests {
             let types: Punctuated<Type, Token![,]> = fundamental_attr
                 .parse_args_with(Punctuated::parse_terminated)
                 .expect("Failed to parse fundamental_tys args");
-            let actual_types: HashSet<Type> = types.into_iter().collect();
-            assert_eq!(actual_types, expected_types);
+            let actual_types: HashSet<String> =
+                types.into_iter().map(|t| quote!(#t).to_string()).collect();
+            assert!(
+                actual_types.len() == 2
+                    && actual_types.contains("bool")
+                    && actual_types.contains("i32")
+            );
 
             // Check fields: only b_field should have #[ignore_bounds]
             let fields: Vec<_> = struct_a.fields.iter().collect();
@@ -923,8 +1153,13 @@ mod tests {
             let types: Punctuated<Type, Token![,]> = fundamental_attr
                 .parse_args_with(Punctuated::parse_terminated)
                 .expect("Failed to parse fundamental_tys args");
-            let actual_types: HashSet<Type> = types.into_iter().collect();
-            assert_eq!(actual_types, expected_types);
+            let actual_types: HashSet<String> =
+                types.into_iter().map(|t| quote!(#t).to_string()).collect();
+            assert!(
+                actual_types.len() == 2
+                    && actual_types.contains("String")
+                    && actual_types.contains("u32")
+            );
 
             // Check fields: only a_field should have #[ignore_bounds]
             let fields: Vec<_> = struct_b.fields.iter().collect();

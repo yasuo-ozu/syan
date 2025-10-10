@@ -71,33 +71,33 @@ trait FindAttribute {
         }
     }
 
-    fn get_predicate_parse(&self, tp_atom: &Ident) -> Vec<WherePredicate> {
+    fn get_predicate_parse(&self, tp_atom: &Ident, syan: &Path) -> Vec<WherePredicate> {
         let mut predicates = Vec::new();
 
         // Collect all #[predicate(..)] attributes
         for attr in self.iter_attributes("predicate") {
-            predicates.extend(self.parse_predicate_attr(attr, tp_atom));
+            predicates.extend(self.parse_predicate_attr(attr, tp_atom, syan));
         }
 
         // Collect all #[predicate_parse(..)] attributes
         for attr in self.iter_attributes("predicate_parse") {
-            predicates.extend(self.parse_predicate_attr(attr, tp_atom));
+            predicates.extend(self.parse_predicate_attr(attr, tp_atom, syan));
         }
 
         predicates
     }
 
-    fn get_predicate_unparse(&self, tp_atom: &Ident) -> Vec<WherePredicate> {
+    fn get_predicate_unparse(&self, tp_atom: &Ident, syan: &Path) -> Vec<WherePredicate> {
         let mut predicates = Vec::new();
 
         // Collect all #[predicate(..)] attributes
         for attr in self.iter_attributes("predicate") {
-            predicates.extend(self.parse_predicate_attr(attr, tp_atom));
+            predicates.extend(self.parse_predicate_attr(attr, tp_atom, syan));
         }
 
         // Collect all #[predicate_unparse(..)] attributes
         for attr in self.iter_attributes("predicate_unparse") {
-            predicates.extend(self.parse_predicate_attr(attr, tp_atom));
+            predicates.extend(self.parse_predicate_attr(attr, tp_atom, syan));
         }
 
         predicates
@@ -107,7 +107,12 @@ trait FindAttribute {
     where
         Ident: PartialEq<I>;
 
-    fn parse_predicate_attr(&self, attr: &Attribute, tp_atom: &Ident) -> Vec<WherePredicate> {
+    fn parse_predicate_attr(
+        &self,
+        attr: &Attribute,
+        tp_atom: &Ident,
+        syan: &Path,
+    ) -> Vec<WherePredicate> {
         match &attr.meta {
             Meta::List(MetaList { tokens, .. }) => {
                 use proc_macro2::TokenTree;
@@ -122,6 +127,10 @@ trait FindAttribute {
                                 if ident == "atom" {
                                     token_iter.next();
                                     processed_tokens.extend(quote!(#tp_atom));
+                                    continue;
+                                } else if ident == "syan" {
+                                    token_iter.next();
+                                    processed_tokens.extend(quote!(#syan));
                                     continue;
                                 }
                             }
@@ -431,12 +440,6 @@ trait Adt {
                 ) -> ::core::result::Result<Self, Self::Error> {
                     ::core::unimplemented!()
                 }
-                fn convert_error(_: Self::Error) -> #syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>
-                where
-                    #tp_atom: #syan::span::Spanned,
-                {
-                    ::core::unimplemented!()
-                }
             }
         });
         let mut where_predicates: Punctuated<WherePredicate, token::Comma> = Punctuated::new();
@@ -444,8 +447,7 @@ trait Adt {
         let mut wrapper_counter = 0usize;
 
         where_predicates.push(parse_quote!(#tp_atom: #syan::span::Spanned));
-        let tp_error_final: Type =
-            parse_quote!(#syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>);
+        let tp_error_final: Type = parse_quote!(#syan::error::ParseError);
         let mut substructs: Vec<ItemStruct> = Vec::new();
 
         if let Some(fundamental_tys) = input_attrs.get_fundamental_tys() {
@@ -457,7 +459,7 @@ trait Adt {
         }
 
         // Add predicates from #[predicate] and #[predicate_parse] attributes
-        for predicate in input_attrs.get_predicate_parse(&tp_atom) {
+        for predicate in input_attrs.get_predicate_parse(&tp_atom, syan) {
             where_predicates.push(predicate);
         }
 
@@ -514,14 +516,11 @@ trait Adt {
                     field.ty.clone()
                 };
 
-                let v_error = quote!(e);
-                let err_mapper = quote!(<#to_parse_ty as #syan::parse::parse::Parse<#tp_atom>>::convert_error(#v_error));
-
                 if let Some((substruct, subfields)) = substruct {
                     ret.extend(quote!(
                         let #field_ident: #to_parse_ty = ::core::result::Result::map_err(
                             <#to_parse_ty as #syan::parse::parse::Parse<#tp_atom>>::parse(&mut #v_stream),
-                            |#v_error| #err_mapper
+                            |err| <_ as #syan::error::Error>::into_parse_error(err)
                         )?;
                         let (#{ &substruct.ident } {
                             #(for subfield in subfields) { #{&subfield.ident.as_ref().unwrap()}, }
@@ -541,7 +540,7 @@ trait Adt {
                         }
                         let #field_ident = ::core::result::Result::map_err(
                             <#to_parse_ty as #syan::parse::parse::Parse<#tp_atom>>::parse(&mut #v_stream),
-                            |#v_error| #err_mapper
+                            |err| <_ as #syan::error::Error>::into_parse_error(err)
                         )?;
                     ));
                 }
@@ -566,12 +565,6 @@ trait Adt {
                 ) -> ::core::result::Result<Self, Self::Error> {
                     let mut #v_stream = #v_stream.into_parse_stream();
                     #inner
-                }
-                fn convert_error(_: Self::Error) -> #syan::error::ParseError<<#tp_atom as #syan::span::Spanned>::Span>
-                where
-                    #tp_atom: #syan::span::Spanned,
-                {
-                    ::core::unimplemented!()
                 }
             }
         }
@@ -621,7 +614,7 @@ trait Adt {
         }
 
         // Add predicates from #[predicate] and #[predicate_unparse] attributes
-        for predicate in input_attrs.get_predicate_unparse(&tp_atom) {
+        for predicate in input_attrs.get_predicate_unparse(&tp_atom, syan) {
             where_predicates.push(predicate);
         }
 

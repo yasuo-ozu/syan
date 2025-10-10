@@ -59,12 +59,18 @@ impl<Atom, T: Unparse<Atom>> Unparse<Atom> for Option<T> {
     }
 }
 
-impl<Atom, T: Unparse<Atom>> Unparse<Atom> for Vec<T> {
+impl<const N: usize, Atom, T: Unparse<Atom>> Unparse<Atom> for [T; N] {
     fn unparse<E: Emitter<Atom>>(&self, emitter: &mut E) -> Result<(), E::Error> {
         for item in self {
             item.unparse(emitter)?;
         }
         Ok(())
+    }
+}
+
+impl<Atom> Unparse<Atom> for core::convert::Infallible {
+    fn unparse<E: Emitter<Atom>>(&self, _emitter: &mut E) -> Result<(), E::Error> {
+        match *self {}
     }
 }
 

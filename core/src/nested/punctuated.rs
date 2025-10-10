@@ -248,7 +248,7 @@ where
     Item: Parse<Atom>,
     Punct: Parse<Atom>,
     Item::Error: crate::error::UnionWith<Punct::Error>,
-    <Item::Error as crate::error::UnionWith<Punct::Error>>::Output: Into<ParseError<<Atom as Spanned>::Span>>,
+    <Item::Error as crate::error::UnionWith<Punct::Error>>::Output: Into<ParseError>,
 {
     type Error = <Item::Error as crate::error::UnionWith<Punct::Error>>::Output;
 
@@ -285,12 +285,5 @@ where
         Ok(Self {
             inner: PunctuatedInner(Some((Box::new(first_item), pairs))),
         })
-    }
-
-    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
-    where
-        Atom: Spanned,
-    {
-        error.into()
     }
 }

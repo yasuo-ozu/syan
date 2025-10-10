@@ -22,10 +22,10 @@ pub trait ParseStream {
         todo!()
     }
 
-    fn validate_spacing<S: Span>(
+    fn validate_spacing<S: Span + 'static>(
         &mut self,
         is_joint: bool,
-    ) -> Result<(), crate::error::ParseError<S>>
+    ) -> Result<(), crate::error::ParseError>
     where
         Self::Atom: Spanned<Span = S>,
     {

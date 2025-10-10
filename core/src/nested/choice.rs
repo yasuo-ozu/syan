@@ -30,13 +30,6 @@ impl<Atom: Clone, T: 'static + Parse<Atom>> Parse<Atom> for Choice<(T, ())> {
             PhantomData,
         ))
     }
-
-    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
-    where
-        Atom: Spanned,
-    {
-        T::convert_error(error)
-    }
 }
 
 impl<Atom: Clone + Spanned, T: 'static + Parse<Atom>, U, HList> Parse<Atom>
@@ -45,7 +38,7 @@ where
     Choice<(U, HList)>: Parse<Atom>,
     T::Error: crate::error::UnionWith<<Choice<(U, HList)> as Parse<Atom>>::Error>,
     <T::Error as crate::error::UnionWith<<Choice<(U, HList)> as Parse<Atom>>::Error>>::Output:
-        Into<ParseError<<Atom as Spanned>::Span>>,
+        Into<ParseError>,
 {
     type Error =
         <T::Error as crate::error::UnionWith<<Choice<(U, HList)> as Parse<Atom>>::Error>>::Output;
@@ -61,13 +54,6 @@ where
                 })
             }
         }
-    }
-
-    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
-    where
-        Atom: Spanned,
-    {
-        error.into()
     }
 }
 impl<Atom: Clone> Unparse<Atom> for Choice<()> {

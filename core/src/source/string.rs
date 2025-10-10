@@ -1,6 +1,6 @@
 use crate::error::ParseError;
 use crate::parse::{IntoParseStream, Parse, ParseStream};
-use crate::span::{Spanned, WithSpan};
+use crate::span::WithSpan;
 use crate::symbol::Symbol;
 use core::convert::Infallible;
 
@@ -112,7 +112,7 @@ macro_rules! impl_parse_for_char {
     ($($name:ident),* $(,)?) => {
         $(
             impl Parse<WithSpan<char, Span>> for Symbol<crate::symbol::chars::$name> {
-                type Error = ParseError<Span>;
+                type Error = ParseError;
 
                 fn parse(
                     stream: impl IntoParseStream<Atom = WithSpan<char, Span>>,
@@ -130,13 +130,6 @@ macro_rules! impl_parse_for_char {
                         }
                         None => Err(ParseError::new(Span::default(), "unexpected end of input")),
                     }
-                }
-
-                fn convert_error(error: Self::Error) -> ParseError<<WithSpan<char, Span> as Spanned>::Span>
-                where
-                    WithSpan<char, Span>: Spanned,
-                {
-                   error
                 }
             }
         )*

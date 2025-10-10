@@ -49,12 +49,12 @@ impl<Tuple> core::convert::From<Tuple> for Joint<Tuple> {
 impl<Atom: Spanned, Tuple, Head, Rem> Parse<Atom> for Joint<Tuple>
 where
     Tuple: crate::tuple::PopHead<Head = Head, Rem = Rem>,
-    Joint<Rem>: Parse<Atom, Error = ParseError<Atom::Span>>,
+    Joint<Rem>: Parse<Atom, Error = ParseError>,
     Rem: crate::tuple::PopHead,
     Head: Parse<Atom>,
-    Head::Error: Into<ParseError<Atom::Span>>,
+    Head::Error: Into<ParseError>,
 {
-    type Error = ParseError<Atom::Span>;
+    type Error = ParseError;
 
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
@@ -66,30 +66,16 @@ where
         let rem = <Joint<Rem>>::parse(&mut stream)?.0;
         Ok(Joint(Tuple::unsplit(head, rem)))
     }
-
-    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
-    where
-        Atom: Spanned,
-    {
-        error
-    }
 }
 
 impl<Atom: Spanned, T> Parse<Atom> for Joint<(T,)>
 where
     T: Parse<Atom>,
-    T::Error: Into<ParseError<Atom::Span>>,
+    T::Error: Into<ParseError>,
 {
-    type Error = ParseError<Atom::Span>;
+    type Error = ParseError;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         Ok(Joint((T::parse(stream).map_err(Into::into)?,)))
-    }
-
-    fn convert_error(error: Self::Error) -> ParseError<<Atom as Spanned>::Span>
-    where
-        Atom: Spanned,
-    {
-        error
     }
 }
 

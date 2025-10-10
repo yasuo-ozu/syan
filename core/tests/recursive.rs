@@ -3,7 +3,6 @@ pub mod rec {
     use syan::parse::{Parse, Unparse};
 
     #[derive(Parse, Unparse)]
-    #[predicate($atom: Clone)]
     pub struct A<S> {
         a: Box<B<S>>,
         b: Box<C<S>>,
@@ -11,13 +10,11 @@ pub mod rec {
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate($atom: Clone)]
     pub struct B<S> {
         a: Box<A<S>>,
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate($atom: Clone)]
     pub struct C<S> {
         a: Box<A<S>>,
     }
@@ -30,8 +27,6 @@ pub mod complex_cycles {
     use syan::parse::{Parse, Unparse};
 
     #[derive(Parse, Unparse)]
-    #[predicate(K: std::hash::Hash + std::cmp::Eq)]
-    #[predicate($atom: Clone)]
     pub struct Node<T, K = String> {
         value: T,
         children: Vec<Box<TreeNode<T, K>>>,
@@ -39,8 +34,6 @@ pub mod complex_cycles {
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate(Graph<T, K>: Parse<$atom>)]
-    #[predicate($atom: Clone)]
     pub enum TreeNode<T, K> {
         Leaf {
             data: T,
@@ -53,7 +46,6 @@ pub mod complex_cycles {
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate(HashMap<K, Vertex<T, K>>: Parse<$atom>)]
     pub struct Graph<T, K> {
         vertices: HashMap<K, Vertex<T, K>>,
         edges: Vec<Edge<T, K>>,
@@ -61,8 +53,6 @@ pub mod complex_cycles {
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate(K: std::hash::Hash + std::cmp::Eq)]
-    #[predicate($atom: Clone)]
     pub enum Vertex<T, K> {
         Simple(T),
         Complex {
@@ -72,8 +62,6 @@ pub mod complex_cycles {
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate(K: std::hash::Hash + std::cmp::Eq)]
-    #[predicate($atom: Clone)]
     pub struct Edge<T, K> {
         from: Box<Vertex<T, K>>,
         to: Box<Vertex<T, K>>,
@@ -82,8 +70,6 @@ pub mod complex_cycles {
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate(K: std::hash::Hash + std::cmp::Eq)]
-    #[predicate($atom: Clone)]
     pub enum NodeMeta<K> {
         Empty,
         Tagged(K),
@@ -100,7 +86,6 @@ pub mod cross_module_refs {
     use syan::parse::{Parse, Unparse};
 
     #[derive(Parse, Unparse)]
-    #[predicate($atom: Clone)]
     pub enum MultiRef<T> {
         Simple(T),
         RecRef(Box<rec::A<T>>),
@@ -113,7 +98,6 @@ pub mod cross_module_refs {
     }
 
     #[derive(Parse, Unparse)]
-    #[predicate($atom: Clone)]
     pub struct SimpleChain<T> {
         value: T,
         next: Option<Box<SimpleChain<T>>>,
