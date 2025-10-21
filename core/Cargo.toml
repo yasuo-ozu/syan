@@ -18,7 +18,7 @@ license = "MIT"
 parametrized = "0.1.7"
 newer-type = "0.1.1"
 proc-macro2 = { version = "1.0", optional = true }
-syan-macro = { path = "../macro" }
+syan-macro = { path = "../macro", version = "0.1.0" }
 
 [dev-dependencies]
 template-quote = "0.4"
