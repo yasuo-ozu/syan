@@ -91,7 +91,36 @@ fn find_fundamental_tys(
                 return Some([ty.clone()].into());
             }
         }
-        if let Some(_) = compare_trait_path(
+        if let Some(_) =
+            compare_trait_path([&parse_quote!(syan::nested::group::GroupAngle<T, S>)], path)
+        {
+            additional_predicates
+                .push(quote!($syan::symbol::chars::OpenAngle: $syan::parse::Parse<$atom>));
+            additional_predicates
+                .push(quote!($syan::symbol::chars::CloseAngle: $syan::parse::Parse<$atom>));
+        } else if let Some(_) =
+            compare_trait_path([&parse_quote!(syan::nested::group::GroupBrace<T, S>)], path)
+        {
+            additional_predicates
+                .push(quote!($syan::symbol::chars::OpenBrace: $syan::parse::Parse<$atom>));
+            additional_predicates
+                .push(quote!($syan::symbol::chars::CloseBrace: $syan::parse::Parse<$atom>));
+        } else if let Some(_) = compare_trait_path(
+            [&parse_quote!(syan::nested::group::GroupBracket<T, S>)],
+            path,
+        ) {
+            additional_predicates
+                .push(quote!($syan::symbol::chars::OpenBracket: $syan::parse::Parse<$atom>));
+            additional_predicates
+                .push(quote!($syan::symbol::chars::CloseBracket: $syan::parse::Parse<$atom>));
+        } else if let Some(_) =
+            compare_trait_path([&parse_quote!(syan::nested::group::GroupParen<T, S>)], path)
+        {
+            additional_predicates
+                .push(quote!($syan::symbol::chars::OpenParen: $syan::parse::Parse<$atom>));
+            additional_predicates
+                .push(quote!($syan::symbol::chars::CloseParen: $syan::parse::Parse<$atom>));
+        } else if let Some(_) = compare_trait_path(
             [
                 &parse_quote!(::core::option::Option<T>),
                 &parse_quote!(::std::option::Option<T>),

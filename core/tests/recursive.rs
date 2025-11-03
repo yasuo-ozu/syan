@@ -104,3 +104,18 @@ pub mod cross_module_refs {
         multi_ref: Box<MultiRef<T>>,
     }
 }
+
+#[syan::parse::recurse]
+pub mod group_paren_test {
+    use syan::parse::{Parse, Unparse};
+    use syan::symbol::Token;
+    use type_macro_derive_tricks::macro_derive;
+
+    #[macro_derive(Parse, Unparse)]
+    pub struct GroupParenExample<S> {
+        pub paren_token: syan::nested::group::GroupParen<(), S>,
+        #[group(self.paren_token)]
+        pub inner_value: Token![S => inner],
+        pub next: Option<Box<GroupParenExample<S>>>,
+    }
+}

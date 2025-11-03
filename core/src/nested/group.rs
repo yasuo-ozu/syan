@@ -11,19 +11,19 @@ pub struct Group<T, O, C> {
     pub close: C,
 }
 
-impl<Atom: Spanned, T, O, C> Parse<Atom> for Group<T, O, C>
+impl<Atom, T, O, C> Parse<Atom> for Group<T, O, C>
 where
-    T: Parse<Atom, Error = ParseError>,
-    O: Parse<Atom, Error = ParseError>,
-    C: Parse<Atom, Error = ParseError>,
+    T: Parse<Atom>,
+    O: Parse<Atom>,
+    C: Parse<Atom>,
 {
     type Error = ParseError;
 
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
-        let open = O::parse(&mut stream)?;
-        let slot = T::parse(&mut stream)?;
-        let close = C::parse(&mut stream)?;
+        let open = O::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+        let slot = T::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+        let close = C::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
         Ok(Group { open, slot, close })
     }
 }
@@ -39,6 +39,32 @@ pub trait EmptyGroup {
 
     fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>;
     fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self);
+}
+
+pub trait EmptyGroupParse<Atom> {
+    type Fill<Slot>: Parse<Atom>
+    where
+        Slot: Parse<Atom>;
+
+    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>
+    where
+        Slot: Parse<Atom>;
+    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self)
+    where
+        Slot: Parse<Atom>;
+}
+
+pub trait EmptyGroupUnparse<Atom> {
+    type Fill<Slot>: Unparse<Atom>
+    where
+        Slot: Unparse<Atom>;
+
+    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>
+    where
+        Slot: Unparse<Atom>;
+    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self)
+    where
+        Slot: Unparse<Atom>;
 }
 
 impl<T, O, C> std::fmt::Display for Group<T, O, C>
@@ -75,6 +101,74 @@ impl<O, C> EmptyGroup for Group<(), O, C> {
         )
     }
     fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot> {
+        Group {
+            slot,
+            open: self.open,
+            close: self.close,
+        }
+    }
+}
+
+impl<Atom, O, C> EmptyGroupParse<Atom> for Group<(), O, C>
+where
+    O: Parse<Atom>,
+    C: Parse<Atom>,
+{
+    type Fill<Slot> = Group<Slot, O, C>
+    where
+        Slot: Parse<Atom>;
+
+    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self)
+    where
+        Slot: Parse<Atom>,
+    {
+        (
+            group.slot,
+            Group {
+                slot: (),
+                open: group.open,
+                close: group.close,
+            },
+        )
+    }
+    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>
+    where
+        Slot: Parse<Atom>,
+    {
+        Group {
+            slot,
+            open: self.open,
+            close: self.close,
+        }
+    }
+}
+
+impl<Atom, O, C> EmptyGroupUnparse<Atom> for Group<(), O, C>
+where
+    O: Unparse<Atom>,
+    C: Unparse<Atom>,
+{
+    type Fill<Slot> = Group<Slot, O, C>
+    where
+        Slot: Unparse<Atom>;
+
+    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self)
+    where
+        Slot: Unparse<Atom>,
+    {
+        (
+            group.slot,
+            Group {
+                slot: (),
+                open: group.open,
+                close: group.close,
+            },
+        )
+    }
+    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>
+    where
+        Slot: Unparse<Atom>,
+    {
         Group {
             slot,
             open: self.open,

@@ -503,20 +503,14 @@ trait Adt {
                 let substruct = generate_substruct(&member, generics, ident, &field_ident, &field_phantom, &mut fields, nonce, false);
                     let field_ty = &field.ty;
 
-                let to_parse_ty = if let Some((substruct, _)) = &substruct {
+                if let Some((substruct, subfields)) = substruct {
                     if spacing.is_some() {
                         abort!(&field, "Cannot specify #[joint] or #[alonw] to field {}", quote!(#{&field.ident}));
                     }
                     let substruct_ident = &substruct.ident;
-                    let field_ty_to_parse = parse_quote! {<#field_ty as #syan::nested::group::EmptyGroup>::Fill<
+                    let to_parse_ty: Type = parse_quote! {<#field_ty as #syan::nested::group::EmptyGroupParse<#tp_atom>>::Fill<
                         #substruct_ident  #ty_generics
                     >};
-                    field_ty_to_parse
-                } else {
-                    field.ty.clone()
-                };
-
-                if let Some((substruct, subfields)) = substruct {
                     ret.extend(quote!(
                         let #field_ident: #to_parse_ty = ::core::result::Result::map_err(
                             <#to_parse_ty as #syan::parse::parse::Parse<#tp_atom>>::parse(&mut #v_stream),
@@ -525,12 +519,28 @@ trait Adt {
                         let (#{ &substruct.ident } {
                             #(for subfield in subfields) { #{&subfield.ident.as_ref().unwrap()}, }
                             #field_phantom: _
-                        }, #field_ident) = #syan::nested::group::EmptyGroup::unfill(#field_ident);
+                        }, #field_ident) = #syan::nested::group::EmptyGroupParse::unfill(#field_ident);
                     ));
 
+                    let substruct_ty: Type = parse2(quote!(#{&substruct.ident}<#(for p in &substruct.generics.params), {#p}>)).unwrap();
+                    let mut replaced_ty = field.ty.clone();
+                    if let Type::Path(TypePath {  path,.. }) = &mut replaced_ty {
+                        if let Some(PathSegment {  arguments: PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) ,..}) = path.segments.last_mut() {
+                            for arg in args.iter_mut() {
+                                if let GenericArgument::Type(ty) = arg {
+                                    if ty == &parse_quote!(()) {
+                                        *ty = substruct_ty.clone();
+                                    } else {
+                                        where_predicates.push(parse_quote!(#ty: Parse<#tp_atom>));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     substructs.push(substruct);
-                    where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup));
+                    where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroupParse<#tp_atom>));
                 } else {
+                    let to_parse_ty = field.ty.clone();
                     ret.extend(quote!(
                         #(if let Some(spacing) = spacing) {
                             let #field_ident = #syan::parse::parse_stream::ParseStream::validate_spacing(
@@ -652,8 +662,7 @@ trait Adt {
                     true,
                 ) {
                     ret.extend(quote! {
-                        use #syan::nested::group::EmptyGroup as _;
-                        let #field_ident = <#field_ty as #syan::nested::group::EmptyGroup>::fill(
+                        let #field_ident = <#field_ty as #syan::nested::group::EmptyGroupUnparse<#tp_atom>>::fill(
                             ::core::clone::Clone::clone(#field_ident),
                             #{&substruct.ident} {
                                 #(for subfield in &subfields) { #{&subfield.ident}, }
@@ -668,8 +677,8 @@ trait Adt {
                         #{&substruct.ident}
                         #{fill_ty_generics.split_for_impl().1}
                     };
-                    where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup + ::core::clone::Clone));
-                    where_predicates.push(parse_quote!(for<'syan_substruct_ref> <#field_ty as #syan::nested::group::EmptyGroup>::Fill<#fill_ty>: #syan::parse::unparse::Unparse<#tp_atom>));
+                    where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroupUnparse<#tp_atom> + ::core::clone::Clone));
+                    where_predicates.push(parse_quote!(for<'syan_substruct_ref> <#field_ty as #syan::nested::group::EmptyGroupUnparse<#tp_atom>>::Fill<#fill_ty>: #syan::parse::unparse::Unparse<#tp_atom>));
                     substructs.push(substruct);
                 }
                 ret.extend(quote!(
