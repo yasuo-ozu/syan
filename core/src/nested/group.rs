@@ -41,32 +41,6 @@ pub trait EmptyGroup {
     fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self);
 }
 
-pub trait EmptyGroupParse<Atom> {
-    type Fill<Slot>: Parse<Atom>
-    where
-        Slot: Parse<Atom>;
-
-    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>
-    where
-        Slot: Parse<Atom>;
-    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self)
-    where
-        Slot: Parse<Atom>;
-}
-
-pub trait EmptyGroupUnparse<Atom> {
-    type Fill<Slot>: Unparse<Atom>
-    where
-        Slot: Unparse<Atom>;
-
-    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>
-    where
-        Slot: Unparse<Atom>;
-    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self)
-    where
-        Slot: Unparse<Atom>;
-}
-
 impl<T, O, C> std::fmt::Display for Group<T, O, C>
 where
     T: std::fmt::Display,
@@ -101,74 +75,6 @@ impl<O, C> EmptyGroup for Group<(), O, C> {
         )
     }
     fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot> {
-        Group {
-            slot,
-            open: self.open,
-            close: self.close,
-        }
-    }
-}
-
-impl<Atom, O, C> EmptyGroupParse<Atom> for Group<(), O, C>
-where
-    O: Parse<Atom>,
-    C: Parse<Atom>,
-{
-    type Fill<Slot> = Group<Slot, O, C>
-    where
-        Slot: Parse<Atom>;
-
-    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self)
-    where
-        Slot: Parse<Atom>,
-    {
-        (
-            group.slot,
-            Group {
-                slot: (),
-                open: group.open,
-                close: group.close,
-            },
-        )
-    }
-    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>
-    where
-        Slot: Parse<Atom>,
-    {
-        Group {
-            slot,
-            open: self.open,
-            close: self.close,
-        }
-    }
-}
-
-impl<Atom, O, C> EmptyGroupUnparse<Atom> for Group<(), O, C>
-where
-    O: Unparse<Atom>,
-    C: Unparse<Atom>,
-{
-    type Fill<Slot> = Group<Slot, O, C>
-    where
-        Slot: Unparse<Atom>;
-
-    fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self)
-    where
-        Slot: Unparse<Atom>,
-    {
-        (
-            group.slot,
-            Group {
-                slot: (),
-                open: group.open,
-                close: group.close,
-            },
-        )
-    }
-    fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>
-    where
-        Slot: Unparse<Atom>,
-    {
         Group {
             slot,
             open: self.open,
