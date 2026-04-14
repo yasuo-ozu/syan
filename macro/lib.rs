@@ -1,10 +1,12 @@
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro_error::proc_macro_error;
+use syn::punctuated::Punctuated;
 use syn::*;
 
 mod attribute;
-mod recurse;
 mod symbol;
+
+use crate::attribute::FindAttribute;
 
 fn random() -> u64 {
     use std::hash::{BuildHasher, Hasher};
@@ -14,53 +16,46 @@ fn random() -> u64 {
 }
 
 #[proc_macro_error]
-#[proc_macro_attribute]
-pub fn recurse(_attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
-    recurse::recurse(parse_macro_input!(input)).into()
-}
-
-#[proc_macro_error]
-#[proc_macro_derive(
-    Parse,
-    attributes(
-        group,
-        syan,
-        joint,
-        alone,
-        ignore_bounds,
-        fundamental_tys,
-        predicate,
-        predicate_parse,
-        predicate_unparse
-    )
-)]
+#[proc_macro_derive(Parse, attributes(group, syan, joint, alone, ignore_bounds,))]
 pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
-    attribute::parse(&parse_macro_input!(input), random()).into()
+    let input: DeriveInput = parse_macro_input!(input);
+    let syan = input.attrs.get_syan();
+    let trait_path: Path = parse_quote!(#syan::parse::parse::Parse);
+    attribute::parse(
+        &input.ident,
+        &input.generics,
+        &input.data,
+        random(),
+        &syan,
+        &trait_path,
+    )
+    .into()
 }
 
 #[proc_macro_error]
-#[proc_macro_derive(
-    Unparse,
-    attributes(
-        group,
-        syan,
-        joint,
-        alone,
-        ignore_bounds,
-        fundamental_tys,
-        predicate,
-        predicate_parse,
-        predicate_unparse
-    )
-)]
+#[proc_macro_derive(Unparse, attributes(group, syan, joint, alone, ignore_bounds,))]
 pub fn unparse(input: TokenStream1) -> TokenStream1 {
-    attribute::unparse(&parse_macro_input!(input), random()).into()
+    let input: DeriveInput = parse_macro_input!(input);
+    let syan = input.attrs.get_syan();
+    let trait_path: Path = parse_quote!(#syan::parse::unparse::Unparse);
+    attribute::unparse(
+        &input.ident,
+        &input.generics,
+        &input.data,
+        random(),
+        &syan,
+        &trait_path,
+    )
+    .into()
 }
 
 #[proc_macro_error]
 #[proc_macro_derive(Spanned)]
 pub fn spanned(input: TokenStream1) -> TokenStream1 {
-    attribute::spanned(&parse_macro_input!(input)).into()
+    let input: DeriveInput = parse_macro_input!(input);
+    let syan = input.attrs.get_syan();
+    let trait_path: Path = parse_quote!(#syan::span::Spanned);
+    attribute::spanned(&input, trait_path).into()
 }
 
 #[proc_macro_error]
