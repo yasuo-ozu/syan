@@ -12,8 +12,6 @@ pub use parse::Parse;
 pub use parse_stream::ParseStream;
 pub use unparse::Unparse;
 
-pub use syan_macro::recurse;
-
 use crate::span::Span;
 
 macro_rules! impl_for_collection {
