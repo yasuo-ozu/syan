@@ -47,10 +47,6 @@ pub(crate) trait FindAttribute {
     fn has_default(&self) -> bool {
         self.find_attribute("default").is_some()
     }
-
-    fn has_ignore_bounds(&self) -> bool {
-        self.find_attribute("ignore_bounds").is_some()
-    }
 }
 
 #[allow(dead_code)]
@@ -331,6 +327,7 @@ pub(crate) trait Adt {
         let mut wrapper_counter = 0usize;
 
         where_predicates.push(parse_quote!(#tp_atom: #syan::span::Spanned));
+        where_predicates.push(parse_quote!(#tp_atom: ::core::clone::Clone));
         let tp_error_final: Type = parse_quote!(#syan::error::ParseError);
         let mut substructs: Vec<ItemStruct> = Vec::new();
 
@@ -788,7 +785,7 @@ impl Adt for DataEnum {
         quote! {
             let mut __syan_errors = ::std::vec::Vec::new();
             #(for (variant, fields, inner) in variants) {
-                match (|| {
+                match #syan::parse::ParseStream::dup(&mut __syan_stream, |mut __syan_stream| {
                     #inner
                     ::core::result::Result::Ok(
                         #ident :: #{ &variant.ident }
@@ -799,7 +796,7 @@ impl Adt for DataEnum {
                             {#(for (_, field_ident, _) in &fields) {#field_ident,}}
                         }
                     )
-                })() {
+                }) {
                     ::core::result::Result::Err(err) => {
                         __syan_errors.push(err);
                     }

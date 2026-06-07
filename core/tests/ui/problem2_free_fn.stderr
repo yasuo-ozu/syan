@@ -1,0 +1,32 @@
+error[E0392]: type parameter `S` is never used
+  --> tests/ui/problem2_free_fn.rs:14:19
+   |
+14 |     pub enum Expr<S> {
+   |                   ^ unused type parameter
+   |
+   = help: consider removing `S`, referring to it in a field, or using a marker such as `PhantomData`
+   = help: if you intended `S` to be a const parameter, use `const S: /* Type */` instead
+
+error[E0282]: type annotations needed
+ --> tests/ui/problem2_free_fn.rs:8:1
+  |
+8 | #[recurse]
+  | ^^^^^^^^^^ cannot infer type
+  |
+  = note: this error originates in the attribute macro `recurse` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+  --> tests/ui/problem2_free_fn.rs:25:52
+   |
+25 |             Expr::Nested(inner) => 1 + count_nodes(inner),
+   |                                        ----------- ^^^^^ expected `&__ExprRec<_>`, found `&__ExprRec<S, __ExprRec<S, ...>>`
+   |                                        |
+   |                                        arguments to this function are incorrect
+   |
+   = note: expected reference `&__ExprRec<_, __ExprRec<_, __ExprRec<_, __ExprRec<_, ExprTerm>>>>`
+              found reference `&__ExprRec<S, __ExprRec<S, __ExprRec<S, ExprTerm>>>`
+note: function defined here
+  --> tests/ui/problem2_free_fn.rs:22:12
+   |
+22 |     pub fn count_nodes<S>(e: &Expr<S>) -> usize {
+   |            ^^^^^^^^^^^    -----------

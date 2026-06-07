@@ -1,9 +1,9 @@
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro_error::proc_macro_error;
-use syn::punctuated::Punctuated;
 use syn::*;
 
 mod attribute;
+mod recurse;
 mod symbol;
 
 use crate::attribute::FindAttribute;
@@ -63,4 +63,10 @@ pub fn spanned(input: TokenStream1) -> TokenStream1 {
 pub fn symbol(input: TokenStream1) -> TokenStream1 {
     let args = parse_macro_input!(input as symbol::SymbolArgs);
     symbol::symbol(args).into()
+}
+
+#[proc_macro_error]
+#[proc_macro_attribute]
+pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
+    recurse::recurse(attr, input)
 }

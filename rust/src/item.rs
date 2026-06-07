@@ -480,7 +480,7 @@ pub enum Extern<S> {
 /// Use tree structure
 /// Examples: std::vec::Vec, std::*, std::{Vec, HashMap}, std::vec::Vec as Vector
 
-#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Spanned, Parse, Unparse)]
+#[macro_derive(Clone, Debug, PartialEq, Eq, Hash, Parse, Unparse)]
 pub enum UseTree<S> {
     Simple {
         name: Ident<S>,

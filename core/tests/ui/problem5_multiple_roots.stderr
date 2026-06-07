@@ -1,0 +1,25 @@
+error[E0392]: type parameter `S` is never used
+  --> tests/ui/problem5_multiple_roots.rs:18:19
+   |
+18 |     pub enum Tree<S> {
+   |                   ^ unused type parameter
+   |
+   = help: consider removing `S`, referring to it in a field, or using a marker such as `PhantomData`
+   = help: if you intended `S` to be a const parameter, use `const S: /* Type */` instead
+
+error[E0392]: type parameter `S` is never used
+  --> tests/ui/problem5_multiple_roots.rs:25:21
+   |
+25 |     pub enum Forest<S> {
+   |                     ^ unused type parameter
+   |
+   = help: consider removing `S`, referring to it in a field, or using a marker such as `PhantomData`
+   = help: if you intended `S` to be a const parameter, use `const S: /* Type */` instead
+
+error[E0282]: type annotations needed
+ --> tests/ui/problem5_multiple_roots.rs:8:1
+  |
+8 | #[recurse]
+  | ^^^^^^^^^^ cannot infer type
+  |
+  = note: this error originates in the attribute macro `recurse` (in Nightly builds, run with -Z macro-backtrace for more info)

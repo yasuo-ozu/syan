@@ -10,6 +10,7 @@ mod tuple;
 pub use into_parse_stream::IntoParseStream;
 pub use parse::Parse;
 pub use parse_stream::ParseStream;
+pub use syan_macro::recurse;
 pub use unparse::Unparse;
 
 use crate::span::Span;

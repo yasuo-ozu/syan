@@ -132,9 +132,9 @@ where
         ),
         S,
     >: Parse<Atom, Error = E>,
-    E: syan::error::UnionWith<ParseError<S::Span>>,
+    E: syan::error::UnionWith<ParseError>,
 {
-    type Error = <E as syan::error::UnionWith<ParseError<S::Span>>>::Output;
+    type Error = <E as syan::error::UnionWith<ParseError>>::Output;
 
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
@@ -152,9 +152,9 @@ where
             match param {
                 GenericParam::Lifetime { .. } => {
                     if seen_type_or_const {
-                        return Err(<E as syan::error::UnionWith<ParseError<S::Span>>>::use_right(
+                        return Err(<E as syan::error::UnionWith<ParseError>>::use_right(
                             ParseError::new(
-                                S::Span::default(),
+                                (),
                                 "lifetime parameters must come before type and const parameters",
                             ),
                         ));
@@ -196,9 +196,9 @@ where
         ),
         S,
     >: Parse<Atom, Error = E>,
-    E: syan::error::UnionWith<ParseError<S::Span>>,
+    E: syan::error::UnionWith<ParseError>,
 {
-    type Error = <E as syan::error::UnionWith<ParseError<S::Span>>>::Output;
+    type Error = <E as syan::error::UnionWith<ParseError>>::Output;
 
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
@@ -218,9 +218,9 @@ where
             match param {
                 GenericDefParam::Lifetime { .. } => {
                     if seen_type_or_const {
-                        return Err(<E as syan::error::UnionWith<ParseError<S::Span>>>::use_right(
+                        return Err(<E as syan::error::UnionWith<ParseError>>::use_right(
                             ParseError::new(
-                                S::Span::default(),
+                                (),
                                 "lifetime parameters must come before type and const parameters",
                             ),
                         ));
@@ -231,9 +231,9 @@ where
                     if default.is_some() {
                         seen_default = true;
                     } else if seen_default {
-                        return Err(<E as syan::error::UnionWith<ParseError<S::Span>>>::use_right(
+                        return Err(<E as syan::error::UnionWith<ParseError>>::use_right(
                             ParseError::new(
-                                S::Span::default(),
+                                (),
                                 "type parameters with defaults must come after those without defaults",
                             ),
                         ));
@@ -244,9 +244,9 @@ where
                     if default.is_some() {
                         seen_default = true;
                     } else if seen_default {
-                        return Err(<E as syan::error::UnionWith<ParseError<S::Span>>>::use_right(
+                        return Err(<E as syan::error::UnionWith<ParseError>>::use_right(
                             ParseError::new(
-                                S::Span::default(),
+                                (),
                                 "const parameters with defaults must come after those without defaults",
                             ),
                         ));
