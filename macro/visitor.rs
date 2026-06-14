@@ -48,7 +48,7 @@ fn last_ident(path: &Path) -> &Ident {
     &path.segments.last().unwrap().ident
 }
 
-pub fn visitor(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn visitor(attr: TokenStream, item: TokenStream, nonce: u64) -> TokenStream {
     let args: VisitorArgs = match syn::parse2(attr) {
         Ok(a) => a,
         Err(e) => return e.to_compile_error(),
@@ -75,19 +75,38 @@ pub fn visitor(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => quote!(),
     };
     let visited_idents: Vec<&Ident> = args.types.iter().map(last_ident).collect();
-    let first = &args.types[0];
-    let rest = &args.types[1..];
+    let nonce = nonce.to_string();
+    let nonce: TokenStream = nonce.parse().unwrap();
+    let all_types = &args.types;
 
-    quote! {
-        #first ! {
-            @ast #build {
-                @vis { #vis }
-                @ident { #ident }
-                @base { #base_tokens }
-                @build { #build }
-                @visited { #(#visited_idents)* }
-                @done { }
-                @rest { #(#rest),* }
+    let make_state = |rest: &[Path]| {
+        quote! {
+            @vis { #vis }
+            @ident { #ident }
+            @base { #base_tokens }
+            @build { #build }
+            @nonce { #nonce }
+            @visited { #(#visited_idents)* }
+            @inherited { }
+            @done { }
+            @rest { #(#rest),* }
+        }
+    };
+
+    match &args.base {
+        // With a base: first fetch the base module's visited-type list, then fetch all types.
+        Some(base) => {
+            let state = make_state(all_types);
+            quote! {
+                #base::__syan_visited ! { @visited #build { #state } }
+            }
+        }
+        // No base: pop the first type now (so `rest` carries the remainder).
+        None => {
+            let first = &args.types[0];
+            let state = make_state(&args.types[1..]);
+            quote! {
+                #first ! { @ast #build { #state } }
             }
         }
     }
@@ -103,7 +122,9 @@ struct BuildInput {
     ident: Ident,
     base: Option<Path>,
     build: Path,
+    nonce: TokenStream,
     visited: Vec<Ident>,
+    inherited: Vec<Ident>,
     done: Vec<Item>,
     rest: Vec<Path>,
     just: Option<Item>,
@@ -124,7 +145,9 @@ impl Parse for BuildInput {
         let mut ident = None;
         let mut base = None;
         let mut build = None;
+        let mut nonce = TokenStream::new();
         let mut visited = Vec::new();
+        let mut inherited = Vec::new();
         let mut done = Vec::new();
         let mut rest = Vec::new();
         let mut just = None;
@@ -140,7 +163,10 @@ impl Parse for BuildInput {
                     }
                 }
                 "build" => build = Some(syn::parse2(content)?),
+                "nonce" => nonce = content,
                 "visited" => visited = parse_idents(content)?,
+                // `@inherited` is the carried set; `@inh` is appended by a base's visited-list macro.
+                "inherited" | "inh" => inherited.extend(parse_idents(content)?),
                 "done" => done = parse_items(content)?,
                 "rest" => {
                     let paths =
@@ -159,7 +185,9 @@ impl Parse for BuildInput {
             ident: ident.ok_or_else(|| Error::new(Span::call_site(), "missing @ident"))?,
             base,
             build: build.ok_or_else(|| Error::new(Span::call_site(), "missing @build"))?,
+            nonce,
             visited,
+            inherited,
             done,
             rest,
             just,
@@ -205,7 +233,9 @@ pub fn build(input: TokenStream) -> TokenStream {
             ident,
             base,
             build,
+            nonce,
             visited,
+            inherited,
             done,
             rest,
             ..
@@ -221,7 +251,9 @@ pub fn build(input: TokenStream) -> TokenStream {
                     @ident { #ident }
                     @base { #base_tokens }
                     @build { #build }
+                    @nonce { #nonce }
                     @visited { #(#visited)* }
+                    @inherited { #(#inherited)* }
                     @done { #(#done)* }
                     @rest { #(#rest),* }
                 }
@@ -685,6 +717,10 @@ fn gen_side(
                 }
             }
         }
+        // The new trait extends the base, so Driver must satisfy the base too (via base defaults).
+        #(if let Some(b) = base) {
+            impl< #(#g_params,)* __H: #hook_tr #g_use > #b::#visit_tr #g_use for #driver<__H> {}
+        }
 
         #(for s in &sides) {
             pub struct #{&s.hook_struct}<__F>(pub __F);
@@ -736,8 +772,16 @@ fn gen_side(
 
 fn generate_module(st: &BuildInput) -> TokenStream {
     let visited: HashSet<String> = st.visited.iter().map(|i| i.to_string()).collect();
+    // Fields whose head is any of these recurse via a `visit_*` method (new ones generated here,
+    // inherited ones provided by the base trait).
+    let visitable: HashSet<String> = st
+        .visited
+        .iter()
+        .chain(&st.inherited)
+        .map(|i| i.to_string())
+        .collect();
 
-    // Items that get visitor methods (named in #[visitor(..)]).
+    // Items that get visitor methods (named in #[visitor(..)]); inherited types are not regenerated.
     let targets: Vec<&Item> = st
         .done
         .iter()
@@ -780,8 +824,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .iter()
         .map(|it| VType {
             ident: item_ident(it).unwrap().clone(),
-            body: build_body(it, &visited, false),
-            body_mut: build_body(it, &visited, true),
+            body: build_body(it, &visitable, false),
+            body_mut: build_body(it, &visitable, true),
         })
         .collect();
 
@@ -790,11 +834,32 @@ fn generate_module(st: &BuildInput) -> TokenStream {
 
     let vis = &st.vis;
     let mod_ident = &st.ident;
+    let base = &st.base;
+
+    // Every visitor module exports its full visited-type set so another visitor can inherit it.
+    let all_visible: Vec<&Ident> = st.visited.iter().chain(&st.inherited).collect();
+    let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
 
     quote! {
+        #[macro_export]
+        #[doc(hidden)]
+        macro_rules! #vmacro {
+            (@visited $cb:path { $($pre:tt)* }) => {
+                $cb ! { $($pre)* @inh { #(#all_visible)* } }
+            };
+        }
+
         #[allow(non_snake_case, unused_variables, unused_mut, dead_code, clippy::all)]
         #vis mod #mod_ident {
             use super::*;
+            #(if let Some(b) = base) {
+                #[allow(unused_imports)]
+                use #b::{Visit as _, VisitMut as _};
+            }
+
+            #[doc(hidden)]
+            pub use #vmacro as __syan_visited;
+
             #shared
             #mutable
         }
