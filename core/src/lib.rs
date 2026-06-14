@@ -5,6 +5,7 @@ pub mod source;
 pub mod span;
 pub mod symbol;
 pub mod tuple;
+pub mod visit;
 
 #[doc(hidden)]
 pub mod _imp {
