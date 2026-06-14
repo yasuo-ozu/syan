@@ -330,7 +330,7 @@ infers them.
 
 - [ ] use type-leak
 - [ ] add tests that use #[derive(Ast)] and #[recurse] at the same structs
-- [ ] move visitor tests to /core/tests, that are not related to syan-rust crate
+- [x] move visitor tests to /core/tests, that are not related to syan-rust crate
 - [ ] implement auto drill-in feature
 - [ ] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. also deligate $crate to macro_rules! emitted by #[derive(Ast)]
 - [x] remove visit_*_{seq,opt} (and `Cont::Vec`/`Cont::Option` container traversal)
