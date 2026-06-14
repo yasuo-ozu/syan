@@ -277,19 +277,45 @@ fn unbox_head(ty: &Type) -> Option<Ident> {
     Some(seg.ident.clone())
 }
 
-/// Classify a field type into (container, inner-AST-head). `None` => treat as a leaf.
-fn classify(ty: &Type) -> Option<(Cont, Ident)> {
+fn inner_is_boxed(ty: &Type) -> bool {
+    type_head(ty).map_or(false, |s| s.ident == "Box")
+}
+
+/// Classify a field type into `(container, inner-AST-head, route_to_method)`. `None` => leaf.
+///
+/// `route_to_method` is true only for plain `Vec<X>` / `Option<X>` with a non-boxed inner, which
+/// can be passed to the `visit_*_seq(&[X])` / `visit_*_opt(&Option<X>)` hooks directly. Boxed
+/// inners and `VecDeque` fall back to an inline loop (deref-coercion handles the element type).
+fn classify(ty: &Type) -> Option<(Cont, Ident, bool)> {
     let seg = type_head(ty)?;
     match seg.ident.to_string().as_str() {
         "Box" => classify(first_ty_arg(seg)?),
-        "Vec" | "VecDeque" => Some((Cont::Vec, unbox_head(first_ty_arg(seg)?)?)),
-        "Option" => Some((Cont::Option, unbox_head(first_ty_arg(seg)?)?)),
-        _ => Some((Cont::Direct, seg.ident.clone())),
+        "Vec" => {
+            let arg = first_ty_arg(seg)?;
+            Some((Cont::Vec, unbox_head(arg)?, !inner_is_boxed(arg)))
+        }
+        "VecDeque" => {
+            let arg = first_ty_arg(seg)?;
+            Some((Cont::Vec, unbox_head(arg)?, false))
+        }
+        "Option" => {
+            let arg = first_ty_arg(seg)?;
+            Some((Cont::Option, unbox_head(arg)?, !inner_is_boxed(arg)))
+        }
+        _ => Some((Cont::Direct, seg.ident.clone(), false)),
     }
 }
 
 fn method_ident(head: &Ident) -> Ident {
     Ident::new(&format!("visit_{}", to_snake(head)), Span::call_site())
+}
+
+fn seq_ident(head: &Ident) -> Ident {
+    Ident::new(&format!("visit_{}_seq", to_snake(head)), Span::call_site())
+}
+
+fn opt_ident(head: &Ident) -> Ident {
+    Ident::new(&format!("visit_{}_opt", to_snake(head)), Span::call_site())
 }
 
 /// Right-nested `Chain(self.0.into_hook(), Chain(self.1.into_hook(), ...))` over tuple members.
@@ -339,12 +365,22 @@ fn tuple_impls(
         .collect()
 }
 
-fn emit_visit(cont: Cont, head: &Ident, binding: TokenStream) -> TokenStream {
+fn emit_visit(cont: Cont, head: &Ident, method_ok: bool, binding: TokenStream) -> TokenStream {
     let m = method_ident(head);
     match cont {
         Cont::Direct => quote!( this.#m(#binding); ),
+        Cont::Vec if method_ok => {
+            let seq = seq_ident(head);
+            quote!( this.#seq(#binding); )
+        }
         Cont::Vec => quote!( for __x in #binding { this.#m(__x); } ),
-        Cont::Option => quote!( if let ::core::option::Option::Some(__x) = #binding { this.#m(__x); } ),
+        Cont::Option if method_ok => {
+            let opt = opt_ident(head);
+            quote!( this.#opt(#binding); )
+        }
+        Cont::Option => {
+            quote!( if let ::core::option::Option::Some(__x) = #binding { this.#m(__x); } )
+        }
     }
 }
 
@@ -356,10 +392,10 @@ fn build_fields(fields: &Fields, visited: &HashSet<String>) -> (TokenStream, Tok
             let mut binds = Vec::new();
             for f in &named.named {
                 let name = f.ident.clone().unwrap();
-                if let Some((cont, head)) = classify(&f.ty) {
+                if let Some((cont, head, ok)) = classify(&f.ty) {
                     if visited.contains(&head.to_string()) {
                         binds.push(quote!(#name));
-                        stmts.push(emit_visit(cont, &head, quote!(#name)));
+                        stmts.push(emit_visit(cont, &head, ok, quote!(#name)));
                     }
                 }
             }
@@ -368,11 +404,11 @@ fn build_fields(fields: &Fields, visited: &HashSet<String>) -> (TokenStream, Tok
         Fields::Unnamed(unnamed) => {
             let mut pats = Vec::new();
             for (idx, f) in unnamed.unnamed.iter().enumerate() {
-                let visit = classify(&f.ty).filter(|(_, h)| visited.contains(&h.to_string()));
-                if let Some((cont, head)) = visit {
+                let visit = classify(&f.ty).filter(|(_, h, _)| visited.contains(&h.to_string()));
+                if let Some((cont, head, ok)) = visit {
                     let b = Ident::new(&format!("__f{idx}"), Span::call_site());
                     pats.push(quote!(#b));
-                    stmts.push(emit_visit(cont, &head, quote!(#b)));
+                    stmts.push(emit_visit(cont, &head, ok, quote!(#b)));
                 } else {
                     pats.push(quote!(_));
                 }
@@ -512,6 +548,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     struct VType {
         ident: Ident,
         method: Ident,
+        seq: Ident,
+        opt: Ident,
         hook: Ident,
         hook_struct: Ident,
         body: TokenStream,
@@ -522,6 +560,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             let ident = item_ident(it).unwrap().clone();
             VType {
                 method: method_ident(&ident),
+                seq: seq_ident(&ident),
+                opt: opt_ident(&ident),
                 hook: Ident::new(&format!("hook_{}", to_snake(&ident)), Span::call_site()),
                 hook_struct: Ident::new(&format!("{ident}Hook"), Span::call_site()),
                 body: build_body(it, &visited),
@@ -546,6 +586,12 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                     fn #{&t.method}(&mut self, i: & #{&t.ident} #g_use) {
                         #{&t.method}(self, i)
                     }
+                    fn #{&t.seq}(&mut self, seq: &[ #{&t.ident} #g_use ]) {
+                        for __x in seq { self.#{&t.method}(__x); }
+                    }
+                    fn #{&t.opt}(&mut self, opt: &::core::option::Option< #{&t.ident} #g_use >) {
+                        if let ::core::option::Option::Some(__x) = opt { self.#{&t.method}(__x); }
+                    }
                 }
             }
 
@@ -553,6 +599,12 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 #(for t in &vtypes) {
                     fn #{&t.method}(&mut self, i: & #{&t.ident} #g_use) {
                         <__V as Visit #g_use>::#{&t.method}(self, i)
+                    }
+                    fn #{&t.seq}(&mut self, seq: &[ #{&t.ident} #g_use ]) {
+                        <__V as Visit #g_use>::#{&t.seq}(self, seq)
+                    }
+                    fn #{&t.opt}(&mut self, opt: &::core::option::Option< #{&t.ident} #g_use >) {
+                        <__V as Visit #g_use>::#{&t.opt}(self, opt)
                     }
                 }
             }
