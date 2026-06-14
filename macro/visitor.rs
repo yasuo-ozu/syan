@@ -292,6 +292,53 @@ fn method_ident(head: &Ident) -> Ident {
     Ident::new(&format!("visit_{}", to_snake(head)), Span::call_site())
 }
 
+/// Right-nested `Chain(self.0.into_hook(), Chain(self.1.into_hook(), ...))` over tuple members.
+fn build_chain(members: &[Index]) -> TokenStream {
+    let m = &members[0];
+    if members.len() == 1 {
+        quote!(self.#m.into_hook())
+    } else {
+        let rest = build_chain(&members[1..]);
+        quote!(Chain(self.#m.into_hook(), #rest))
+    }
+}
+
+/// `IntoVisitor` impls for tuples of closures, arity 2..=`max_arity`.
+fn tuple_impls(
+    max_arity: usize,
+    g_params: &[GenericParam],
+    g_args: &[TokenStream],
+    g_use: &TokenStream,
+) -> Vec<TokenStream> {
+    (2..=max_arity)
+        .map(|n| {
+            let fs: Vec<Ident> = (0..n)
+                .map(|i| Ident::new(&format!("__F{i}"), Span::call_site()))
+                .collect();
+            let ts: Vec<Ident> = (0..n)
+                .map(|i| Ident::new(&format!("__T{i}"), Span::call_site()))
+                .collect();
+            let members: Vec<Index> = (0..n).map(Index::from).collect();
+            let wheres: Vec<TokenStream> = fs
+                .iter()
+                .zip(&ts)
+                .map(|(f, t)| quote!(#f: IntoHook< #(#g_args,)* #t >))
+                .collect();
+            let chain = build_chain(&members);
+            quote! {
+                impl< #(#g_params,)* #(#fs,)* #(#ts,)* >
+                    IntoVisitor< #(#g_args,)* ( #(#ts,)* ) > for ( #(#fs,)* )
+                where #(#wheres,)*
+                {
+                    fn into_visitor(self) -> impl Visit #g_use {
+                        Driver( #chain )
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
 fn emit_visit(cont: Cont, head: &Ident, binding: TokenStream) -> TokenStream {
     let m = method_ident(head);
     match cont {
@@ -483,6 +530,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         })
         .collect();
 
+    let tuple_impls = tuple_impls(8, &g_params, &g_args, &g_use);
+
     let vis = &st.vis;
     let mod_ident = &st.ident;
     let base = &st.base;
@@ -577,6 +626,21 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                     }
                 }
             }
+
+            // --- multiple closures: Chain combinator + tuple IntoVisitor impls --------------
+
+            pub struct Chain<__A, __B>(pub __A, pub __B);
+
+            impl< #(#g_params,)* __A: Hook #g_use, __B: Hook #g_use > Hook #g_use for Chain<__A, __B> {
+                #(for t in &vtypes) {
+                    fn #{&t.hook}(&mut self, i: & #{&t.ident} #g_use) {
+                        self.0.#{&t.hook}(i);
+                        self.1.#{&t.hook}(i);
+                    }
+                }
+            }
+
+            #(for imp in &tuple_impls) { #imp }
 
             pub trait Visitable #g_def {
                 fn visit<__T>(&self, visitor: impl IntoVisitor< #(#g_args,)* __T >) -> &Self;

@@ -62,3 +62,16 @@ fn single_closure_visitor() {
     sample().visit(|_s: &Stmt<()>| stmts += 1);
     assert_eq!(stmts, 1);
 }
+
+#[test]
+fn tuple_of_closures_single_traversal() {
+    let mut exprs = 0usize;
+    let mut stmts = 0usize;
+    // Both closures fire in ONE traversal, each at its own node type, any order.
+    sample().visit((
+        |_s: &Stmt<()>| stmts += 1,
+        |_e: &Expr<()>| exprs += 1,
+    ));
+    assert_eq!(exprs, 2);
+    assert_eq!(stmts, 1);
+}
