@@ -1,126 +1,3 @@
-# Visitor design
-
-- implement visitor system in ASTs defined with syan
-- in syan provide two macros
-  - `#[derive(Ast)]` macro that impls empty trait `Ast` and define macro_rules! in the same name for use from `visitor!()` macro
-  - `visitor!()`macro for an empty module, that define visitor pattern in that module
-- use type-leak crate to emit macro_rules!
-
-
-## Ast derive macro
-
-```rs
-// in syan crate
-pub trait Ast{}
-
-// in user crate (like syan-rust)
-#[derive(Ast)]
-$vis struct Expr { .. }
-
-// emits
-impl Ast for Expr {}
-
-#[macro_export]
-macro_rules! __expr_ast_123456 {
-    ...
-}
-
-$vis use __expr_ast_123456 as Ast;
-```
-
-- applied to struct / enum
-- the target struct / enum can have type generics
-
-## visitor attribute macro
-
-```rs
-// #[derive(Ast)]
-pub struct Type<S>(S);
-
-// #[derive(Ast)]
-pub struct Cast<S>(Type<S>);
-
-// #[derive(Ast)]
-pub enum Expr<S> {
-    Cast(Cast<S>),
-}
-
-// #[derive(Ast)]
-pub enum Stmt<S> {
-    Expr(Expr<S>)
-}
-
-// #[visitor(Type, Expr)]
-// pub mod visit_type_expr {}
-
-// #[visitor] macro output
-pub mod visit_type_expr {
-    use super::*;
-    
-    pub trait Visit {
-        fn visit_type<S>(&mut self, i: &Type<S>) {
-            visit_type(self, i)
-        }
-        fn visit_expr<S>(&mut self, i: &Expr<S>) {
-            visit_expr(self, i)
-        }
-    }
-    
-    pub fn visit_type<V: Visit + ?Sized, S>(this: &mut V, i: &Type<S>) { }
-    pub fn visit_expr<V: Visit + ?Sized, S>(this: &mut V, i: &Expr<S>) {
-        match i {
-            Expr::Cast(cast) => this.visit_type(&cast.0),
-        }
-    }
-    
-    impl<S> Type<S> {
-        fn visit<V: Visit, T>(&self, mut visitor: V) {
-            visitor.visit_type(self);
-        }
-    }
-    
-    impl<S> Expr<S> {
-        fn visit<V: Visit, T>(&self, mut visitor: V) {
-            visitor.visit_expr(self);
-        }
-    }
-}
-
-// pub mod visit_type_expr_stmt {
-//     visitor!(super::visit_type_expr => )
-// }
-
-// visitor macro output
-pub mod visit_type_expr_stmt {
-    use super::*;
-    pub trait Visit: super::visit_type_expr::Visit {
-        fn visit_stmt<S>(&mut self, i: &Stmt<S>) {
-            visit_stmt(self, i)
-        }
-    }
-    
-    fn visit_stmt<V: Visit + ?Sized, S>(this: &mut V, i: &Stmt<S>) { 
-        match i {
-            Stmt::Expr(expr) => this.visit_expr(expr)
-        }
-    }
-    
-    impl<S> Stmt<S> {
-        fn visit<V: Visit>(&self, mut visitor: V) {
-            visitor.visit_stmt(self);
-        }
-    }
-}
-```
-
-- applied to empty module
-- implements trait Visit and `visit()` method for traits
-- take argument
-  - inherited Visitor module (before `=>`)
-  - multiple Ast types (should be defined in the same crate)
-
----
-
 # Implementation plan (visitor system)
 
 ## Context
@@ -427,10 +304,12 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater`), `macro/ast.rs` (`#[derive(Ast)]`)
   list macro; new trait extends it via supertrait).
 - Cross-crate use validated.
 
-**Generics constraint:** all visited types in one `#[visitor]` must share identical generic params
-(e.g. all `<S>`); the trait is parameterized by them (`Visit<S>`), so closures work. Mixed arities
-(`Expr<S, Tokens>` with `BinOp<S>`) are rejected with a clear error — generalize later by taking the
-union of params.
+**Generics:** the visitor trait is parameterized by the **union** of all visited types' generic
+params (by name, first-decl wins), e.g. `Visit<S, Tokens>`; each type is referenced with its own
+subset (`Expr<S, Tokens>`, `BinOp<S>`). One visitor can span mixed arities and closures still work
+(see `rust/tests/visitor_generics.rs`). Caveat: calling `.visit()` on a root type that doesn't use
+every union param may need a turbofish to pin the unused params; visiting from a full-param root
+infers them.
 
 **Two known limitations (deferred):**
 
@@ -444,3 +323,14 @@ union of params.
    them) — see `rust/tests/cross_crate.rs`. Wiring `Leaker`/`Referrer`/`Repeater` (already scaffolded
    in `core/src/visit.rs`) would rewrite them to `<Leaker as Repeater<N>>::Type` and drop that
    requirement.
+
+
+# TODOs
+
+- [ ] use type-leak
+- [ ] add tests that use #[derive(Ast)] and #[recurse] at the same structs
+- [ ] move visitor tests to /core/tests, that are not related to syan-rust crate
+- [ ] implement auto drill-in feature
+- [ ] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. also deligate $crate to macro_rules! emitted by #[derive(Ast)]
+- [ ] remove visit_*_{seq,opt}
+- [ ] remove Visitable trait. instead implement `visit()` directly for the AST types. (you can limit that the AST types specified to `visitor!()` macro is located in the same crate.)

@@ -528,6 +528,33 @@ fn item_generics(item: &Item) -> Option<&Generics> {
     }
 }
 
+/// Name of a generic param (for deduping the union across visited types).
+fn param_name(p: &GenericParam) -> String {
+    match p {
+        GenericParam::Type(t) => t.ident.to_string(),
+        GenericParam::Const(c) => c.ident.to_string(),
+        GenericParam::Lifetime(l) => l.lifetime.ident.to_string(),
+    }
+}
+
+/// Use-side token for one generic param (ident / lifetime).
+fn param_use(p: &GenericParam) -> TokenStream {
+    match p {
+        GenericParam::Lifetime(l) => {
+            let lt = &l.lifetime;
+            quote!(#lt)
+        }
+        GenericParam::Type(t) => {
+            let i = &t.ident;
+            quote!(#i)
+        }
+        GenericParam::Const(c) => {
+            let i = &c.ident;
+            quote!(#i)
+        }
+    }
+}
+
 /// Generic params with defaults stripped (for `impl<...>` / `trait<...>` headers).
 fn gparams(g: &Generics) -> Vec<GenericParam> {
     g.params
@@ -571,9 +598,11 @@ fn gargs(g: &Generics) -> Vec<TokenStream> {
         .collect()
 }
 
-/// One visited type's identifier plus its shared-ref and `&mut` traversal bodies.
+/// One visited type's identifier, its own use-side generics (e.g. `<S>` or `<S, Tokens>`), and its
+/// shared-ref and `&mut` traversal bodies.
 struct VType {
     ident: Ident,
+    own_use: TokenStream,
     body: TokenStream,
     body_mut: TokenStream,
 }
@@ -610,7 +639,7 @@ fn gen_side(
     };
 
     struct S {
-        ident: Ident,
+        ty: TokenStream,
         method: Ident,
         seq: Ident,
         opt: Ident,
@@ -624,17 +653,20 @@ fn gen_side(
         .iter()
         .map(|t| {
             let ident = t.ident.clone();
+            let own = &t.own_use;
+            let ty = quote!( #ident #own );
             let seq_ty = if mutable {
-                quote!( &mut Vec< #ident #g_use > )
+                quote!( &mut Vec< #ty > )
             } else {
-                quote!( &[ #ident #g_use ] )
+                quote!( &[ #ty ] )
             };
             let opt_ty = if mutable {
-                quote!( &mut ::core::option::Option< #ident #g_use > )
+                quote!( &mut ::core::option::Option< #ty > )
             } else {
-                quote!( &::core::option::Option< #ident #g_use > )
+                quote!( &::core::option::Option< #ty > )
             };
             S {
+                ty,
                 method: method_ident_m(&ident, mutable),
                 seq: seq_ident_m(&ident, mutable),
                 opt: opt_ident_m(&ident, mutable),
@@ -646,7 +678,6 @@ fn gen_side(
                 seq_ty,
                 opt_ty,
                 body: if mutable { t.body_mut.clone() } else { t.body.clone() },
-                ident,
             }
         })
         .collect();
@@ -656,7 +687,7 @@ fn gen_side(
     quote! {
         pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #g_use } {
             #(for s in &sides) {
-                fn #{&s.method}(&mut self, i: #amp #{&s.ident} #g_use) {
+                fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                     #{&s.method}(self, i)
                 }
                 fn #{&s.seq}(&mut self, seq: #{&s.seq_ty}) {
@@ -670,7 +701,7 @@ fn gen_side(
 
         impl< #(#g_params,)* __V: #visit_tr #g_use > #visit_tr #g_use for &mut __V {
             #(for s in &sides) {
-                fn #{&s.method}(&mut self, i: #amp #{&s.ident} #g_use) {
+                fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                     <__V as #visit_tr #g_use>::#{&s.method}(self, i)
                 }
                 fn #{&s.seq}(&mut self, seq: #{&s.seq_ty}) {
@@ -685,7 +716,7 @@ fn gen_side(
         #(for s in &sides) {
             pub fn #{&s.method}< #(#g_params,)* __V: #visit_tr #g_use + ?Sized >(
                 this: &mut __V,
-                i: #amp #{&s.ident} #g_use,
+                i: #amp #{&s.ty},
             ) {
                 #{&s.body}
             }
@@ -701,7 +732,7 @@ fn gen_side(
         // --- closures: shallow Hook + single-pass Driver ---------------------------------
         pub trait #hook_tr #g_def {
             #(for s in &sides) {
-                fn #{&s.hook}(&mut self, i: #amp #{&s.ident} #g_use) { let _ = i; }
+                fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { let _ = i; }
             }
         }
         pub trait #into_hook_tr< #(#g_params,)* __T > {
@@ -711,7 +742,7 @@ fn gen_side(
         pub struct #driver<__H>(pub __H);
         impl< #(#g_params,)* __H: #hook_tr #g_use > #visit_tr #g_use for #driver<__H> {
             #(for s in &sides) {
-                fn #{&s.method}(&mut self, i: #amp #{&s.ident} #g_use) {
+                fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                     self.0.#{&s.hook}(i);
                     #{&s.method}(self, i);
                 }
@@ -724,18 +755,18 @@ fn gen_side(
 
         #(for s in &sides) {
             pub struct #{&s.hook_struct}<__F>(pub __F);
-            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ident} #g_use ) >
+            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ty} ) >
                 #hook_tr #g_use for #{&s.hook_struct}<__F>
             {
-                fn #{&s.hook}(&mut self, i: #amp #{&s.ident} #g_use) { (self.0)(i); }
+                fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { (self.0)(i); }
             }
-            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ident} #g_use ) >
-                #into_hook_tr< #(#g_args,)* #{&s.ident} #g_use > for __F
+            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ty} ) >
+                #into_hook_tr< #(#g_args,)* #{&s.ty} > for __F
             {
                 fn #into_hook_fn(self) -> impl #hook_tr #g_use { #{&s.hook_struct}(self) }
             }
-            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ident} #g_use ) >
-                #into_vis_tr< #(#g_args,)* #{&s.ident} #g_use > for __F
+            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ty} ) >
+                #into_vis_tr< #(#g_args,)* #{&s.ty} > for __F
             {
                 fn #into_vis_fn(self) -> impl #visit_tr #g_use { #driver(#{&s.hook_struct}(self)) }
             }
@@ -747,7 +778,7 @@ fn gen_side(
             #hook_tr #g_use for #chain<__A, __B>
         {
             #(for s in &sides) {
-                fn #{&s.hook}(&mut self, i: #amp #{&s.ident} #g_use) {
+                fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) {
                     self.0.#{&s.hook}(i);
                     self.1.#{&s.hook}(i);
                 }
@@ -759,7 +790,7 @@ fn gen_side(
             fn #visit_method<__T>(#recv, visitor: impl #into_vis_tr< #(#g_args,)* __T >) -> #self_ret;
         }
         #(for s in &sides) {
-            impl #g_def #visitable_tr #g_use for #{&s.ident} #g_use {
+            impl #g_def #visitable_tr #g_use for #{&s.ty} {
                 fn #visit_method<__T>(#recv, visitor: impl #into_vis_tr< #(#g_args,)* __T >) -> #self_ret {
                     let mut visitor = visitor.#into_vis_fn();
                     visitor.#{&s.method}(self);
@@ -791,23 +822,19 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         abort!(st.ident, "no AST definitions resolved for the visitor");
     }
 
-    // Shared generics taken from the first target; require all to match by ident.
-    let base_generics = item_generics(targets[0]).unwrap().clone();
-    let base_idents: Vec<String> = gargs(&base_generics).iter().map(|t| t.to_string()).collect();
-    for t in &targets[1..] {
-        let g = item_generics(t).unwrap();
-        let idents: Vec<String> = gargs(g).iter().map(|t| t.to_string()).collect();
-        if idents != base_idents {
-            abort!(
-                item_ident(t).unwrap(),
-                "all visited types must share identical generic parameters (`{}` vs `{}`)",
-                idents.join(", "),
-                base_idents.join(", ")
-            );
+    // The visitor trait is parameterized by the *union* of every visited type's generic params
+    // (by name, first declaration wins); each type is then referenced with its own subset. This
+    // lets one visitor span e.g. `Expr<S, Tokens>` and `BinOp<S>`.
+    let mut seen = HashSet::new();
+    let mut g_params: Vec<GenericParam> = Vec::new();
+    for it in &targets {
+        for p in gparams(item_generics(it).unwrap()) {
+            if seen.insert(param_name(&p)) {
+                g_params.push(p);
+            }
         }
     }
-    let g_params = gparams(&base_generics);
-    let g_args = gargs(&base_generics);
+    let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
     let has_g = !g_params.is_empty();
     let g_def = if has_g {
         quote!( < #(#g_params),* > )
@@ -822,10 +849,19 @@ fn generate_module(st: &BuildInput) -> TokenStream {
 
     let vtypes: Vec<VType> = targets
         .iter()
-        .map(|it| VType {
-            ident: item_ident(it).unwrap().clone(),
-            body: build_body(it, &visitable, false),
-            body_mut: build_body(it, &visitable, true),
+        .map(|it| {
+            let own = gargs(item_generics(it).unwrap());
+            let own_use = if own.is_empty() {
+                quote!()
+            } else {
+                quote!( < #(#own),* > )
+            };
+            VType {
+                ident: item_ident(it).unwrap().clone(),
+                own_use,
+                body: build_body(it, &visitable, false),
+                body_mut: build_body(it, &visitable, true),
+            }
         })
         .collect();
 
