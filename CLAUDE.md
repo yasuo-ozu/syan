@@ -318,11 +318,11 @@ infers them.
    time. Workaround that already works: **list the wrapper** in `#[visitor(…, Cast, …)]` — it then
    gets its own `visit_cast` that descends into its fields. (Only difference from the spec: `Cast`
    becomes visitable.)
-2. **type-leak portability is not yet wired.** Field/type references travel as bare names, so a
-   cross-crate consumer must `use` the AST types (so the generated module's `use super::*` resolves
-   them) — see `rust/tests/cross_crate.rs`. Wiring `Leaker`/`Referrer`/`Repeater` (already scaffolded
-   in `core/src/visit.rs`) would rewrite them to `<Leaker as Repeater<N>>::Type` and drop that
-   requirement.
+2. **Cross-crate portability of the *visited* types is done without type-leak:** the generated module
+   names them by the full path given to `#[visitor(...)]` (field types are never spliced — only head
+   idents drive macro-time decisions — so type-leak's `Repeater` isn't needed for this). See
+   `rust/tests/cross_crate.rs` (no module-scope import). type-leak is still wanted for `$crate`-based
+   portability of *field* paths in the metadata macro (relevant once auto drill-in lands).
 
 
 # TODOs

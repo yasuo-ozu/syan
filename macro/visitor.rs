@@ -1,7 +1,7 @@
 use crate::ast::to_snake;
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::*;
@@ -74,11 +74,12 @@ pub fn visitor(attr: TokenStream, item: TokenStream, nonce: u64) -> TokenStream 
         Some(p) => quote!(#p),
         None => quote!(),
     };
-    let visited_idents: Vec<&Ident> = args.types.iter().map(last_ident).collect();
     let nonce = nonce.to_string();
     let nonce: TokenStream = nonce.parse().unwrap();
     let all_types = &args.types;
 
+    // `@visited` carries the *full paths* as written, so the generated module can name the visited
+    // types portably (no import needed when an absolute/crate path is given).
     let make_state = |rest: &[Path]| {
         quote! {
             @vis { #vis }
@@ -86,7 +87,7 @@ pub fn visitor(attr: TokenStream, item: TokenStream, nonce: u64) -> TokenStream 
             @base { #base_tokens }
             @build { #build }
             @nonce { #nonce }
-            @visited { #(#visited_idents)* }
+            @visited { #(#all_types),* }
             @inherited { }
             @done { }
             @rest { #(#rest),* }
@@ -123,7 +124,7 @@ struct BuildInput {
     base: Option<Path>,
     build: Path,
     nonce: TokenStream,
-    visited: Vec<Ident>,
+    visited: Vec<Path>,
     inherited: Vec<Ident>,
     done: Vec<Item>,
     rest: Vec<Path>,
@@ -164,7 +165,12 @@ impl Parse for BuildInput {
                 }
                 "build" => build = Some(syn::parse2(content)?),
                 "nonce" => nonce = content,
-                "visited" => visited = parse_idents(content)?,
+                "visited" => {
+                    visited = Punctuated::<Path, Token![,]>::parse_terminated
+                        .parse2(content)?
+                        .into_iter()
+                        .collect();
+                }
                 // `@inherited` is the carried set; `@inh` is appended by a base's visited-list macro.
                 "inherited" | "inh" => inherited.extend(parse_idents(content)?),
                 "done" => done = parse_items(content)?,
@@ -252,7 +258,7 @@ pub fn build(input: TokenStream) -> TokenStream {
                     @base { #base_tokens }
                     @build { #build }
                     @nonce { #nonce }
-                    @visited { #(#visited)* }
+                    @visited { #(#visited),* }
                     @inherited { #(#inherited)* }
                     @done { #(#done)* }
                     @rest { #(#rest),* }
@@ -488,24 +494,28 @@ fn build_fields(
     }
 }
 
-/// Body of the free `visit_*` traversal function for one item.
-fn build_body(item: &Item, visited: &HashSet<String>, mutable: bool) -> TokenStream {
+/// Body of the free `visit_*` traversal function for one item. `ty_path` is the full path the type
+/// is referenced by (so match scrutinees are portable across crates).
+fn build_body(
+    item: &Item,
+    visited: &HashSet<String>,
+    mutable: bool,
+    ty_path: &TokenStream,
+) -> TokenStream {
     match item {
         Item::Enum(e) => {
-            let ident = &e.ident;
             let arms = e.variants.iter().map(|v| {
                 let vident = &v.ident;
                 let (pat, stmts) = build_fields(&v.fields, visited, mutable);
-                quote!( #ident::#vident #pat => { #stmts } )
+                quote!( #ty_path::#vident #pat => { #stmts } )
             });
             quote!( match i { #(#arms)* } )
         }
         Item::Struct(s) => {
-            let ident = &s.ident;
             let (pat, stmts) = build_fields(&s.fields, visited, mutable);
             match &s.fields {
                 Fields::Unit => quote!(),
-                _ => quote!( let #ident #pat = i; #stmts ),
+                _ => quote!( let #ty_path #pat = i; #stmts ),
             }
         }
         _ => quote!(),
@@ -598,10 +608,11 @@ fn gargs(g: &Generics) -> Vec<TokenStream> {
         .collect()
 }
 
-/// One visited type's identifier, its own use-side generics (e.g. `<S>` or `<S, Tokens>`), and its
-/// shared-ref and `&mut` traversal bodies.
+/// One visited type's identifier (for method/struct names), the full path it is referenced by, its
+/// own use-side generics (e.g. `<S>` or `<S, Tokens>`), and its shared-ref and `&mut` bodies.
 struct VType {
     ident: Ident,
+    path: TokenStream,
     own_use: TokenStream,
     body: TokenStream,
     body_mut: TokenStream,
@@ -654,7 +665,8 @@ fn gen_side(
         .map(|t| {
             let ident = t.ident.clone();
             let own = &t.own_use;
-            let ty = quote!( #ident #own );
+            let path = &t.path;
+            let ty = quote!( #path #own );
             let seq_ty = if mutable {
                 quote!( &mut Vec< #ty > )
             } else {
@@ -802,14 +814,20 @@ fn gen_side(
 }
 
 fn generate_module(st: &BuildInput) -> TokenStream {
-    let visited: HashSet<String> = st.visited.iter().map(|i| i.to_string()).collect();
-    // Fields whose head is any of these recurse via a `visit_*` method (new ones generated here,
-    // inherited ones provided by the base trait).
-    let visitable: HashSet<String> = st
+    // Map each visited type's last-segment ident -> the full path the user wrote, so the generated
+    // module names the visited types by that path (portable: no import needed for absolute paths).
+    let path_of: HashMap<String, &Path> = st
         .visited
         .iter()
-        .chain(&st.inherited)
-        .map(|i| i.to_string())
+        .map(|p| (last_ident(p).to_string(), p))
+        .collect();
+    let visited: HashSet<String> = path_of.keys().cloned().collect();
+    // Fields whose head is any of these recurse via a `visit_*` method (new ones generated here,
+    // inherited ones provided by the base trait).
+    let visitable: HashSet<String> = visited
+        .iter()
+        .cloned()
+        .chain(st.inherited.iter().map(|i| i.to_string()))
         .collect();
 
     // Items that get visitor methods (named in #[visitor(..)]); inherited types are not regenerated.
@@ -850,17 +868,26 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     let vtypes: Vec<VType> = targets
         .iter()
         .map(|it| {
+            let ident = item_ident(it).unwrap().clone();
             let own = gargs(item_generics(it).unwrap());
             let own_use = if own.is_empty() {
                 quote!()
             } else {
                 quote!( < #(#own),* > )
             };
+            // Full path for type references; falls back to the bare ident if unmapped.
+            let path = path_of
+                .get(&ident.to_string())
+                .map(|p| quote!(#p))
+                .unwrap_or_else(|| quote!(#ident));
+            let body = build_body(it, &visitable, false, &path);
+            let body_mut = build_body(it, &visitable, true, &path);
             VType {
-                ident: item_ident(it).unwrap().clone(),
+                ident,
+                path,
                 own_use,
-                body: build_body(it, &visitable, false),
-                body_mut: build_body(it, &visitable, true),
+                body,
+                body_mut,
             }
         })
         .collect();
@@ -872,8 +899,14 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     let mod_ident = &st.ident;
     let base = &st.base;
 
-    // Every visitor module exports its full visited-type set so another visitor can inherit it.
-    let all_visible: Vec<&Ident> = st.visited.iter().chain(&st.inherited).collect();
+    // Every visitor module exports its full visited-type set (idents) so another visitor can
+    // inherit it; inherited types are reached only by method, so idents suffice.
+    let all_visible: Vec<Ident> = st
+        .visited
+        .iter()
+        .map(|p| last_ident(p).clone())
+        .chain(st.inherited.iter().cloned())
+        .collect();
     let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
 
     quote! {

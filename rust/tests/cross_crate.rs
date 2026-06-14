@@ -1,11 +1,11 @@
-//! Stage 11: a visitor generated in *this* crate over AST types whose `#[derive(Ast)]` (and their
-//! metadata macros) live in the `syan_rust` library crate — exercising the cross-crate path.
+//! Stage 11 + portability: a visitor generated in *this* crate over AST types whose
+//! `#[derive(Ast)]` lives in the `syan_rust` library crate.
+//!
+//! The AST types are intentionally **not** imported at module scope — the generated `visit` module
+//! must name them by the full path given to `#[visitor(...)]`, with no `use` needed.
 
 use syan::visit::visitor;
-// Bring the AST types into scope so the generated module (`use super::*`) can name them.
-use syan_rust::ast::{Expr, Stmt};
 
-// The metadata macros are reached by their full cross-crate path.
 #[visitor(syan_rust::ast::Expr, syan_rust::ast::Stmt)]
 pub mod visit {}
 
@@ -13,6 +13,9 @@ use visit::Visitable;
 
 #[test]
 fn visitor_works_across_crates() {
+    // Imported locally (only to build the value); the generated module above does not see this.
+    use syan_rust::ast::{Expr, Stmt};
+
     let ast: Expr<()> = Expr::Stmt(Box::new(Stmt::Expr(Box::new(Expr::Lit(
         core::marker::PhantomData,
     )))));
