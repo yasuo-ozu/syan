@@ -400,3 +400,47 @@ re-reads `seq.iter_mut()` only in the default body, user overrides have full con
 `Driver`/`Hook` → 5. tuple `Chain` → 6. `Vec`/`Option`/`Box` lowering + `*_seq`/`*_opt` → 7. drill-in
 → 8. `visit_mut` mirror → 9. `*_seq_mut`/`*_opt_mut` reduce-append → 10. inheritance → 11. cross-crate.
 Commit per numbered step once it builds + its test passes.
+
+---
+
+# Implementation status (what actually shipped)
+
+Code: `core/src/visit.rs` (`Ast`, `Repeater`), `macro/ast.rs` (`#[derive(Ast)]`),
+`macro/visitor.rs` (`#[visitor]` + `__visitor_build`). Tests: `rust/tests/visitor_*.rs`,
+`rust/tests/cross_crate.rs`, `rust/tests/ast_derive.rs`. AST sample for cross-crate: `rust/src/lib.rs`.
+
+**Done & tested** (one commit each, `feat(visitor): …`):
+
+- `#[derive(Ast)]`: marker impl + `#[macro_export]` callback metadata macro carrying a cleaned copy
+  of the definition (re-parsed downstream as a `syn::Item`), re-exported under the type's own name.
+- `#[visitor([base =>] T, …)]` on an empty `mod`: metadata ping-pong via `__visitor_build` →
+  generates per visited type a `Visit`/`VisitMut` method, free `visit_*`/`visit_*_mut` traversal fn,
+  `visit_*_seq[_mut]` / `visit_*_opt[_mut]` container hooks, and `Visitable::visit` /
+  `VisitableMut::visit_mut`.
+- Visitor inputs (the `IntoVisitor`/`IntoVisitorMut` selector design): struct visitors (via `&mut`),
+  single closures, and **tuples of closures** (arity 2..=8) that run in **one** traversal via a
+  shallow `Hook` + single-pass `Driver` + `Chain`.
+- `visit_mut` full mirror (in-place mutation).
+- **Reduce/append**: overriding `visit_*_seq_mut(&mut Vec<X>)` / `visit_*_opt_mut(&mut Option<X>)`
+  lets a visitor add/remove/replace nodes in `Vec`/`Option` positions.
+- Inheritance `#[visitor(base => New)]` for new→base reference DAGs (base exports a `__syan_visited`
+  list macro; new trait extends it via supertrait).
+- Cross-crate use validated.
+
+**Generics constraint:** all visited types in one `#[visitor]` must share identical generic params
+(e.g. all `<S>`); the trait is parameterized by them (`Visit<S>`), so closures work. Mixed arities
+(`Expr<S, Tokens>` with `BinOp<S>`) are rejected with a clear error — generalize later by taking the
+union of params.
+
+**Two known limitations (deferred):**
+
+1. **Auto drill-in through *unlisted* wrapper types** (the `Cast` case from the spec) is not done:
+   deciding "is this field-head an `Ast` type to drill into?" can't be tested at macro-expansion
+   time. Workaround that already works: **list the wrapper** in `#[visitor(…, Cast, …)]` — it then
+   gets its own `visit_cast` that descends into its fields. (Only difference from the spec: `Cast`
+   becomes visitable.)
+2. **type-leak portability is not yet wired.** Field/type references travel as bare names, so a
+   cross-crate consumer must `use` the AST types (so the generated module's `use super::*` resolves
+   them) — see `rust/tests/cross_crate.rs`. Wiring `Leaker`/`Referrer`/`Repeater` (already scaffolded
+   in `core/src/visit.rs`) would rewrite them to `<Leaker as Repeater<N>>::Type` and drop that
+   requirement.
