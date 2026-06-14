@@ -306,36 +306,63 @@ fn classify(ty: &Type) -> Option<(Cont, Ident, bool)> {
     }
 }
 
-fn method_ident(head: &Ident) -> Ident {
-    Ident::new(&format!("visit_{}", to_snake(head)), Span::call_site())
-}
-
-fn seq_ident(head: &Ident) -> Ident {
-    Ident::new(&format!("visit_{}_seq", to_snake(head)), Span::call_site())
-}
-
-fn opt_ident(head: &Ident) -> Ident {
-    Ident::new(&format!("visit_{}_opt", to_snake(head)), Span::call_site())
-}
-
-/// Right-nested `Chain(self.0.into_hook(), Chain(self.1.into_hook(), ...))` over tuple members.
-fn build_chain(members: &[Index]) -> TokenStream {
-    let m = &members[0];
-    if members.len() == 1 {
-        quote!(self.#m.into_hook())
+/// `_mut` suffix for the mutable traversal variant.
+fn mt(mutable: bool) -> &'static str {
+    if mutable {
+        "_mut"
     } else {
-        let rest = build_chain(&members[1..]);
-        quote!(Chain(self.#m.into_hook(), #rest))
+        ""
     }
 }
 
-/// `IntoVisitor` impls for tuples of closures, arity 2..=`max_arity`.
+fn method_ident_m(head: &Ident, mutable: bool) -> Ident {
+    Ident::new(
+        &format!("visit_{}{}", to_snake(head), mt(mutable)),
+        Span::call_site(),
+    )
+}
+
+fn seq_ident_m(head: &Ident, mutable: bool) -> Ident {
+    Ident::new(
+        &format!("visit_{}_seq{}", to_snake(head), mt(mutable)),
+        Span::call_site(),
+    )
+}
+
+fn opt_ident_m(head: &Ident, mutable: bool) -> Ident {
+    Ident::new(
+        &format!("visit_{}_opt{}", to_snake(head), mt(mutable)),
+        Span::call_site(),
+    )
+}
+
+/// Right-nested `Chain(self.0.into_hook(), Chain(self.1.into_hook(), ...))` over tuple members.
+fn build_chain(members: &[Index], chain: &Ident, into_hook: &Ident) -> TokenStream {
+    let m = &members[0];
+    if members.len() == 1 {
+        quote!(self.#m.#into_hook())
+    } else {
+        let rest = build_chain(&members[1..], chain, into_hook);
+        quote!(#chain(self.#m.#into_hook(), #rest))
+    }
+}
+
+/// `IntoVisitor[Mut]` impls for tuples of closures, arity 2..=`max_arity`.
 fn tuple_impls(
     max_arity: usize,
     g_params: &[GenericParam],
     g_args: &[TokenStream],
     g_use: &TokenStream,
+    mutable: bool,
 ) -> Vec<TokenStream> {
+    let suffix = if mutable { "Mut" } else { "" };
+    let into_vis_tr = Ident::new(&format!("IntoVisitor{suffix}"), Span::call_site());
+    let into_hook_tr = Ident::new(&format!("IntoHook{suffix}"), Span::call_site());
+    let into_vis_fn = Ident::new(&format!("into_visitor{}", mt(mutable)), Span::call_site());
+    let into_hook_fn = Ident::new(&format!("into_hook{}", mt(mutable)), Span::call_site());
+    let visit_tr = Ident::new(&format!("Visit{suffix}"), Span::call_site());
+    let driver = Ident::new(&format!("Driver{suffix}"), Span::call_site());
+    let chain_id = Ident::new(&format!("Chain{suffix}"), Span::call_site());
     (2..=max_arity)
         .map(|n| {
             let fs: Vec<Ident> = (0..n)
@@ -348,16 +375,16 @@ fn tuple_impls(
             let wheres: Vec<TokenStream> = fs
                 .iter()
                 .zip(&ts)
-                .map(|(f, t)| quote!(#f: IntoHook< #(#g_args,)* #t >))
+                .map(|(f, t)| quote!(#f: #into_hook_tr< #(#g_args,)* #t >))
                 .collect();
-            let chain = build_chain(&members);
+            let chain = build_chain(&members, &chain_id, &into_hook_fn);
             quote! {
                 impl< #(#g_params,)* #(#fs,)* #(#ts,)* >
-                    IntoVisitor< #(#g_args,)* ( #(#ts,)* ) > for ( #(#fs,)* )
+                    #into_vis_tr< #(#g_args,)* ( #(#ts,)* ) > for ( #(#fs,)* )
                 where #(#wheres,)*
                 {
-                    fn into_visitor(self) -> impl Visit #g_use {
-                        Driver( #chain )
+                    fn #into_vis_fn(self) -> impl #visit_tr #g_use {
+                        #driver( #chain )
                     }
                 }
             }
@@ -365,17 +392,23 @@ fn tuple_impls(
         .collect()
 }
 
-fn emit_visit(cont: Cont, head: &Ident, method_ok: bool, binding: TokenStream) -> TokenStream {
-    let m = method_ident(head);
+fn emit_visit(
+    cont: Cont,
+    head: &Ident,
+    method_ok: bool,
+    binding: TokenStream,
+    mutable: bool,
+) -> TokenStream {
+    let m = method_ident_m(head, mutable);
     match cont {
         Cont::Direct => quote!( this.#m(#binding); ),
         Cont::Vec if method_ok => {
-            let seq = seq_ident(head);
+            let seq = seq_ident_m(head, mutable);
             quote!( this.#seq(#binding); )
         }
         Cont::Vec => quote!( for __x in #binding { this.#m(__x); } ),
         Cont::Option if method_ok => {
-            let opt = opt_ident(head);
+            let opt = opt_ident_m(head, mutable);
             quote!( this.#opt(#binding); )
         }
         Cont::Option => {
@@ -385,7 +418,11 @@ fn emit_visit(cont: Cont, head: &Ident, method_ok: bool, binding: TokenStream) -
 }
 
 /// Build a pattern + visit statements for a set of fields.
-fn build_fields(fields: &Fields, visited: &HashSet<String>) -> (TokenStream, TokenStream) {
+fn build_fields(
+    fields: &Fields,
+    visited: &HashSet<String>,
+    mutable: bool,
+) -> (TokenStream, TokenStream) {
     let mut stmts = Vec::new();
     match fields {
         Fields::Named(named) => {
@@ -395,7 +432,7 @@ fn build_fields(fields: &Fields, visited: &HashSet<String>) -> (TokenStream, Tok
                 if let Some((cont, head, ok)) = classify(&f.ty) {
                     if visited.contains(&head.to_string()) {
                         binds.push(quote!(#name));
-                        stmts.push(emit_visit(cont, &head, ok, quote!(#name)));
+                        stmts.push(emit_visit(cont, &head, ok, quote!(#name), mutable));
                     }
                 }
             }
@@ -408,7 +445,7 @@ fn build_fields(fields: &Fields, visited: &HashSet<String>) -> (TokenStream, Tok
                 if let Some((cont, head, ok)) = visit {
                     let b = Ident::new(&format!("__f{idx}"), Span::call_site());
                     pats.push(quote!(#b));
-                    stmts.push(emit_visit(cont, &head, ok, quote!(#b)));
+                    stmts.push(emit_visit(cont, &head, ok, quote!(#b), mutable));
                 } else {
                     pats.push(quote!(_));
                 }
@@ -420,20 +457,20 @@ fn build_fields(fields: &Fields, visited: &HashSet<String>) -> (TokenStream, Tok
 }
 
 /// Body of the free `visit_*` traversal function for one item.
-fn build_body(item: &Item, visited: &HashSet<String>) -> TokenStream {
+fn build_body(item: &Item, visited: &HashSet<String>, mutable: bool) -> TokenStream {
     match item {
         Item::Enum(e) => {
             let ident = &e.ident;
             let arms = e.variants.iter().map(|v| {
                 let vident = &v.ident;
-                let (pat, stmts) = build_fields(&v.fields, visited);
+                let (pat, stmts) = build_fields(&v.fields, visited, mutable);
                 quote!( #ident::#vident #pat => { #stmts } )
             });
             quote!( match i { #(#arms)* } )
         }
         Item::Struct(s) => {
             let ident = &s.ident;
-            let (pat, stmts) = build_fields(&s.fields, visited);
+            let (pat, stmts) = build_fields(&s.fields, visited, mutable);
             match &s.fields {
                 Fields::Unit => quote!(),
                 _ => quote!( let #ident #pat = i; #stmts ),
@@ -502,6 +539,201 @@ fn gargs(g: &Generics) -> Vec<TokenStream> {
         .collect()
 }
 
+/// One visited type's identifier plus its shared-ref and `&mut` traversal bodies.
+struct VType {
+    ident: Ident,
+    body: TokenStream,
+    body_mut: TokenStream,
+}
+
+/// Generate every item for one mutability "side" (`Visit`/`VisitMut`, etc.).
+fn gen_side(
+    mutable: bool,
+    vtypes: &[VType],
+    g_params: &[GenericParam],
+    g_args: &[TokenStream],
+    g_def: &TokenStream,
+    g_use: &TokenStream,
+    base: &Option<Path>,
+) -> TokenStream {
+    let suffix = if mutable { "Mut" } else { "" };
+    let id = |s: &str| Ident::new(s, Span::call_site());
+    let visit_tr = id(&format!("Visit{suffix}"));
+    let into_vis_tr = id(&format!("IntoVisitor{suffix}"));
+    let into_hook_tr = id(&format!("IntoHook{suffix}"));
+    let hook_tr = id(&format!("Hook{suffix}"));
+    let driver = id(&format!("Driver{suffix}"));
+    let chain = id(&format!("Chain{suffix}"));
+    let visitable_tr = id(&format!("Visitable{suffix}"));
+    let into_vis_fn = id(&format!("into_visitor{}", mt(mutable)));
+    let into_hook_fn = id(&format!("into_hook{}", mt(mutable)));
+    let visit_method = id(&format!("visit{}", mt(mutable)));
+    let amp = if mutable { quote!(&mut) } else { quote!(&) };
+    let recv = if mutable { quote!(&mut self) } else { quote!(&self) };
+    let self_ret = if mutable { quote!(&mut Self) } else { quote!(&Self) };
+    let seq_iter = if mutable {
+        quote!(seq.iter_mut())
+    } else {
+        quote!(seq)
+    };
+
+    struct S {
+        ident: Ident,
+        method: Ident,
+        seq: Ident,
+        opt: Ident,
+        hook: Ident,
+        hook_struct: Ident,
+        seq_ty: TokenStream,
+        opt_ty: TokenStream,
+        body: TokenStream,
+    }
+    let sides: Vec<S> = vtypes
+        .iter()
+        .map(|t| {
+            let ident = t.ident.clone();
+            let seq_ty = if mutable {
+                quote!( &mut Vec< #ident #g_use > )
+            } else {
+                quote!( &[ #ident #g_use ] )
+            };
+            let opt_ty = if mutable {
+                quote!( &mut ::core::option::Option< #ident #g_use > )
+            } else {
+                quote!( &::core::option::Option< #ident #g_use > )
+            };
+            S {
+                method: method_ident_m(&ident, mutable),
+                seq: seq_ident_m(&ident, mutable),
+                opt: opt_ident_m(&ident, mutable),
+                hook: Ident::new(
+                    &format!("hook_{}{}", to_snake(&ident), mt(mutable)),
+                    Span::call_site(),
+                ),
+                hook_struct: Ident::new(&format!("{ident}Hook{suffix}"), Span::call_site()),
+                seq_ty,
+                opt_ty,
+                body: if mutable { t.body_mut.clone() } else { t.body.clone() },
+                ident,
+            }
+        })
+        .collect();
+
+    let tup = tuple_impls(8, g_params, g_args, g_use, mutable);
+
+    quote! {
+        pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #g_use } {
+            #(for s in &sides) {
+                fn #{&s.method}(&mut self, i: #amp #{&s.ident} #g_use) {
+                    #{&s.method}(self, i)
+                }
+                fn #{&s.seq}(&mut self, seq: #{&s.seq_ty}) {
+                    for __x in #seq_iter { self.#{&s.method}(__x); }
+                }
+                fn #{&s.opt}(&mut self, opt: #{&s.opt_ty}) {
+                    if let ::core::option::Option::Some(__x) = opt { self.#{&s.method}(__x); }
+                }
+            }
+        }
+
+        impl< #(#g_params,)* __V: #visit_tr #g_use > #visit_tr #g_use for &mut __V {
+            #(for s in &sides) {
+                fn #{&s.method}(&mut self, i: #amp #{&s.ident} #g_use) {
+                    <__V as #visit_tr #g_use>::#{&s.method}(self, i)
+                }
+                fn #{&s.seq}(&mut self, seq: #{&s.seq_ty}) {
+                    <__V as #visit_tr #g_use>::#{&s.seq}(self, seq)
+                }
+                fn #{&s.opt}(&mut self, opt: #{&s.opt_ty}) {
+                    <__V as #visit_tr #g_use>::#{&s.opt}(self, opt)
+                }
+            }
+        }
+
+        #(for s in &sides) {
+            pub fn #{&s.method}< #(#g_params,)* __V: #visit_tr #g_use + ?Sized >(
+                this: &mut __V,
+                i: #amp #{&s.ident} #g_use,
+            ) {
+                #{&s.body}
+            }
+        }
+
+        pub trait #into_vis_tr< #(#g_params,)* __T > {
+            fn #into_vis_fn(self) -> impl #visit_tr #g_use;
+        }
+        impl< #(#g_params,)* __V: #visit_tr #g_use > #into_vis_tr< #(#g_args,)* () > for __V {
+            fn #into_vis_fn(self) -> impl #visit_tr #g_use { self }
+        }
+
+        // --- closures: shallow Hook + single-pass Driver ---------------------------------
+        pub trait #hook_tr #g_def {
+            #(for s in &sides) {
+                fn #{&s.hook}(&mut self, i: #amp #{&s.ident} #g_use) { let _ = i; }
+            }
+        }
+        pub trait #into_hook_tr< #(#g_params,)* __T > {
+            fn #into_hook_fn(self) -> impl #hook_tr #g_use;
+        }
+
+        pub struct #driver<__H>(pub __H);
+        impl< #(#g_params,)* __H: #hook_tr #g_use > #visit_tr #g_use for #driver<__H> {
+            #(for s in &sides) {
+                fn #{&s.method}(&mut self, i: #amp #{&s.ident} #g_use) {
+                    self.0.#{&s.hook}(i);
+                    #{&s.method}(self, i);
+                }
+            }
+        }
+
+        #(for s in &sides) {
+            pub struct #{&s.hook_struct}<__F>(pub __F);
+            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ident} #g_use ) >
+                #hook_tr #g_use for #{&s.hook_struct}<__F>
+            {
+                fn #{&s.hook}(&mut self, i: #amp #{&s.ident} #g_use) { (self.0)(i); }
+            }
+            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ident} #g_use ) >
+                #into_hook_tr< #(#g_args,)* #{&s.ident} #g_use > for __F
+            {
+                fn #into_hook_fn(self) -> impl #hook_tr #g_use { #{&s.hook_struct}(self) }
+            }
+            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ident} #g_use ) >
+                #into_vis_tr< #(#g_args,)* #{&s.ident} #g_use > for __F
+            {
+                fn #into_vis_fn(self) -> impl #visit_tr #g_use { #driver(#{&s.hook_struct}(self)) }
+            }
+        }
+
+        // --- multiple closures: Chain combinator + tuple impls ---------------------------
+        pub struct #chain<__A, __B>(pub __A, pub __B);
+        impl< #(#g_params,)* __A: #hook_tr #g_use, __B: #hook_tr #g_use >
+            #hook_tr #g_use for #chain<__A, __B>
+        {
+            #(for s in &sides) {
+                fn #{&s.hook}(&mut self, i: #amp #{&s.ident} #g_use) {
+                    self.0.#{&s.hook}(i);
+                    self.1.#{&s.hook}(i);
+                }
+            }
+        }
+        #(for imp in &tup) { #imp }
+
+        pub trait #visitable_tr #g_def {
+            fn #visit_method<__T>(#recv, visitor: impl #into_vis_tr< #(#g_args,)* __T >) -> #self_ret;
+        }
+        #(for s in &sides) {
+            impl #g_def #visitable_tr #g_use for #{&s.ident} #g_use {
+                fn #visit_method<__T>(#recv, visitor: impl #into_vis_tr< #(#g_args,)* __T >) -> #self_ret {
+                    let mut visitor = visitor.#into_vis_fn();
+                    visitor.#{&s.method}(self);
+                    self
+                }
+            }
+        }
+    }
+}
+
 fn generate_module(st: &BuildInput) -> TokenStream {
     let visited: HashSet<String> = st.visited.iter().map(|i| i.to_string()).collect();
 
@@ -544,169 +776,27 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         quote!()
     };
 
-    // Per-target precomputed pieces.
-    struct VType {
-        ident: Ident,
-        method: Ident,
-        seq: Ident,
-        opt: Ident,
-        hook: Ident,
-        hook_struct: Ident,
-        body: TokenStream,
-    }
     let vtypes: Vec<VType> = targets
         .iter()
-        .map(|it| {
-            let ident = item_ident(it).unwrap().clone();
-            VType {
-                method: method_ident(&ident),
-                seq: seq_ident(&ident),
-                opt: opt_ident(&ident),
-                hook: Ident::new(&format!("hook_{}", to_snake(&ident)), Span::call_site()),
-                hook_struct: Ident::new(&format!("{ident}Hook"), Span::call_site()),
-                body: build_body(it, &visited),
-                ident,
-            }
+        .map(|it| VType {
+            ident: item_ident(it).unwrap().clone(),
+            body: build_body(it, &visited, false),
+            body_mut: build_body(it, &visited, true),
         })
         .collect();
 
-    let tuple_impls = tuple_impls(8, &g_params, &g_args, &g_use);
+    let shared = gen_side(false, &vtypes, &g_params, &g_args, &g_def, &g_use, &st.base);
+    let mutable = gen_side(true, &vtypes, &g_params, &g_args, &g_def, &g_use, &st.base);
 
     let vis = &st.vis;
     let mod_ident = &st.ident;
-    let base = &st.base;
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, dead_code, clippy::all)]
         #vis mod #mod_ident {
             use super::*;
-
-            pub trait Visit #g_def #(if let Some(b) = base) { : #b::Visit #g_use } {
-                #(for t in &vtypes) {
-                    fn #{&t.method}(&mut self, i: & #{&t.ident} #g_use) {
-                        #{&t.method}(self, i)
-                    }
-                    fn #{&t.seq}(&mut self, seq: &[ #{&t.ident} #g_use ]) {
-                        for __x in seq { self.#{&t.method}(__x); }
-                    }
-                    fn #{&t.opt}(&mut self, opt: &::core::option::Option< #{&t.ident} #g_use >) {
-                        if let ::core::option::Option::Some(__x) = opt { self.#{&t.method}(__x); }
-                    }
-                }
-            }
-
-            impl< #(#g_params,)* __V: Visit #g_use > Visit #g_use for &mut __V {
-                #(for t in &vtypes) {
-                    fn #{&t.method}(&mut self, i: & #{&t.ident} #g_use) {
-                        <__V as Visit #g_use>::#{&t.method}(self, i)
-                    }
-                    fn #{&t.seq}(&mut self, seq: &[ #{&t.ident} #g_use ]) {
-                        <__V as Visit #g_use>::#{&t.seq}(self, seq)
-                    }
-                    fn #{&t.opt}(&mut self, opt: &::core::option::Option< #{&t.ident} #g_use >) {
-                        <__V as Visit #g_use>::#{&t.opt}(self, opt)
-                    }
-                }
-            }
-
-            #(for t in &vtypes) {
-                pub fn #{&t.method}< #(#g_params,)* __V: Visit #g_use + ?Sized >(
-                    this: &mut __V,
-                    i: & #{&t.ident} #g_use,
-                ) {
-                    #{&t.body}
-                }
-            }
-
-            pub trait IntoVisitor< #(#g_params,)* __T > {
-                fn into_visitor(self) -> impl Visit #g_use;
-            }
-
-            impl< #(#g_params,)* __V: Visit #g_use > IntoVisitor< #(#g_args,)* () > for __V {
-                fn into_visitor(self) -> impl Visit #g_use {
-                    self
-                }
-            }
-
-            // --- closures: shallow Hook + single-pass Driver ---------------------------------
-
-            pub trait Hook #g_def {
-                #(for t in &vtypes) {
-                    fn #{&t.hook}(&mut self, i: & #{&t.ident} #g_use) { let _ = i; }
-                }
-            }
-
-            pub trait IntoHook< #(#g_params,)* __T > {
-                fn into_hook(self) -> impl Hook #g_use;
-            }
-
-            pub struct Driver<__H>(pub __H);
-
-            impl< #(#g_params,)* __H: Hook #g_use > Visit #g_use for Driver<__H> {
-                #(for t in &vtypes) {
-                    fn #{&t.method}(&mut self, i: & #{&t.ident} #g_use) {
-                        self.0.#{&t.hook}(i);
-                        #{&t.method}(self, i);
-                    }
-                }
-            }
-
-            #(for t in &vtypes) {
-                pub struct #{&t.hook_struct}<__F>(pub __F);
-
-                impl< #(#g_params,)* __F: ::core::ops::FnMut(& #{&t.ident} #g_use) >
-                    Hook #g_use for #{&t.hook_struct}<__F>
-                {
-                    fn #{&t.hook}(&mut self, i: & #{&t.ident} #g_use) {
-                        (self.0)(i);
-                    }
-                }
-
-                impl< #(#g_params,)* __F: ::core::ops::FnMut(& #{&t.ident} #g_use) >
-                    IntoHook< #(#g_args,)* #{&t.ident} #g_use > for __F
-                {
-                    fn into_hook(self) -> impl Hook #g_use {
-                        #{&t.hook_struct}(self)
-                    }
-                }
-
-                impl< #(#g_params,)* __F: ::core::ops::FnMut(& #{&t.ident} #g_use) >
-                    IntoVisitor< #(#g_args,)* #{&t.ident} #g_use > for __F
-                {
-                    fn into_visitor(self) -> impl Visit #g_use {
-                        Driver(#{&t.hook_struct}(self))
-                    }
-                }
-            }
-
-            // --- multiple closures: Chain combinator + tuple IntoVisitor impls --------------
-
-            pub struct Chain<__A, __B>(pub __A, pub __B);
-
-            impl< #(#g_params,)* __A: Hook #g_use, __B: Hook #g_use > Hook #g_use for Chain<__A, __B> {
-                #(for t in &vtypes) {
-                    fn #{&t.hook}(&mut self, i: & #{&t.ident} #g_use) {
-                        self.0.#{&t.hook}(i);
-                        self.1.#{&t.hook}(i);
-                    }
-                }
-            }
-
-            #(for imp in &tuple_impls) { #imp }
-
-            pub trait Visitable #g_def {
-                fn visit<__T>(&self, visitor: impl IntoVisitor< #(#g_args,)* __T >) -> &Self;
-            }
-
-            #(for t in &vtypes) {
-                impl #g_def Visitable #g_use for #{&t.ident} #g_use {
-                    fn visit<__T>(&self, visitor: impl IntoVisitor< #(#g_args,)* __T >) -> &Self {
-                        let mut visitor = visitor.into_visitor();
-                        visitor.#{&t.method}(self);
-                        self
-                    }
-                }
-            }
+            #shared
+            #mutable
         }
     }
 }
