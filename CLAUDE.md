@@ -332,7 +332,7 @@ infers them.
 # TODOs
 
 - [ ] use type-leak
-- [ ] add tests that use #[derive(Ast)] and #[recurse] at the same structs
+- [x] add tests that use #[derive(Ast)] and #[recurse] at the same structs (`core/tests/ast_recurse.rs`; marker coexists. Building a *visitor* over recurse aliases still needs the metadata macro reachable via the alias name — future.)
 - [x] move visitor tests to /core/tests, that are not related to syan-rust crate
 - [ ] implement auto drill-in feature
 - [x] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. (`$crate` in the `#[derive(Ast)]` metadata macro is only needed once field paths are spliced — folded into the type-leak TODO.)
