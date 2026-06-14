@@ -2,7 +2,7 @@
 //! `Box`. Struct visitors plug in via the `IntoVisitor<_, ()>` identity impl.
 
 use core::marker::PhantomData;
-use syan::visit::{visitor, Ast};
+use syan::visit::Ast;
 
 #[derive(Debug, Ast)]
 pub enum Expr<S> {
@@ -16,8 +16,9 @@ pub enum Stmt<S> {
     Other(PhantomData<S>),
 }
 
-#[visitor(Expr, Stmt)]
-pub mod visit {}
+pub mod visit {
+    syan::visit::visitor!(super::Expr, super::Stmt);
+}
 
 fn sample() -> Expr<()> {
     Expr::Stmt(Box::new(Stmt::Expr(Box::new(Expr::Other(PhantomData)))))

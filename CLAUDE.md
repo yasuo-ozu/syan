@@ -290,11 +290,14 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater`), `macro/ast.rs` (`#[derive(Ast)]`)
 
 - `#[derive(Ast)]`: marker impl + `#[macro_export]` callback metadata macro carrying a cleaned copy
   of the definition (re-parsed downstream as a `syn::Item`), re-exported under the type's own name.
-- `#[visitor([base =>] T, …)]` on an empty `mod`: metadata ping-pong via `__visitor_build` →
-  generates per visited type a `Visit`/`VisitMut` method, a free `visit_*`/`visit_*_mut` traversal
-  fn, and **inherent** `visit` / `visit_mut` methods on each visited type (no trait import at the
-  call site; requires the visitor to be generated in the same crate as the types). Direct and `Box`-wrapped AST fields are
-  traversed; other heads (incl. `Vec`/`Option`) are leaves (container traversal was removed).
+- `visitor!([base =>] T, …)` invoked **inside** an (otherwise empty) `mod` (function-like; a
+  `macro_rules!` shim in `syan` captures `$crate` and forwards the syan path to the `__visitor_entry`
+  proc-macro, so no `#[syan(..)]` is needed). Metadata ping-pong via `__visitor_build` → generates
+  per visited type a `Visit`/`VisitMut` method, a free `visit_*`/`visit_*_mut` traversal fn, and
+  **inherent** `visit` / `visit_mut` methods on each visited type (no trait import at the call site;
+  the visitor must be generated in the types' crate). Type args are written as paths resolvable from
+  inside the visitor module (e.g. `super::Expr`, `crate::ast::Expr`). Direct and `Box`-wrapped AST
+  fields are traversed; other heads (incl. `Vec`/`Option`) are leaves (container traversal removed).
 - Visitor inputs (the `IntoVisitor`/`IntoVisitorMut` selector design): struct visitors (via `&mut`),
   single closures, and **tuples of closures** (arity 2..=8) that run in **one** traversal via a
   shallow `Hook` + single-pass `Driver` + `Chain`.
@@ -332,6 +335,6 @@ infers them.
 - [ ] add tests that use #[derive(Ast)] and #[recurse] at the same structs
 - [x] move visitor tests to /core/tests, that are not related to syan-rust crate
 - [ ] implement auto drill-in feature
-- [ ] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. also deligate $crate to macro_rules! emitted by #[derive(Ast)]
+- [x] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. (`$crate` in the `#[derive(Ast)]` metadata macro is only needed once field paths are spliced — folded into the type-leak TODO.)
 - [x] remove visit_*_{seq,opt} (and `Cont::Vec`/`Cont::Option` container traversal)
 - [x] remove Visitable trait. instead implement `visit()` directly for the AST types. (you can limit that the AST types specified to `visitor!()` macro is located in the same crate.)

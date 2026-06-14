@@ -82,9 +82,10 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
 }
 
 #[proc_macro_error]
-#[proc_macro_attribute]
-pub fn visitor(attr: TokenStream1, item: TokenStream1) -> TokenStream1 {
-    visitor::visitor(attr.into(), item.into(), random()).into()
+#[doc(hidden)]
+#[proc_macro]
+pub fn __visitor_entry(input: TokenStream1) -> TokenStream1 {
+    visitor::entry(input.into(), random()).into()
 }
 
 #[proc_macro_error]

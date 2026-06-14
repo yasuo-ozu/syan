@@ -11,7 +11,27 @@
 //!
 //! See `CLAUDE.md` for the full design.
 
-pub use syan_macro::{visitor, Ast};
+pub use syan_macro::Ast;
+
+/// Define a visitor over the given AST types, used *inside* an (otherwise empty) module:
+///
+/// ```ignore
+/// pub mod my_visitor {
+///     syan::visit::visitor!(Type, Expr);          // or: visitor!(super::base => Stmt);
+/// }
+/// ```
+///
+/// This captures `$crate` (the path to `syan` from the caller) and forwards it to the proc-macro,
+/// so the syan crate is resolved automatically (no `#[syan(..)]` needed).
+#[macro_export]
+macro_rules! visitor {
+    ($($t:tt)*) => {
+        $crate::_imp::syan_macro::__visitor_entry! { @syan { $crate } $($t)* }
+    };
+}
+
+#[doc(hidden)]
+pub use crate::visitor;
 
 /// Marker trait implemented by every type carrying `#[derive(Ast)]`.
 ///

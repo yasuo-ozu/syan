@@ -2,7 +2,7 @@
 //! methods for the new types. Works for a one-directional reference DAG (new -> base).
 
 use core::marker::PhantomData;
-use syan::visit::{visitor, Ast};
+use syan::visit::Ast;
 
 #[derive(Ast)]
 pub enum Type<S> {
@@ -21,11 +21,13 @@ pub enum Stmt<S> {
     Empty(PhantomData<S>),
 }
 
-#[visitor(Type, Expr)]
-pub mod base {}
+pub mod base {
+    syan::visit::visitor!(super::Type, super::Expr);
+}
 
-#[visitor(base => Stmt)]
-pub mod ext {}
+pub mod ext {
+    syan::visit::visitor!(super::base => super::Stmt);
+}
 
 #[derive(Default)]
 struct Counter {

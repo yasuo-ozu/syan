@@ -2,7 +2,7 @@
 //! (`Expr<S, Tokens>` and `BinOp<S>`). The trait is parameterized by the union `<S, Tokens>`.
 
 use core::marker::PhantomData;
-use syan::visit::{visitor, Ast};
+use syan::visit::Ast;
 
 #[derive(Ast)]
 pub enum Expr<S, Tokens> {
@@ -16,8 +16,9 @@ pub enum BinOp<S> {
     Mul(PhantomData<S>),
 }
 
-#[visitor(Expr, BinOp)]
-pub mod visit {}
+pub mod visit {
+    syan::visit::visitor!(super::Expr, super::BinOp);
+}
 
 #[test]
 fn visitor_over_mixed_arity_types() {

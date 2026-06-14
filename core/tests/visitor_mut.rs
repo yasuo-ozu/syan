@@ -1,7 +1,7 @@
 //! Stage 8: `visit_mut` mirror — mutate AST nodes in place via closures and struct visitors.
 
 use core::marker::PhantomData;
-use syan::visit::{visitor, Ast};
+use syan::visit::Ast;
 
 #[derive(Debug, Ast)]
 pub enum Expr<S> {
@@ -9,8 +9,9 @@ pub enum Expr<S> {
     Lit(i64, PhantomData<S>),
 }
 
-#[visitor(Expr)]
-pub mod visit {}
+pub mod visit {
+    syan::visit::visitor!(super::Expr);
+}
 
 fn sample() -> Expr<()> {
     Expr::Add(

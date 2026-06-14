@@ -2,7 +2,7 @@
 //! node's `visit_*_mut` (it owns the `&mut Vec` / `&mut Option`), then descending.
 
 use core::marker::PhantomData;
-use syan::visit::{visitor, Ast};
+use syan::visit::Ast;
 
 #[derive(Debug, Ast)]
 pub struct Stmt<S>(pub i64, pub PhantomData<S>);
@@ -13,8 +13,9 @@ pub struct Block<S> {
     pub tail: Option<Stmt<S>>,
 }
 
-#[visitor(Block, Stmt)]
-pub mod visit {}
+pub mod visit {
+    syan::visit::visitor!(super::Block, super::Stmt);
+}
 
 struct Editor;
 impl<S> visit::VisitMut<S> for Editor {

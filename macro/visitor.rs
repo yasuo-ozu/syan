@@ -48,28 +48,35 @@ fn last_ident(path: &Path) -> &Ident {
     &path.segments.last().unwrap().ident
 }
 
-pub fn visitor(attr: TokenStream, item: TokenStream, nonce: u64) -> TokenStream {
-    let args: VisitorArgs = match syn::parse2(attr) {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error(),
-    };
-    let module: ItemMod = match syn::parse2(item) {
-        Ok(m) => m,
+/// Input to `__visitor_entry`: `@syan { <path> } [base =>] T, U, ...`.
+struct EntryInput {
+    syan: Path,
+    args: VisitorArgs,
+}
+
+impl Parse for EntryInput {
+    fn parse(input: ParseStream) -> Result<Self> {
+        input.parse::<Token![@]>()?;
+        let _kw: Ident = input.parse()?; // `syan`
+        let content;
+        braced!(content in input);
+        let syan: Path = content.parse()?;
+        let args: VisitorArgs = input.parse()?;
+        Ok(EntryInput { syan, args })
+    }
+}
+
+/// Kick off the metadata ping-pong from a `visitor!(...)` invocation (function-like, used inside the
+/// visitor module). The syan path arrives via `$crate` captured by the `visitor!` macro_rules shim.
+pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
+    let EntryInput { syan, args } = match syn::parse2(input) {
+        Ok(e) => e,
         Err(e) => return e.to_compile_error(),
     };
     if args.types.is_empty() {
-        abort!(module.ident, "#[visitor(..)] needs at least one AST type");
+        abort!(Span::call_site(), "visitor!(..) needs at least one AST type");
     }
-
-    // syan path: honor #[syan(path)] on the module, else `::syan`.
-    let syan: Path = {
-        use crate::attribute::FindAttribute;
-        module.attrs.get_syan()
-    };
     let build: Path = parse_quote!(#syan::_imp::syan_macro::__visitor_build);
-
-    let vis = &module.vis;
-    let ident = &module.ident;
     let base_tokens: TokenStream = match &args.base {
         Some(p) => quote!(#p),
         None => quote!(),
@@ -78,12 +85,10 @@ pub fn visitor(attr: TokenStream, item: TokenStream, nonce: u64) -> TokenStream 
     let nonce: TokenStream = nonce.parse().unwrap();
     let all_types = &args.types;
 
-    // `@visited` carries the *full paths* as written, so the generated module can name the visited
-    // types portably (no import needed when an absolute/crate path is given).
+    // `@visited` carries the *full paths* as written, so the generated items name the visited types
+    // in the caller's path context.
     let make_state = |rest: &[Path]| {
         quote! {
-            @vis { #vis }
-            @ident { #ident }
             @base { #base_tokens }
             @build { #build }
             @nonce { #nonce }
@@ -119,8 +124,6 @@ pub fn visitor(attr: TokenStream, item: TokenStream, nonce: u64) -> TokenStream 
 // ---------------------------------------------------------------------------
 
 struct BuildInput {
-    vis: Visibility,
-    ident: Ident,
     base: Option<Path>,
     build: Path,
     nonce: TokenStream,
@@ -142,8 +145,6 @@ fn parse_section(input: ParseStream) -> Result<(Ident, TokenStream)> {
 
 impl Parse for BuildInput {
     fn parse(input: ParseStream) -> Result<Self> {
-        let mut vis = Visibility::Inherited;
-        let mut ident = None;
         let mut base = None;
         let mut build = None;
         let mut nonce = TokenStream::new();
@@ -156,8 +157,6 @@ impl Parse for BuildInput {
         while !input.is_empty() {
             let (name, content) = parse_section(input)?;
             match name.to_string().as_str() {
-                "vis" => vis = syn::parse2(content)?,
-                "ident" => ident = Some(syn::parse2(content)?),
                 "base" => {
                     if !content.is_empty() {
                         base = Some(syn::parse2(content)?);
@@ -187,8 +186,6 @@ impl Parse for BuildInput {
         }
 
         Ok(BuildInput {
-            vis,
-            ident: ident.ok_or_else(|| Error::new(Span::call_site(), "missing @ident"))?,
             base,
             build: build.ok_or_else(|| Error::new(Span::call_site(), "missing @build"))?,
             nonce,
@@ -235,8 +232,6 @@ pub fn build(input: TokenStream) -> TokenStream {
     if !st.rest.is_empty() {
         let next = st.rest.remove(0);
         let BuildInput {
-            vis,
-            ident,
             base,
             build,
             nonce,
@@ -253,8 +248,6 @@ pub fn build(input: TokenStream) -> TokenStream {
         return quote! {
             #next ! {
                 @ast #build {
-                    @vis { #vis }
-                    @ident { #ident }
                     @base { #base_tokens }
                     @build { #build }
                     @nonce { #nonce }
@@ -758,7 +751,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .filter(|it| item_ident(it).map_or(false, |id| visited.contains(&id.to_string())))
         .collect();
     if targets.is_empty() {
-        abort!(st.ident, "no AST definitions resolved for the visitor");
+        abort!(Span::call_site(), "no AST definitions resolved for the visitor");
     }
 
     // The visitor trait is parameterized by the *union* of every visited type's generic params
@@ -818,8 +811,6 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     let shared = gen_side(false, &vtypes, &g_params, &g_args, &g_def, &g_use, &st.base);
     let mutable = gen_side(true, &vtypes, &g_params, &g_args, &g_def, &g_use, &st.base);
 
-    let vis = &st.vis;
-    let mod_ident = &st.ident;
     let base = &st.base;
 
     // Every visitor module exports its full visited-type set (idents) so another visitor can
@@ -832,6 +823,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .collect();
     let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
 
+    // Items are emitted directly into the enclosing module (where `visitor!(...)` was invoked).
     quote! {
         #[macro_export]
         #[doc(hidden)]
@@ -840,20 +832,15 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 $cb ! { $($pre)* @inh { #(#all_visible)* } }
             };
         }
+        #[doc(hidden)]
+        pub use #vmacro as __syan_visited;
 
-        #[allow(non_snake_case, unused_variables, unused_mut, dead_code, clippy::all)]
-        #vis mod #mod_ident {
-            use super::*;
-            #(if let Some(b) = base) {
-                #[allow(unused_imports)]
-                use #b::{Visit as _, VisitMut as _};
-            }
-
-            #[doc(hidden)]
-            pub use #vmacro as __syan_visited;
-
-            #shared
-            #mutable
+        #(if let Some(b) = base) {
+            #[allow(unused_imports)]
+            use #b::{Visit as _, VisitMut as _};
         }
+
+        #shared
+        #mutable
     }
 }
