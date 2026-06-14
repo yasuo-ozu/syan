@@ -292,7 +292,8 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater`), `macro/ast.rs` (`#[derive(Ast)]`)
   of the definition (re-parsed downstream as a `syn::Item`), re-exported under the type's own name.
 - `#[visitor([base =>] T, …)]` on an empty `mod`: metadata ping-pong via `__visitor_build` →
   generates per visited type a `Visit`/`VisitMut` method, a free `visit_*`/`visit_*_mut` traversal
-  fn, and `Visitable::visit` / `VisitableMut::visit_mut`. Direct and `Box`-wrapped AST fields are
+  fn, and **inherent** `visit` / `visit_mut` methods on each visited type (no trait import at the
+  call site; requires the visitor to be generated in the same crate as the types). Direct and `Box`-wrapped AST fields are
   traversed; other heads (incl. `Vec`/`Option`) are leaves (container traversal was removed).
 - Visitor inputs (the `IntoVisitor`/`IntoVisitorMut` selector design): struct visitors (via `&mut`),
   single closures, and **tuples of closures** (arity 2..=8) that run in **one** traversal via a
@@ -333,4 +334,4 @@ infers them.
 - [ ] implement auto drill-in feature
 - [ ] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. also deligate $crate to macro_rules! emitted by #[derive(Ast)]
 - [x] remove visit_*_{seq,opt} (and `Cont::Vec`/`Cont::Option` container traversal)
-- [ ] remove Visitable trait. instead implement `visit()` directly for the AST types. (you can limit that the AST types specified to `visitor!()` macro is located in the same crate.)
+- [x] remove Visitable trait. instead implement `visit()` directly for the AST types. (you can limit that the AST types specified to `visitor!()` macro is located in the same crate.)

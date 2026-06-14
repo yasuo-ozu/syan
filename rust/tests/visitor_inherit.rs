@@ -27,8 +27,6 @@ pub mod base {}
 #[visitor(base => Stmt)]
 pub mod ext {}
 
-use ext::Visitable;
-
 #[derive(Default)]
 struct Counter {
     types: u32,

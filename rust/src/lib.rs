@@ -20,3 +20,8 @@ pub mod ast {
         Nop(PhantomData<S>),
     }
 }
+
+/// A visitor over [`ast`], generated in this crate so its inherent `visit` methods are available to
+/// downstream crates (see `tests/cross_crate.rs`).
+#[syan::visit::visitor(crate::ast::Expr, crate::ast::Stmt)]
+pub mod visit {}

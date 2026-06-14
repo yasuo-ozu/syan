@@ -1,21 +1,11 @@
-//! Stage 11 + portability: a visitor generated in *this* crate over AST types whose
-//! `#[derive(Ast)]` lives in the `syan_rust` library crate.
-//!
-//! The AST types are intentionally **not** imported at module scope — the generated `visit` module
-//! must name them by the full path given to `#[visitor(...)]`, with no `use` needed.
+//! Cross-crate: the AST types, their `#[derive(Ast)]`, and the visitor all live in the `syan_rust`
+//! library. A downstream crate (this test) just calls the inherent `.visit()` — no trait import,
+//! no `#[visitor]` here.
 
-use syan::visit::visitor;
-
-#[visitor(syan_rust::ast::Expr, syan_rust::ast::Stmt)]
-pub mod visit {}
-
-use visit::Visitable;
+use syan_rust::ast::{Expr, Stmt};
 
 #[test]
-fn visitor_works_across_crates() {
-    // Imported locally (only to build the value); the generated module above does not see this.
-    use syan_rust::ast::{Expr, Stmt};
-
+fn inherent_visit_is_callable_downstream() {
     let ast: Expr<()> = Expr::Stmt(Box::new(Stmt::Expr(Box::new(Expr::Lit(
         core::marker::PhantomData,
     )))));

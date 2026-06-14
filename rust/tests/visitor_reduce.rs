@@ -16,8 +16,6 @@ pub struct Block<S> {
 #[visitor(Block, Stmt)]
 pub mod visit {}
 
-use visit::VisitableMut;
-
 struct Editor;
 impl<S> visit::VisitMut<S> for Editor {
     fn visit_block_mut(&mut self, b: &mut Block<S>) {

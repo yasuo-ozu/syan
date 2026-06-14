@@ -540,10 +540,11 @@ fn gargs(g: &Generics) -> Vec<TokenStream> {
 }
 
 /// One visited type's identifier (for method/struct names), the full path it is referenced by, its
-/// own use-side generics (e.g. `<S>` or `<S, Tokens>`), and its shared-ref and `&mut` bodies.
+/// own generic params (def-side) and use-side args, and its shared-ref and `&mut` bodies.
 struct VType {
     ident: Ident,
     path: TokenStream,
+    own_params: Vec<GenericParam>,
     own_use: TokenStream,
     body: TokenStream,
     body_mut: TokenStream,
@@ -567,7 +568,6 @@ fn gen_side(
     let hook_tr = id(&format!("Hook{suffix}"));
     let driver = id(&format!("Driver{suffix}"));
     let chain = id(&format!("Chain{suffix}"));
-    let visitable_tr = id(&format!("Visitable{suffix}"));
     let into_vis_fn = id(&format!("into_visitor{}", mt(mutable)));
     let into_hook_fn = id(&format!("into_hook{}", mt(mutable)));
     let visit_method = id(&format!("visit{}", mt(mutable)));
@@ -603,6 +603,41 @@ fn gen_side(
         .collect();
 
     let tup = tuple_impls(8, g_params, g_args, g_use, mutable);
+
+    // Inherent `visit` / `visit_mut` per type (replaces the Visitable trait). Each type's own
+    // params go on the impl; any extra union params go on the method (so a type that doesn't use
+    // every union param doesn't leave the impl param unconstrained).
+    let inherent: Vec<TokenStream> = vtypes
+        .iter()
+        .map(|vt| {
+            let own_names: HashSet<String> = vt.own_params.iter().map(param_name).collect();
+            let extra: Vec<&GenericParam> = g_params
+                .iter()
+                .filter(|p| !own_names.contains(&param_name(p)))
+                .collect();
+            let own_params = &vt.own_params;
+            let own_def = if own_params.is_empty() {
+                quote!()
+            } else {
+                quote!( < #(#own_params),* > )
+            };
+            let path = &vt.path;
+            let own_use = &vt.own_use;
+            let method = method_ident_m(&vt.ident, mutable);
+            quote! {
+                impl #own_def #path #own_use {
+                    pub fn #visit_method< #(#extra,)* __T >(
+                        #recv,
+                        visitor: impl #into_vis_tr< #(#g_args,)* __T >,
+                    ) -> #self_ret {
+                        let mut visitor = visitor.#into_vis_fn();
+                        visitor.#method(self);
+                        self
+                    }
+                }
+            }
+        })
+        .collect();
 
     quote! {
         pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #g_use } {
@@ -694,18 +729,8 @@ fn gen_side(
         }
         #(for imp in &tup) { #imp }
 
-        pub trait #visitable_tr #g_def {
-            fn #visit_method<__T>(#recv, visitor: impl #into_vis_tr< #(#g_args,)* __T >) -> #self_ret;
-        }
-        #(for s in &sides) {
-            impl #g_def #visitable_tr #g_use for #{&s.ty} {
-                fn #visit_method<__T>(#recv, visitor: impl #into_vis_tr< #(#g_args,)* __T >) -> #self_ret {
-                    let mut visitor = visitor.#into_vis_fn();
-                    visitor.#{&s.method}(self);
-                    self
-                }
-            }
-        }
+        // Inherent entry points (no trait import needed at the call site).
+        #(for imp in &inherent) { #imp }
     }
 }
 
@@ -765,6 +790,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .iter()
         .map(|it| {
             let ident = item_ident(it).unwrap().clone();
+            let own_params = gparams(item_generics(it).unwrap());
             let own = gargs(item_generics(it).unwrap());
             let own_use = if own.is_empty() {
                 quote!()
@@ -781,6 +807,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             VType {
                 ident,
                 path,
+                own_params,
                 own_use,
                 body,
                 body_mut,

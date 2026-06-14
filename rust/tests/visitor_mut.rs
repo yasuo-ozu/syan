@@ -12,8 +12,6 @@ pub enum Expr<S> {
 #[visitor(Expr)]
 pub mod visit {}
 
-use visit::{Visitable, VisitableMut};
-
 fn sample() -> Expr<()> {
     Expr::Add(
         Box::new(Expr::Lit(1, PhantomData)),

@@ -19,8 +19,6 @@ pub enum BinOp<S> {
 #[visitor(Expr, BinOp)]
 pub mod visit {}
 
-use visit::Visitable;
-
 #[test]
 fn visitor_over_mixed_arity_types() {
     let ast: Expr<(), ()> = Expr::Bin(
