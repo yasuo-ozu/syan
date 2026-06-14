@@ -3,7 +3,7 @@ use syn::*;
 use template_quote::quote;
 
 /// Convert a CamelCase / PascalCase identifier to snake_case (for the hidden macro name).
-fn to_snake(ident: &Ident) -> String {
+pub(crate) fn to_snake(ident: &Ident) -> String {
     let s = ident.to_string();
     let mut out = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {

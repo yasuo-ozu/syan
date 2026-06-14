@@ -11,7 +11,7 @@
 //!
 //! See `CLAUDE.md` for the full design.
 
-pub use syan_macro::Ast;
+pub use syan_macro::{visitor, Ast};
 
 /// Marker trait implemented by every type carrying `#[derive(Ast)]`.
 ///
