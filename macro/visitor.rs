@@ -465,6 +465,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     struct VType {
         ident: Ident,
         method: Ident,
+        hook: Ident,
+        hook_struct: Ident,
         body: TokenStream,
     }
     let vtypes: Vec<VType> = targets
@@ -473,6 +475,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             let ident = item_ident(it).unwrap().clone();
             VType {
                 method: method_ident(&ident),
+                hook: Ident::new(&format!("hook_{}", to_snake(&ident)), Span::call_site()),
+                hook_struct: Ident::new(&format!("{ident}Hook"), Span::call_site()),
                 body: build_body(it, &visited),
                 ident,
             }
@@ -520,6 +524,57 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             impl< #(#g_params,)* __V: Visit #g_use > IntoVisitor< #(#g_args,)* () > for __V {
                 fn into_visitor(self) -> impl Visit #g_use {
                     self
+                }
+            }
+
+            // --- closures: shallow Hook + single-pass Driver ---------------------------------
+
+            pub trait Hook #g_def {
+                #(for t in &vtypes) {
+                    fn #{&t.hook}(&mut self, i: & #{&t.ident} #g_use) { let _ = i; }
+                }
+            }
+
+            pub trait IntoHook< #(#g_params,)* __T > {
+                fn into_hook(self) -> impl Hook #g_use;
+            }
+
+            pub struct Driver<__H>(pub __H);
+
+            impl< #(#g_params,)* __H: Hook #g_use > Visit #g_use for Driver<__H> {
+                #(for t in &vtypes) {
+                    fn #{&t.method}(&mut self, i: & #{&t.ident} #g_use) {
+                        self.0.#{&t.hook}(i);
+                        #{&t.method}(self, i);
+                    }
+                }
+            }
+
+            #(for t in &vtypes) {
+                pub struct #{&t.hook_struct}<__F>(pub __F);
+
+                impl< #(#g_params,)* __F: ::core::ops::FnMut(& #{&t.ident} #g_use) >
+                    Hook #g_use for #{&t.hook_struct}<__F>
+                {
+                    fn #{&t.hook}(&mut self, i: & #{&t.ident} #g_use) {
+                        (self.0)(i);
+                    }
+                }
+
+                impl< #(#g_params,)* __F: ::core::ops::FnMut(& #{&t.ident} #g_use) >
+                    IntoHook< #(#g_args,)* #{&t.ident} #g_use > for __F
+                {
+                    fn into_hook(self) -> impl Hook #g_use {
+                        #{&t.hook_struct}(self)
+                    }
+                }
+
+                impl< #(#g_params,)* __F: ::core::ops::FnMut(& #{&t.ident} #g_use) >
+                    IntoVisitor< #(#g_args,)* #{&t.ident} #g_use > for __F
+                {
+                    fn into_visitor(self) -> impl Visit #g_use {
+                        Driver(#{&t.hook_struct}(self))
+                    }
                 }
             }
 

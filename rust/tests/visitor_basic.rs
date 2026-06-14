@@ -51,3 +51,14 @@ fn struct_visitor_counts_nodes() {
     assert_eq!(counter.exprs, 2, "outer Expr::Stmt + inner Expr::Other");
     assert_eq!(counter.stmts, 1, "the single Stmt::Expr");
 }
+
+#[test]
+fn single_closure_visitor() {
+    let mut exprs = 0usize;
+    sample().visit(|_e: &Expr<()>| exprs += 1);
+    assert_eq!(exprs, 2);
+
+    let mut stmts = 0usize;
+    sample().visit(|_s: &Stmt<()>| stmts += 1);
+    assert_eq!(stmts, 1);
+}
