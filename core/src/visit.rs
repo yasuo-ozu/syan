@@ -11,6 +11,8 @@
 //!
 //! See `CLAUDE.md` for the full design.
 
+pub use syan_macro::Ast;
+
 /// Marker trait implemented by every type carrying `#[derive(Ast)]`.
 ///
 /// It carries no methods; its only purpose is to let generic code (and the `#[visitor]` generator)

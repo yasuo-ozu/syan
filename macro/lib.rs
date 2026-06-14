@@ -2,6 +2,7 @@ use proc_macro::TokenStream as TokenStream1;
 use proc_macro_error::proc_macro_error;
 use syn::*;
 
+mod ast;
 mod attribute;
 mod recurse;
 mod symbol;
@@ -47,6 +48,14 @@ pub fn unparse(input: TokenStream1) -> TokenStream1 {
         &trait_path,
     )
     .into()
+}
+
+#[proc_macro_error]
+#[proc_macro_derive(Ast, attributes(syan))]
+pub fn ast_derive(input: TokenStream1) -> TokenStream1 {
+    let input: DeriveInput = parse_macro_input!(input);
+    let syan = input.attrs.get_syan();
+    ast::derive_ast(&input, random(), &syan).into()
 }
 
 #[proc_macro_error]
