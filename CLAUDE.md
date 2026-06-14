@@ -291,15 +291,15 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater`), `macro/ast.rs` (`#[derive(Ast)]`)
 - `#[derive(Ast)]`: marker impl + `#[macro_export]` callback metadata macro carrying a cleaned copy
   of the definition (re-parsed downstream as a `syn::Item`), re-exported under the type's own name.
 - `#[visitor([base =>] T, …)]` on an empty `mod`: metadata ping-pong via `__visitor_build` →
-  generates per visited type a `Visit`/`VisitMut` method, free `visit_*`/`visit_*_mut` traversal fn,
-  `visit_*_seq[_mut]` / `visit_*_opt[_mut]` container hooks, and `Visitable::visit` /
-  `VisitableMut::visit_mut`.
+  generates per visited type a `Visit`/`VisitMut` method, a free `visit_*`/`visit_*_mut` traversal
+  fn, and `Visitable::visit` / `VisitableMut::visit_mut`. Direct and `Box`-wrapped AST fields are
+  traversed; other heads (incl. `Vec`/`Option`) are leaves (container traversal was removed).
 - Visitor inputs (the `IntoVisitor`/`IntoVisitorMut` selector design): struct visitors (via `&mut`),
   single closures, and **tuples of closures** (arity 2..=8) that run in **one** traversal via a
   shallow `Hook` + single-pass `Driver` + `Chain`.
 - `visit_mut` full mirror (in-place mutation).
-- **Reduce/append**: overriding `visit_*_seq_mut(&mut Vec<X>)` / `visit_*_opt_mut(&mut Option<X>)`
-  lets a visitor add/remove/replace nodes in `Vec`/`Option` positions.
+- **Reduce/append**: override the *parent* node's `visit_*_mut` (it owns the `&mut Vec`/`&mut
+  Option` field) to add/remove/replace, then descend — see `rust/tests/visitor_reduce.rs`.
 - Inheritance `#[visitor(base => New)]` for new→base reference DAGs (base exports a `__syan_visited`
   list macro; new trait extends it via supertrait).
 - Cross-crate use validated.
@@ -332,5 +332,5 @@ infers them.
 - [ ] move visitor tests to /core/tests, that are not related to syan-rust crate
 - [ ] implement auto drill-in feature
 - [ ] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. also deligate $crate to macro_rules! emitted by #[derive(Ast)]
-- [ ] remove visit_*_{seq,opt}
+- [x] remove visit_*_{seq,opt} (and `Cont::Vec`/`Cont::Option` container traversal)
 - [ ] remove Visitable trait. instead implement `visit()` directly for the AST types. (you can limit that the AST types specified to `visitor!()` macro is located in the same crate.)

@@ -1,5 +1,5 @@
-//! Stage 9: overriding `visit_*_seq_mut` / `visit_*_opt_mut` lets a visitor reduce (remove) or
-//! append AST nodes in `Vec` / `Option` positions, because it receives `&mut Vec` / `&mut Option`.
+//! Reduce/append: a mut visitor edits `Vec` / `Option` AST positions by overriding the *parent*
+//! node's `visit_*_mut` (it owns the `&mut Vec` / `&mut Option`), then descending.
 
 use core::marker::PhantomData;
 use syan::visit::{visitor, Ast};
@@ -20,15 +20,11 @@ use visit::VisitableMut;
 
 struct Editor;
 impl<S> visit::VisitMut<S> for Editor {
-    fn visit_stmt_seq_mut(&mut self, seq: &mut Vec<Stmt<S>>) {
-        seq.retain(|s| s.0 != 0); // reduce: drop zero statements
-        for s in seq.iter_mut() {
-            self.visit_stmt_mut(s); // still descend into survivors
-        }
-        seq.push(Stmt(99, PhantomData)); // append a synthesized statement
-    }
-    fn visit_stmt_opt_mut(&mut self, opt: &mut Option<Stmt<S>>) {
-        *opt = None; // remove the optional node entirely
+    fn visit_block_mut(&mut self, b: &mut Block<S>) {
+        b.stmts.retain(|s| s.0 != 0); // reduce: drop zero statements
+        b.tail = None; // remove the optional node entirely
+        b.stmts.push(Stmt(99, PhantomData)); // append a synthesized statement
+        visit::visit_block_mut(self, b); // descend into the (edited) children
     }
 }
 
