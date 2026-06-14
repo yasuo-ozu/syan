@@ -1,0 +1,402 @@
+# Visitor design
+
+- implement visitor system in ASTs defined with syan
+- in syan provide two macros
+  - `#[derive(Ast)]` macro that impls empty trait `Ast` and define macro_rules! in the same name for use from `visitor!()` macro
+  - `visitor!()`macro for an empty module, that define visitor pattern in that module
+- use type-leak crate to emit macro_rules!
+
+
+## Ast derive macro
+
+```rs
+// in syan crate
+pub trait Ast{}
+
+// in user crate (like syan-rust)
+#[derive(Ast)]
+$vis struct Expr { .. }
+
+// emits
+impl Ast for Expr {}
+
+#[macro_export]
+macro_rules! __expr_ast_123456 {
+    ...
+}
+
+$vis use __expr_ast_123456 as Ast;
+```
+
+- applied to struct / enum
+- the target struct / enum can have type generics
+
+## visitor attribute macro
+
+```rs
+// #[derive(Ast)]
+pub struct Type<S>(S);
+
+// #[derive(Ast)]
+pub struct Cast<S>(Type<S>);
+
+// #[derive(Ast)]
+pub enum Expr<S> {
+    Cast(Cast<S>),
+}
+
+// #[derive(Ast)]
+pub enum Stmt<S> {
+    Expr(Expr<S>)
+}
+
+// #[visitor(Type, Expr)]
+// pub mod visit_type_expr {}
+
+// #[visitor] macro output
+pub mod visit_type_expr {
+    use super::*;
+    
+    pub trait Visit {
+        fn visit_type<S>(&mut self, i: &Type<S>) {
+            visit_type(self, i)
+        }
+        fn visit_expr<S>(&mut self, i: &Expr<S>) {
+            visit_expr(self, i)
+        }
+    }
+    
+    pub fn visit_type<V: Visit + ?Sized, S>(this: &mut V, i: &Type<S>) { }
+    pub fn visit_expr<V: Visit + ?Sized, S>(this: &mut V, i: &Expr<S>) {
+        match i {
+            Expr::Cast(cast) => this.visit_type(&cast.0),
+        }
+    }
+    
+    impl<S> Type<S> {
+        fn visit<V: Visit, T>(&self, mut visitor: V) {
+            visitor.visit_type(self);
+        }
+    }
+    
+    impl<S> Expr<S> {
+        fn visit<V: Visit, T>(&self, mut visitor: V) {
+            visitor.visit_expr(self);
+        }
+    }
+}
+
+// pub mod visit_type_expr_stmt {
+//     visitor!(super::visit_type_expr => )
+// }
+
+// visitor macro output
+pub mod visit_type_expr_stmt {
+    use super::*;
+    pub trait Visit: super::visit_type_expr::Visit {
+        fn visit_stmt<S>(&mut self, i: &Stmt<S>) {
+            visit_stmt(self, i)
+        }
+    }
+    
+    fn visit_stmt<V: Visit + ?Sized, S>(this: &mut V, i: &Stmt<S>) { 
+        match i {
+            Stmt::Expr(expr) => this.visit_expr(expr)
+        }
+    }
+    
+    impl<S> Stmt<S> {
+        fn visit<V: Visit>(&self, mut visitor: V) {
+            visitor.visit_stmt(self);
+        }
+    }
+}
+```
+
+- applied to empty module
+- implements trait Visit and `visit()` method for traits
+- take argument
+  - inherited Visitor module (before `=>`)
+  - multiple Ast types (should be defined in the same crate)
+
+---
+
+# Implementation plan (visitor system)
+
+## Context
+
+The repo already has derive macros (`Parse`, `Unparse`, `Spanned`) and two function/attribute
+macros (`symbol`, `recurse`) in the `syan-macro` crate (`macro/lib.rs`), with the core library
+published as crate `syan` (`core/`). There is **no** visitor support yet (grep confirms no `Ast`
+trait, `Repeater`, or `visitor!` anywhere). `rust_old/src/visit.rs` is a hand-written prototype of
+the *runtime shape* we want to generate (the `Visit` trait, free `visit_*` fns, `IntoVisitor`
+closure adapters, `Ast::visit`). The goal is to generate that shape automatically from AST type
+definitions, **across crate/module boundaries**, which is why `type-leak` (already a dep of
+`syan-macro`, but currently unused) is mandated: it makes copied type references portable.
+
+AST types in this project look like `pub enum Expr<S, Tokens> { Binary(ExprBinary<S, Tokens>), ... }`
+with fields wrapped in `Box`/`Vec`/`Option`, leaf token types (`Token![S => +]`, `Integer`),
+generic params `<S>` / `<S, Tokens = Infallible>`, and they may be wrapped by `#[recurse]`
+(`macro/recurse.rs`) and derived via `#[macro_derive(...)]` (type-macro-derive-tricks) when they
+contain type-position macros. The visitor generator must tolerate all of these.
+
+## Mechanism overview
+
+Two cooperating macros plus two small library items:
+
+1. **`#[derive(Ast)]`** (new `#[proc_macro_derive(Ast)]` in `macro/lib.rs` → `macro/ast.rs`).
+   For each AST type it emits, *in the type's own context*:
+   - `impl Ast for T<..> {}` (empty marker trait, defined in `syan`).
+   - type-leak `Repeater<N>` impls carrying each field type out of the definition context.
+   - an exported callback `macro_rules!` (the "metadata macro") encoding the type's structure
+     (generics, variants, field accessors, portable field types). Re-exported into the macro
+     namespace under the type's own name (`$vis use __t_ast_<nonce> as T;`) so it is reachable as
+     `path::to::T! { .. }` from any crate — type vs. macro live in different namespaces, so the
+     struct/enum `T` and the macro `T!` coexist.
+
+2. **`#[visitor([base =>] T, U, ...)]`** (new `#[proc_macro_attribute] visitor`) applied to an empty
+   `mod`. It cannot read another type's structure directly (a proc-macro can't evaluate a
+   `macro_rules!` mid-expansion), so it uses a **macro ping-pong**: it expands to an invocation of
+   the first metadata macro with a continuation pointing at a hidden helper proc-macro
+   (`#[proc_macro] __visitor_build` in `macro/visitor.rs`). Each metadata macro substitutes its
+   structure and re-invokes `__visitor_build`, which either fetches the next needed type's metadata
+   macro or, once the structure set is closed, emits the final module.
+
+3. **Library items** in `syan` (new `core/src/visit.rs`, re-exported from `core/src/lib.rs`):
+   - `pub trait Ast {}`
+   - `pub trait Repeater<const INDEX: usize> { type Type: ?Sized; }` (type-leak 0.2.0 does **not**
+     define this; the user crate must — see its README "Repeater"). Must be at an absolute path
+     (`::syan::Repeater`) reachable from both leaker and referrer.
+   The per-module `Visit` / `IntoVisitor` traits are generated inside each visitor module, not in
+   core (they reference the specific AST types), modeled on `rust_old/src/visit.rs`.
+
+## `#[derive(Ast)]` details (`macro/ast.rs`)
+
+- Reuse `attribute::FindAttribute::get_syan()` (honor `#[syan(path)]`) and the `random()` nonce from
+  `macro/lib.rs`, exactly like the existing derives.
+- Build a type-leak `Leaker` via `Leaker::from_struct(&ItemStruct)` / `Leaker::from_enum(&ItemEnum)`
+  (reconstruct an `ItemStruct`/`ItemEnum` from `DeriveInput`), then `reduce_roots()` and
+  `finish() -> Referrer` (type-leak `lib.rs:201/218/638/555`). `Referrer::iter()` yields the ordered
+  leak types → emit one `impl<..> ::syan::Repeater<N> for __TLeaker<..> { type Type = <leak_ty_N>; }`
+  per index, plus the leaker marker `struct __TLeaker<..>(PhantomData<..>)`.
+- Use `Referrer::expand(ty, |_, idx| parse_quote!(<__TLeaker<..> as ::syan::Repeater<#idx>>::Type))`
+  to rewrite every field type into a **portable** form before encoding it into the metadata macro.
+- Emit the metadata `macro_rules!` as a callback muncher. Suggested grammar (one rule):
+  ```text
+  (@ast { $cb:path ! { $($pre:tt)* } }) => {
+      $cb ! { $($pre)*
+          @type [T] @generics [S, Tokens] @kind [enum]
+          @variants [
+              { @name [Binary] @style [tuple]
+                @fields [ { @accessor [0] @ty [< portable ty for ExprBinary<S,Tokens> >] } ] }
+              ...
+          ]
+      }
+  };
+  ```
+  (struct → a single synthetic variant with `@style [struct|tuple]`). Field `@ty` is the
+  type-leak-portable form so `__visitor_build` can splice it into the visitor module unchanged.
+
+## `#[visitor(...)]` details (`macro/visitor.rs` + `__visitor_build`)
+
+Parse args: optional `base_path =>` then `Punctuated<Path, Comma>` of visited AST type paths. The
+attribute target is an empty `mod name {}`; keep `name`, `vis`, attrs.
+
+Expansion algorithm (the ping-pong, all in `__visitor_build`):
+- State threaded through each bounce as token blocks: `@config { name, vis, base, visited:[..] }`,
+  `@done { ...resolved structures... }`, `@queue [ paths still to fetch ]`.
+- Start: `#[visitor]` emits `FirstType! { @ast { ::syan::__visitor_build! { @config{..}
+  @done{} @queue[ rest... ] } } }`.
+- Each metadata macro appends its structure to the `__visitor_build` arg; `__visitor_build`:
+  1. Records the structure in `@done`.
+  2. Scans that structure's field types for **referenced Ast types not yet resolved** (e.g. `Cast`
+     reached from `Expr::Cast`). Non-visited intermediates must also be drilled into, so enqueue
+     them. Guard against cycles with a "seen" set.
+  3. If `@queue` non-empty, emit `NextType! { @ast { ::syan::__visitor_build! { ... } } }`.
+  4. If empty, emit the final module.
+
+Final module shape (generated; mirrors `rust_old/src/visit.rs` and the spec above):
+- `pub trait Visit [: base::Visit] { fn visit_t<S,Tokens>(&mut self, i: &T<S,Tokens>) { visit_t(self, i) } ... }`
+  — one method **per visited type only**; inherited types come from the `base` supertrait.
+- free `pub fn visit_t<V: Visit + ?Sized, S, Tokens>(this: &mut V, i: &T<..>) { <match arms> }` per
+  visited type.
+- `impl<V: Visit> Visit for &mut V { ... }` (forwarding, from prototype).
+- `IntoVisitor<T>` trait + blanket `impl IntoVisitor<()> for T: Visit` + one
+  `impl IntoVisitor<TheType> for F: FnMut(&TheType)` per visited type (closure adapters, from
+  prototype lines 30–90).
+- `impl<..> T<..> { pub fn visit<__V, __T>(&self, v: impl IntoVisitor<__T>) -> &Self { ... } }` per
+  visited type.
+- `use super::*;` at top so same-scope AST names resolve; cross-crate field types resolve because
+  they were rewritten to the `<__TLeaker as Repeater<N>>::Type` portable form.
+
+### Field-type → visit-call lowering (the core of `visit_*` bodies)
+
+Given a field accessor `f` and its (portable) type, peel wrappers and emit:
+- `Box<X>`        → recurse on `&*f` (prototype uses `&*s`).
+- `Vec<X>` / `[X]`→ `for __x in f { <recurse __x> }`.
+- `Option<X>`     → `if let Some(__x) = f { <recurse __x> }`.
+- `&X` / `&mut X` → recurse on `f`.
+- head ident `H` with H ∈ **visited set** → `this.visit_h(<ref to f>)`.
+- head ident `H` that is **another Ast type** (has metadata macro) but not visited → **drill in**:
+  expand H's structure and, for each of *its* fields, emit `this.visit_*(&f.<accessor>)`
+  (this is exactly `Expr::Cast(cast) => this.visit_type(&cast.0)` from the spec).
+- anything else (token types, primitives, `PhantomData`) → no-op leaf.
+
+Enum arms bind variant fields with generated idents (reuse the binding strategy in
+`attribute.rs::map_fields_to_idents`, `macro/attribute.rs:696`).
+
+## Reused utilities
+
+- `macro/attribute.rs`: `FindAttribute::get_syan` (`:15`), `map_fields_to_idents` (`:696`),
+  `Adt::all_fields` (`:719/769`) and the enum/struct field-walking patterns.
+- `macro/lib.rs`: `random()` nonce (`:11`) and the `#[proc_macro_error]` wrapper convention.
+- `type-leak 0.2.0`: `Leaker::from_struct/from_enum/with_generics/intern`, `reduce_roots`,
+  `finish`, `Referrer::{iter, expand, into_visitor, is_empty}` (it is `Parse` + `ToTokens`, so a
+  `Referrer` round-trips through a `macro_rules!` as a parenthesized type list).
+- `template-quote::quote!` (already used throughout `macro/`).
+- Runtime shape: copy/adapt `rust_old/src/visit.rs`.
+
+## Files to change
+
+- `core/src/visit.rs` (new): `Ast`, `Repeater` traits. `core/src/lib.rs`: `pub mod visit;` and
+  re-export `Ast` from `syan_macro` (like `span::Spanned`); add the derive to `_imp` if needed.
+- `macro/lib.rs`: add `#[proc_macro_derive(Ast, attributes(syan, group, ...))]`,
+  `#[proc_macro_attribute] visitor`, and hidden `#[proc_macro] __visitor_build`; `mod ast; mod visitor;`.
+- `macro/ast.rs` (new), `macro/visitor.rs` (new).
+- `macro/Cargo.toml`: `type-leak` dep already present (unused today) — start using it.
+- Tests under `core/tests/` (mirroring `core/tests/recurse_test.rs` style) and/or `rust/`.
+
+## Staged implementation (build + test each stage)
+
+1. **Library scaffold**: add `Ast` + `Repeater` to `syan`; `#[derive(Ast)]` emitting only
+   `impl Ast` + the metadata macro (no type-leak yet). Unit-test the metadata macro expands.
+2. **Same-module visitor, visited types only**: `#[visitor(T, U)]` with `use super::*`, no drill-in,
+   no inheritance. Reproduce the `Type`/`Expr` example from this file. Use the prototype runtime.
+3. **Drill-in** through non-visited Ast intermediates (the `Cast` case) via the ping-pong +
+   metadata-macro fetch closure.
+4. **Containers**: `Box`/`Vec`/`Option`/`&` lowering.
+5. **Inheritance**: `base =>` supertrait wiring; only emit new methods.
+6. **type-leak portability**: switch field types to `<__TLeaker as Repeater<N>>::Type` so visitor
+   modules work cross-crate / cross-module; add a 2-crate test.
+7. **Robustness**: `#[recurse]` modules, `#[macro_derive]` type-macro fields (leaves), generic
+   defaults, const generics.
+
+## Verification
+
+- `cargo build -p syan-macro && cargo test -p syan` (workspace at repo root).
+- New `core/tests/visitor_test.rs`: define `Type<S>`, `Cast<S>`, `Expr<S>`, `Stmt<S>` as in this
+  file's example, generate `#[visitor(Type, Expr)]` and an inheriting `#[visitor(super::v => Stmt)]`,
+  then assert traversal order with a counting visitor and with a closure
+  (`ast.visit(|e: &Expr<()>| { ... })`) — exactly the three call styles in `rust_old/src/visit.rs`.
+- `trybuild` UI tests (pattern already in `core/tests/ui/`) for: applying `#[visitor]` to a
+  non-empty module, unknown type path, and a closure type that isn't a visited type.
+- Cross-crate test: a second test crate that derives `Ast` and a visitor over `syan-rust` AST types
+  to prove the type-leak path works beyond one crate.
+
+## Open decisions (resolve before/while implementing)
+
+- **Surface syntax**: this file shows both `#[visitor(Type, Expr)]` (attribute on `mod`) and
+  `visitor!(super::base => )` (function-like inside a `mod`). Plan picks the **attribute**
+  `#[visitor([base =>] T, ...)]` as primary (matches "applied to empty module"); a thin
+  `visitor!{ [base =>] T, ... }` wrapper can be added if the function-like form is also wanted.
+- **`visit` vs `visit_mut`**: spec is `&self` only. Add `VisitMut` later by mirroring with `&mut`.
+- **Method naming**: `visit_<snake_case(ident)>`; confirm desired casing for multi-word idents.
+
+---
+
+# Implementation plan addendum: IntoVisitor, multi-closure, visit_mut, seq/opt reduce-append
+
+These extend the runtime shape in `rust_old/src/visit.rs`. They mostly affect what the visitor
+module *generates*; the `#[derive(Ast)]` metadata macro is unchanged except it must also report,
+per field, the **container kind** (`Direct` / `Box` / `Vec` / `Option`) and the inner AST head so
+the generator can pick seq/opt hooks.
+
+## IntoVisitor: composition needs a shallow-hook split
+
+The prototype bakes recursion into each `Visit` method (`fn visit_expr(..) { f(i); visit_expr(self,i) }`).
+That is correct for a **single** visitor but cannot be *composed*: calling two such methods at one
+node recurses twice. To support tuples of closures with a **single** traversal, split the closure
+path into a shallow hook + a driver (struct visitors keep using the prototype trait directly via
+`IntoVisitor<S,()>`):
+
+```rust
+// generated per module
+pub trait Visit<S> { fn visit_expr(&mut self,i:&Expr<S>){visit_expr(self,i)} /* ...per type... */ }
+
+// shallow, no recursion; default no-ops; one method per visited type
+pub trait Hook<S> { fn hook_expr(&mut self,_:&Expr<S>){} fn hook_stmt(&mut self,_:&Stmt<S>){} }
+
+// turns any Hook into a real single-pass Visit (fires hooks at every level, recurses once)
+pub struct Driver<H>(H);
+impl<S,H:Hook<S>> Visit<S> for Driver<H> {
+    fn visit_expr(&mut self,i:&Expr<S>){ self.0.hook_expr(i); visit_expr(self,i) }
+    fn visit_stmt(&mut self,i:&Stmt<S>){ self.0.hook_stmt(i); visit_stmt(self,i) }
+}
+
+pub trait IntoVisitor<S,T>{ fn into_visitor(self)->impl Visit<S>; }
+pub trait IntoHook<S,T>{ fn into_hook(self)->impl Hook<S>; }
+
+impl<S,V:Visit<S>> IntoVisitor<S,()> for V { fn into_visitor(self)->impl Visit<S>{ self } } // struct visitors
+```
+
+The disambiguating second type param `T` keeps all impls non-overlapping (`()`, `Expr<S>`,
+`(T0,T1,..)`), so no specialization is needed.
+
+## Single + multiple closures (tuples)
+
+```rust
+// single-type hook, generated per visited type
+struct ExprHook<F>(F);
+impl<S,F:FnMut(&Expr<S>)> Hook<S> for ExprHook<F>{ fn hook_expr(&mut self,i:&Expr<S>){(self.0)(i)} }
+impl<S,F:FnMut(&Expr<S>)> IntoHook<S,Expr<S>> for F{ fn into_hook(self)->impl Hook<S>{ExprHook(self)} }
+impl<S,F:FnMut(&Expr<S>)> IntoVisitor<S,Expr<S>> for F{ fn into_visitor(self)->impl Visit<S>{Driver(ExprHook(self))} }
+
+// chain combinator + tuple impls for arity 2..=K (e.g. 8), generated once per module
+struct Chain<A,B>(A,B);
+impl<S,A:Hook<S>,B:Hook<S>> Hook<S> for Chain<A,B>{
+    fn hook_expr(&mut self,i:&Expr<S>){self.0.hook_expr(i);self.1.hook_expr(i)} /* ...per type... */
+}
+impl<S,F0,T0,F1,T1> IntoVisitor<S,(T0,T1)> for (F0,F1)
+where F0:IntoHook<S,T0>, F1:IntoHook<S,T1>
+{ fn into_visitor(self)->impl Visit<S>{ Driver(Chain(self.0.into_hook(), self.1.into_hook())) } }
+```
+
+So `ast.visit((|e:&Expr<()>|..., |s:&Stmt<()>|...))` runs one traversal firing both closures at the
+right node types. Closures may target any subset of visited types, in any order.
+
+## visit_mut (full mirror, `&mut`)
+
+Generate a parallel set: `VisitMut<S>` (`fn visit_expr_mut(&mut self,&mut Expr<S>)`), free
+`visit_expr_mut(this,&mut Expr<S>)`, `HookMut`/`DriverMut`, closures `FnMut(&mut Expr<S>)`,
+`IntoVisitorMut`/`IntoHookMut`, tuple impls, and `AstMut::visit_mut(&mut self, v) -> &mut Self`.
+Match-arm lowering identical but binds `&mut` and recurses through `*_mut` fns.
+
+## List / Option reduce-append (the new capability)
+
+For every visited type `X` add **container hook methods** to the trait so users can resize:
+
+```rust
+// in VisitMut<S> (override to append/remove/reorder — you get &mut Vec / &mut Option):
+fn visit_expr_seq_mut(&mut self, seq:&mut Vec<Expr<S>>){ for x in seq.iter_mut(){ self.visit_expr_mut(x) } }
+fn visit_expr_opt_mut(&mut self, opt:&mut Option<Expr<S>>){ if let Some(x)=opt{ self.visit_expr_mut(x) } }
+// in Visit<S> (shared-ref, observation only): &[Expr<S>] / &Option<Expr<S>>
+```
+
+Container-field lowering then routes through these instead of inlining the loop:
+- field `Vec<Expr<S>>`    → `this.visit_expr_seq[_mut](&[mut] f)`
+- field `Option<Expr<S>>` → `this.visit_expr_opt[_mut](&[mut] f)`
+- field `Box<Expr<S>>`    → `this.visit_expr[_mut](&[mut] *f)`
+- field `Expr<S>`         → `this.visit_expr[_mut](&[mut] f)`
+
+Recognized containers: `Vec`, `Option`, `Box` (also `VecDeque`; `Punctuated` later). Anything whose
+inner head is not an Ast type is a leaf (no hook). Reduce = user drains/retains the `&mut Vec`;
+append = user pushes. Because resizing happens in the user's `*_seq_mut` override and the driver
+re-reads `seq.iter_mut()` only in the default body, user overrides have full control over count.
+
+## Implementation/commit order (supersedes the 7-stage list above for these features)
+
+1. lib scaffold (`Ast`,`Repeater`) → 2. `#[derive(Ast)]`+metadata macro → 3. `#[visitor]` ping-pong
++ `Visit`/free-fns/`Ast::visit` + struct visitors (`IntoVisitor<()>`) → 4. single-closure
+`Driver`/`Hook` → 5. tuple `Chain` → 6. `Vec`/`Option`/`Box` lowering + `*_seq`/`*_opt` → 7. drill-in
+→ 8. `visit_mut` mirror → 9. `*_seq_mut`/`*_opt_mut` reduce-append → 10. inheritance → 11. cross-crate.
+Commit per numbered step once it builds + its test passes.
