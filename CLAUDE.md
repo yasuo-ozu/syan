@@ -331,10 +331,23 @@ infers them.
 
 # TODOs
 
-- [ ] use type-leak
+- [ ] use type-leak — NOTE: the current visitor design never *splices field types* into output
+  (field types are only inspected at macro time for their head ident → which `visit_*` to call;
+  even drill-in would emit only field *accessors* like `&cast.0`, never type tokens). So type-leak's
+  `Repeater` portability has no functional consumer today. The metadata macro carries the cleaned
+  def with bare field-type idents, re-parsed only for head inspection (never name-resolved). Revisit
+  if a future feature needs to emit a field type verbatim across crates.
 - [x] add tests that use #[derive(Ast)] and #[recurse] at the same structs (`core/tests/ast_recurse.rs`; marker coexists. Building a *visitor* over recurse aliases still needs the metadata macro reachable via the alias name — future.)
 - [x] move visitor tests to /core/tests, that are not related to syan-rust crate
-- [ ] implement auto drill-in feature
+- [ ] implement auto drill-in feature — BLOCKED on a fundamental macro limitation: deciding "is
+  this field-head an `Ast` type to drill into, or a leaf?" requires testing macro/trait existence at
+  macro-expansion time, which stable Rust macros cannot do. Blindly fetching `Head!` for every
+  non-visited path head errors on leaf heads (`Integer`, `Symbol<…>`, `GroupBrace<…>`, …) that have
+  no metadata macro. Options: (a) keep the working workaround — *list the wrapper* in `visitor!(…)`
+  (it then gets its own `visit_cast` that descends); (b) add an explicit drill-only list, e.g.
+  `visitor!(Type, Expr; drill super::Cast)` — safe (user names the Ast types), gives the spec's
+  "traversed but not visitable" semantics; (c) a leaf denylist heuristic (fragile). Needs a
+  decision before implementing.
 - [x] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. (`$crate` in the `#[derive(Ast)]` metadata macro is only needed once field paths are spliced — folded into the type-leak TODO.)
 - [x] remove visit_*_{seq,opt} (and `Cont::Vec`/`Cont::Option` container traversal)
 - [x] remove Visitable trait. instead implement `visit()` directly for the AST types. (you can limit that the AST types specified to `visitor!()` macro is located in the same crate.)
