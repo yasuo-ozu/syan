@@ -404,11 +404,16 @@ body from the fetched structures. (A purer variant where each `macro_rules!` emi
 directly is possible but pushes visited-set membership tests + cycle guards into `macro_rules!` —
 far harder than doing them in the proc-macro; recommend the compose-in-proc-macro approach.)
 
-## Containers (decision flagged)
+## Open decisions (resolve before implementing)
 
-Only `Direct` + `Box` are traversed today (`Vec`/`Option` were removed). Drill-in keeps that. If real
-ASTs need `Vec<Stmt>`/`Option<Expr>` children traversed, re-introduce them as "Ast containers"
-(iterate/deref, then drill the inner head) — a follow-up.
+1. **Containers in scope?** Only `Direct` + `Box` are traversed today (`Vec`/`Option` were removed).
+   Real ASTs need `Vec<Stmt>` / `Option<Expr>` children traversed — re-introduce them as "Ast
+   containers" (iterate/deref, then drill the inner head) as part of drill-in, or keep out and
+   require `#[no_ast]` on container fields?
+2. **Delegation style:** compose the drill body in the `__visitor_build` proc-macro from
+   fetched structures (recommended — visited-set membership + cycle guards are easy there) vs. have
+   each `#[derive(Ast)]` `macro_rules!` emit its own drill body (purer "delegate via macro_rules!",
+   but pushes membership/cycle logic into `macro_rules!`).
 
 ## Tests (`core/tests`)
 
