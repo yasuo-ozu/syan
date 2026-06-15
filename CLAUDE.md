@@ -331,12 +331,14 @@ infers them.
 
 # TODOs
 
-- [ ] use type-leak — NOTE: the current visitor design never *splices field types* into output
-  (field types are only inspected at macro time for their head ident → which `visit_*` to call;
-  even drill-in would emit only field *accessors* like `&cast.0`, never type tokens). So type-leak's
-  `Repeater` portability has no functional consumer today. The metadata macro carries the cleaned
-  def with bare field-type idents, re-parsed only for head inspection (never name-resolved). Revisit
-  if a future feature needs to emit a field type verbatim across crates.
+- [~] use type-leak — `#[derive(Ast)]` now builds a `type_leak::Leaker` from the definition and
+  emits a `__<type>_leaker_<nonce>` marker + one `::syan::visit::Repeater<N>` impl per
+  context-dependent field type (`macro/ast.rs`), so those types are accessible portably as
+  `<leaker as Repeater<N>>::Type`. NOTE: the *visitor itself* never splices field types (it detects
+  visited fields by head ident and emits accessors/method-names only), so it doesn't consume the
+  Repeater impls yet — they're the foundation for drill-in / external metadata consumers. To make
+  them discoverable, the metadata macro would also carry the leaker path (deferred until a consumer
+  needs it).
 - [x] add tests that use #[derive(Ast)] and #[recurse] at the same structs (`core/tests/ast_recurse.rs`; marker coexists. Building a *visitor* over recurse aliases still needs the metadata macro reachable via the alias name — future.)
 - [x] move visitor tests to /core/tests, that are not related to syan-rust crate
 - [ ] implement auto drill-in feature — BLOCKED on a fundamental macro limitation: deciding "is
