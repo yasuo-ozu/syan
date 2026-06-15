@@ -341,15 +341,79 @@ infers them.
   needs it).
 - [x] add tests that use #[derive(Ast)] and #[recurse] at the same structs (`core/tests/ast_recurse.rs`; marker coexists. Building a *visitor* over recurse aliases still needs the metadata macro reachable via the alias name — future.)
 - [x] move visitor tests to /core/tests, that are not related to syan-rust crate
-- [ ] implement auto drill-in feature — BLOCKED on a fundamental macro limitation: deciding "is
-  this field-head an `Ast` type to drill into, or a leaf?" requires testing macro/trait existence at
-  macro-expansion time, which stable Rust macros cannot do. Blindly fetching `Head!` for every
-  non-visited path head errors on leaf heads (`Integer`, `Symbol<…>`, `GroupBrace<…>`, …) that have
-  no metadata macro. Options: (a) keep the working workaround — *list the wrapper* in `visitor!(…)`
-  (it then gets its own `visit_cast` that descends); (b) add an explicit drill-only list, e.g.
-  `visitor!(Type, Expr; drill super::Cast)` — safe (user names the Ast types), gives the spec's
-  "traversed but not visitable" semantics; (c) a leaf denylist heuristic (fragile). Needs a
-  decision before implementing.
+- [ ] implement auto drill-in feature — UNBLOCKED by the `#[no_ast]` convention (see the
+  "Drill-in implementation plan" section below): non-`#[no_ast]` fields are Ast *by contract*, so
+  the generator follows them and invokes their metadata macros without ever testing existence.
 - [x] change #[visitor] macro to `visitor!()` function-like macro used inside of visitor module, and deligate $crate to proc-macro to solve syan crate. (`$crate` in the `#[derive(Ast)]` metadata macro is only needed once field paths are spliced — folded into the type-leak TODO.)
 - [x] remove visit_*_{seq,opt} (and `Cont::Vec`/`Cont::Option` container traversal)
 - [x] remove Visitable trait. instead implement `visit()` directly for the AST types. (you can limit that the AST types specified to `visitor!()` macro is located in the same crate.)
+
+---
+
+# Drill-in implementation plan
+
+## Context
+
+Drill-in lets a visitor traverse *through* an Ast type it doesn't have a `visit_*` method for (the
+spec's `Expr::Cast(cast) => this.visit_type(&cast.0)` — `Cast` is unlisted but must be descended
+into to reach the visited `Type`). The blocker was that "is this field-head an `Ast` type?" can't be
+tested at macro-expansion time. The **`#[no_ast]` convention** removes it: in a `#[derive(Ast)]`
+struct/enum, **every field's (head) type is itself `#[derive(Ast)]`** — so it has a metadata macro
+reachable by name — **unless the field is `#[no_ast]`** (leaf: `Token![..]`, `Integer`, primitives,
+`PhantomData`, spans, …). The generator never tests Ast-ness: non-`#[no_ast]` ⇒ Ast by contract; a
+forgotten `#[no_ast]` surfaces as a clear "cannot find macro `Foo`" error. This also gives the
+`Repeater` impls (already emitted by `#[derive(Ast)]`) their consumer: portable sub-AST references.
+
+## `#[derive(Ast)]` (`macro/ast.rs`)
+
+- Add `no_ast` to the helper attributes: `#[proc_macro_derive(Ast, attributes(syan, no_ast))]`;
+  read `#[no_ast]` per field (strip it from the embedded def, like other helper attrs).
+- The metadata macro emits, per variant → per field, a record carrying: the **accessor** (tuple
+  index or named ident), the **container** (`direct` / `box`), and for non-`#[no_ast]` fields the
+  inner **head ident** plus a **portable macro path** to that field type's metadata macro (so it is
+  callable from the visitor's context). `#[no_ast]` fields carry just `@no_ast`.
+- Keep the `Leaker` + `Repeater<N>` impls; use the `Referrer` to make the per-field type/macro path
+  portable (the consumer that justifies the type-leak work).
+
+## `__visitor_build` (`macro/visitor.rs`) — orchestration + auto-discovery
+
+- `visited` = types listed in `visitor!(...)` (these get `visit_*` methods / `IntoVisitor` / inherent
+  `visit`). The user lists only the entry types they care about — **not** the whole graph.
+- **Auto-discovery** (extends the ping-pong): when a fetched type has a non-`#[no_ast]` field whose
+  head type isn't in `done`, enqueue its (portable) macro path and fetch it; repeat to the reachable
+  closure. A `seen` set guards cycles.
+- **Body lowering** per field (peeling `Box`):
+  - `#[no_ast]` ⇒ bind `_`, skip.
+  - head ∈ `visited` ⇒ `this.visit_<head>(<&accessor>)`.
+  - head Ast but ∉ `visited` (**intermediate**) ⇒ **drill**: inline-descend into that type's
+    fetched fields, extending the accessor (`&c.0`, `&c.0.1`, …) and recursing with the same rules.
+    A recursive intermediate must be listed in `visited` to break the inline recursion (else error).
+
+## Pathing (type-leak / `$crate`)
+
+To invoke a sub-AST's metadata macro from the visitor's context its path must resolve there. Carry
+the field's macro path portably: for same-module AST graphs, relative to the defining type's module;
+for imported/cross-module, anchor via `$crate` and the `Repeater` indirection for the *type*. This
+is the concrete payoff of the already-emitted `Repeater` impls + `$crate` delegation.
+
+## Delegation note
+
+"Delegate code via the sub-ASTs' `macro_rules!`" is realized as: each sub-AST's metadata macro
+supplies its own structure (the ping-pong *is* the delegation); `__visitor_build` composes the drill
+body from the fetched structures. (A purer variant where each `macro_rules!` emits its drill body
+directly is possible but pushes visited-set membership tests + cycle guards into `macro_rules!` —
+far harder than doing them in the proc-macro; recommend the compose-in-proc-macro approach.)
+
+## Containers (decision flagged)
+
+Only `Direct` + `Box` are traversed today (`Vec`/`Option` were removed). Drill-in keeps that. If real
+ASTs need `Vec<Stmt>`/`Option<Expr>` children traversed, re-introduce them as "Ast containers"
+(iterate/deref, then drill the inner head) — a follow-up.
+
+## Tests (`core/tests`)
+
+- Spec example: `Type`, `Cast(Type)`, `Expr { Cast(Cast) }`; `visitor!(super::Type, super::Expr)`
+  (Cast unlisted) ⇒ `visit_expr` drills `Expr::Cast(c) => this.visit_type(&c.0)`; assert no
+  `visit_cast` exists (Cast not visitable).
+- `#[no_ast]` leaf field is skipped; a non-Ast field without `#[no_ast]` is a clear error.
+- Auto-discovery: `visitor!(super::Root)` only ⇒ all reachable non-leaf types traversed.
