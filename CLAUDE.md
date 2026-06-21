@@ -51,79 +51,72 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 
 The original "drill-in" goal was to traverse *through* an Ast type the visitor has no `visit_*` for
 (the spec's `Expr::Cast(cast) => this.visit_type(&cast.0)`). The deep dive below resolves it into
-something simpler and stronger — **auto-discover the whole reachable AST closure and give every type
-a `visit_*` method** (see *Model* and *Resolved decisions*), so there is no separate "drill" path.
-The enabling blocker was that "is this field-head an `Ast` type?" can't be tested at macro-expansion
-time. The **`#[no_ast]` convention** removes it: in a `#[derive(Ast)]`
-struct/enum, **every field's (head) type is itself `#[derive(Ast)]`** — so it has a metadata macro
-reachable by name — **unless the field is `#[no_ast]`** (leaf: `Token![..]`, `Integer`, primitives,
-`PhantomData`, spans, …). The generator never tests Ast-ness: non-`#[no_ast]` ⇒ Ast by contract; a
-forgotten `#[no_ast]` surfaces as a clear "cannot find macro `Foo`" error. Two orthogonal axes do the
-work: **`#[no_ast]`** owns classification (Ast vs leaf, a denylist), and a complementary type-level
-**`#[subast(...)]`** owns path resolution (reaching a followed head's macro from the visitor context)
-— `#[subast]` never changes membership. This also gives the `Repeater` impls (already emitted by
-`#[derive(Ast)]`) a fallback consumer: portable sub-AST references.
+something simpler and stronger — **auto-discover the reachable AST closure and give every discovered
+type a `visit_*` method** (see *Model* and *Resolved decisions*), so there is no separate "drill"
+path. The enabling blocker was that "is this field-head an `Ast` type to follow?" can't be tested at
+macro-expansion time. The **`#[subast(...)]` allowlist** removes it: a `#[derive(Ast)]` struct/enum
+declares its sub-AST types (with resolvable paths) in a type-level `#[subast(...)]`; **a field is
+followed iff its (container-peeled) head is listed there** (or is the type's own type — self-recursion
+is implicit). **All other field types are ignored** (treated as leaves: tokens, primitives,
+`PhantomData`, spans, …). One attribute does both jobs: membership (listed ⇒ followed) *and* pathing
+(the entry supplies the resolvable path to that sub-AST's metadata macro). This also gives the
+`Repeater` impls (already emitted by `#[derive(Ast)]`) a fallback consumer: portable sub-AST refs.
 
 ## `#[derive(Ast)]` (`macro/ast.rs`)
 
-Two orthogonal axes: **`#[no_ast]`** owns *classification* (Ast vs leaf), **`#[subast]`** owns *path
-resolution*. Helper attributes: `#[proc_macro_derive(Ast, attributes(syan, no_ast, subast))]`.
+`#[subast(...)]` is the single classification + pathing source. Helper attributes:
+`#[proc_macro_derive(Ast, attributes(syan, subast))]`.
 
-- **`#[no_ast]`** (denylist) — per **field** marks a leaf (bind `_`, never followed); per **type**
-  marks a whole leaf type (no `visit_*`, never descended — e.g. an all-`Token!` `BinOp` in one mark).
-  Everything not `#[no_ast]` is an Ast child and is followed. The loud "cannot find macro `Foo`"
-  failure is the safety net for a forgotten mark — strictly safer than an allowlist's silent omission
-  (which is why classification is a denylist, not a `#[subast]` allowlist).
-- **`#[subast(<paths>)]`** (pathing, **not** membership) — a type-level dictionary of resolvable
-  paths to followed heads, resolved **at the defining module** (forms: `crate::` / `::abs::` /
-  `super::` / `self::` / bare sibling / `b::Foo as BFoo`; no generic args). It only tells the derive
-  *where* a followed head lives; it never adds/removes anything from the visited closure. **Self is
-  never listed** (the derive errors if it is — self-refs resolve via `@SELF`, below).
-- **Default path rule** per followed field (peel the container to the inner head; §Decision 1),
-  priority order: (1) the field's own path **if multi-segment** (`Vec<crate::ast::Pat<S>>` ⇒
-  `crate::ast::Pat`) — used verbatim, so most explicitly-pathed fields need no entry; (2) else a bare
-  head matched (last segment, alias-aware) against a `#[subast]` entry ⇒ that entry's path; (3) else a
-  bare head ⇒ treated as a same-module **sibling**, emitted as a derive-generated portable re-export
-  `#[doc(hidden)] pub use Head as __subast_…;` in the defining module (one `pub use` republishes
-  **both** the type and its `Head!` macro). A bare head that is *not* a real sibling (came via a
-  private `use`, unlisted) makes that `pub use` fail **at the field, in the defining module** — a
-  clear, located error. So `#[subast]` is consulted only at step 2: the bare cross-module/aliased
-  residual; same-module siblings and explicitly-pathed fields need none.
-- The metadata macro emits, per variant → per field, an explicit record: **accessor** (tuple index /
-  named ident), **container** (`direct`/`box`/`vec`/`vecdeque`/`option`/`slice`/`punctuated`), the
-  inner **head ident** (literal — for `visit_<snake(head)>` construction in the proc-macro, *never*
-  in `macro_rules!`), and the **resolved path** (the rule above; `@SELF` for a self-referential head,
-  substituted by `__visitor_build` with the path it fetched the type by). `#[no_ast]` fields carry
-  just `@no_ast`. The derive runs definition-site diagnostics: ambiguous last-segment across
-  `#[subast]` entries (error), an entry matching no field (warning).
+- **`#[subast(<paths>)]`** — a type-level **allowlist** of this type's sub-AST types, each as a path
+  resolvable **at the defining module** (forms: `crate::` / `::abs::` / `super::` / `self::` / bare
+  sibling / `b::Foo as BFoo`; no generic args). A field is an Ast child **iff** its container-peeled
+  head matches a listed entry (by last segment, alias-aware) — then that entry's path is its resolvable
+  path. **Self-recursion is implicit**: a field whose head is the type's own type is always followed
+  (path via `@SELF`, below); you do not list self. **Every other field is ignored** — bound `_`, a
+  leaf, no traversal. There is no `#[no_ast]` (no per-field or per-type leaf marking).
+- **Trade-off (per directive):** the allowlist is explicit and self-documenting ("these are my
+  sub-ASTs and where they live") and solves pathing uniformly. The accepted cost is the
+  *silent-omission* failure mode — forgetting to list a sub-AST silently stops traversal into it
+  (vs. a denylist's loud "cannot find macro"). The `unused entry` warning and an optional
+  "this `#[derive(Ast)]` type follows nothing" lint mitigate typos.
+- The metadata macro emits, per variant → per field, a record: a **followed** field carries the
+  **accessor** (tuple index / named ident), the **container**
+  (`direct`/`box`/`vec`/`vecdeque`/`option`/`slice`/`punctuated`), the inner **head ident** (literal —
+  for `visit_<snake(head)>` construction in the proc-macro, *never* in `macro_rules!`), and the
+  **resolved path** (the entry's path; `@SELF` for a self-referential head, substituted by
+  `__visitor_build` with the path it fetched the type by); an **ignored** field carries just `@leaf`.
+- Diagnostics at the definition site: two `#[subast]` entries with the same last segment (a bare field
+  head can't disambiguate) ⇒ **error** (hint: alias one, `b::Foo as BFoo`); an entry matching no field
+  ⇒ **warning**.
 - Keep the `Leaker` + `Repeater<N>` impls as a last-resort type-namer / for external metadata
-  consumers; the visitor path now uses `#[subast]`-resolved paths instead.
+  consumers; the visitor path uses `#[subast]`-resolved paths.
 
 ## Model — visit-all-reachable (this is what "drill-in" becomes)
 
-`visitor!(Root, …)` lists **entry type(s)**; `__visitor_build` auto-discovers the reachable closure
-by following non-`#[no_ast]` fields and generates a `visit_*` method for **every discovered type**
-(syn-style). Traversal is always `this.visit_<head>(field)` — a *method* call, so recursion runs
-through the trait and handles recursive/cyclic ASTs exactly like today's visited-type traversal.
-There is **no inline drilling and no cycle detection**: a wrapper like `Cast` is simply *also
-visited* (it gets `visit_cast`, whose body reaches `Type`). This is more uniform than the spec's
-invisible drill-through and matches "build a visitor without enumerating the whole dependency set."
-Prune a subtree by `#[no_ast]`-ing the field that leads into it.
+`visitor!(Root, …)` lists **entry type(s)**; `__visitor_build` auto-discovers the closure reachable
+through `#[subast]` edges (plus implicit self-recursion) and generates a `visit_*` method for **every
+discovered type** (syn-style). Traversal is always `this.visit_<head>(field)` — a *method* call, so
+recursion runs through the trait and handles recursive/cyclic ASTs exactly like today's visited-type
+traversal. There is **no inline drilling and no cycle detection**: a wrapper like `Cast` (listed in
+its parent's `#[subast]`) is simply *also visited* (it gets `visit_cast`, whose body reaches `Type`).
+This is more uniform than the spec's invisible drill-through and matches "build a visitor without
+enumerating the whole dependency set." Prune a subtree by leaving its head out of `#[subast]`.
 
 ## `__visitor_build` (`macro/visitor.rs`)
 
 - **Auto-discovery + incremental emission** (see *Scale*): each ping-pong bounce fetches one type's
   structure, emits *that type's* free `visit_*` / `visit_*_mut` fn immediately, records its
-  name/path/own-generics in a carried name-list, queues each followed field's **resolved path**
-  (deduped on the path's last-segment **string** — a proc-macro string compare, allowed), and drops
-  the structure.
+  name/path/own-generics in a carried name-list, queues each followed field's **resolved path** —
+  **except `@SELF`** (that's the current type: already recorded, so self-recursion is a method call,
+  not a new fetch) — deduped on the path's last-segment **string** (a proc-macro string compare,
+  allowed), and drops the structure.
 - **Body lowering** per field (peel the container, then visit the inner head):
-  - `#[no_ast]` ⇒ bind `_`, skip.
-  - otherwise ⇒ `this.visit_<inner-head>(<access expr>)` — the method name is built in-proc from the
-    literal head ident (`to_snake`; never in `macro_rules!`), the access expr applies the container
-    lowering, and the enqueue path + enum match scrutinee use the record's **resolved path** (no
-    `path_of` / no inference). Every inner head is a discovered type with a method, so **no
-    membership test is needed**.
+  - an **ignored** field (`@leaf` — head not in `#[subast]`, not self) ⇒ bind `_`, skip.
+  - a **followed** field ⇒ `this.visit_<inner-head>(<access expr>)` — the method name is built in-proc
+    from the literal head ident (`to_snake`; never in `macro_rules!`), the access expr applies the
+    container lowering, and the enqueue path + enum match scrutinee use the record's **resolved path**
+    (the `#[subast]` entry's path, or `@SELF`; no `path_of` / no inference). Every followed head is a
+    discovered type with a method, so **no membership test is needed at lowering time**.
 - **One-shot items** (final bounce, from the name-list — signatures only, no structures): the
   `Visit`/`VisitMut` traits (one method per discovered type), `Driver`/`Hook`/`Chain`, the
   `IntoVisitor`/`IntoVisitorMut` closure & tuple impls, and the inherent `visit`/`visit_mut`.
@@ -136,9 +129,9 @@ A visitor that can't descend into `Vec<Stmt>` / `Option<Expr>` / `Box<Expr>` is 
 not container traversal as a goal. Recognized set: `Box`, `Vec`, `VecDeque`, `Option`, `[T]` /
 `Box<[T]>`, and syan's `Punctuated` (extensible). Lowering: deref for `Box`; `for x in &…` (`&mut` on
 the mut side) for `Vec`/slice/`Punctuated`; `if let Some(x) = …` for `Option`; then visit the inner
-head. The inner head is Ast by the `#[no_ast]` convention (a container of leaves, e.g. `Vec<Token>`,
-is `#[no_ast]`). Reduce/append is unchanged: override the parent's `visit_*_mut`, which owns the
-`&mut Vec` / `&mut Option`.
+head. The inner head is followed iff its type is listed in `#[subast]` (a container of an unlisted
+type, e.g. `Vec<Token>`, is ignored). Reduce/append is unchanged: override the parent's
+`visit_*_mut`, which owns the `&mut Vec` / `&mut Option`.
 
 ### Decision 2 — Delegation & model: **proc-macro composes; visit-all-reachable.**
 Two hard `macro_rules!` facts settle it: (1) it **cannot compare two idents** for equality (no
@@ -148,9 +141,10 @@ Two hard `macro_rules!` facts settle it: (1) it **cannot compare two idents** fo
 proc-macro. "Delegate via `macro_rules!`" is therefore the metadata macros *supplying each type's
 structure* (the ping-pong fetch *is* the delegation); `__visitor_build` composes. Because the
 proc-macro composes, **visit-all-reachable** is chosen over selective drilling — it eliminates
-inline-drill recursion and cycle handling (recursion is via method calls). `#[subast]` fits here as a
-*pathing dictionary*, not an allowlist: it supplies resolvable paths but declares no membership (that
-stays `#[no_ast]`-only), so visit-all-reachable is preserved.
+inline-drill recursion and cycle handling (recursion is via method calls). `#[subast]` is the single
+**allowlist**: it declares membership (listed ⇒ followed; everything else ignored) *and* supplies the
+resolvable path. "Reachable" means reachable through `#[subast]` edges (+ self); every such type gets
+a method. (Membership lives in `#[subast]`, not in a `macro_rules!` test — consistent with fact (1).)
 
 ### Scale — incremental emission (avoids O(N²)).
 A full AST closure can be ~100 types; accumulating every fetched structure in the ping-pong state and
@@ -162,35 +156,37 @@ once at the end from that name-list. The trait's **union generics = the root typ
 (known from the first fetched type, before any body is emitted, so closures keep working); a sub-type
 that introduces a new generic param name is an error.
 
-### Pathing — `#[subast]` dictionary (replaces module-prefix inference).
-A followed head's resolvable path comes from the **default path rule** (§`#[derive(Ast)]`): the
-field's own multi-segment path verbatim, else its bare head matched (alias-aware) against `#[subast]`,
-else a derive-emitted same-module sibling re-export. The `#[subast]` dictionary is resolved at the
-*defining* module and republished portably — one `pub use` carries **both** the type and
-metadata-macro namespaces, and `$crate`-rooting the `#[macro_export]` half makes it resolve same-crate
-and downstream. The old "prefix the defining module" inference is removed (it silently mis-resolved
-imported/aliased heads); now errors surface at the field, in the defining module, not as a downstream
-"cannot find macro". Residual hole: naming a sub-AST *type* when the `visitor!(...)` *entry* path is
-itself a non-canonical re-export — closed by requiring canonical (`crate::`/`super::`-rooted) entry
-paths in `visitor!(...)` (which also lets the `Leaker` be dropped, per the standing TODO).
+### Pathing — `#[subast]` supplies every followed path.
+Every followed field's resolvable path is its matching `#[subast]` entry's path (or `@SELF` for
+self-recursion — substituted with the path the type was fetched by, used only for the match
+scrutinee, never enqueued as a discovery edge); unlisted field types are ignored, so there is no path
+to infer for them. The
+`#[subast]` paths are resolved at the *defining* module and republished portably — one `pub use`
+carries **both** the type and metadata-macro namespaces, and `$crate`-rooting the `#[macro_export]`
+half makes it resolve same-crate and downstream. No module-prefix inference, no sibling guessing: a
+missing/typo'd entry is a *silently ignored* field (the directive's accepted failure mode), caught
+only by the `unused entry` warning / "follows nothing" lint, not a mis-resolved path. Residual hole:
+naming a sub-AST *type* when the `visitor!(...)` *entry* path is itself a non-canonical re-export —
+closed by requiring canonical (`crate::`/`super::`-rooted) entry paths in `visitor!(...)` (which also
+lets the `Leaker` be dropped, per the standing TODO).
 
 ## Tests (`core/tests`)
 
-- Spec graph: `Type`, `Cast(Type)`, `Expr { Cast(Cast) }`; `visitor!(super::Expr)` (only the entry
-  listed) ⇒ traversal reaches `Type` through `Cast` (via the auto-generated `visit_cast` →
-  `visit_type`); a closure `|t: &Type<()>| …` fires once; `Cast` is also visitable (`visit_cast`
-  exists — the visit-all consequence).
-- Containers: a type with `Vec<Stmt>` / `Option<Expr>` / `Box<Expr>` fields descends into each
-  element; reduce/append via overriding the parent's `visit_*_mut`.
-- `#[no_ast]`: a leaf/container-of-leaf field is skipped; type-level `#[no_ast]` (e.g. an all-`Token!`
-  `BinOp`) yields no `visit_*` and is not descended into; a non-Ast field without `#[no_ast]` fails at
-  the definition site (sibling re-export error) or downstream as "cannot find macro".
-- `#[subast]`: an imported/aliased field (`use other::Stmt; … s: Stmt` with `#[subast(other::Stmt)]`)
-  ⇒ `visit_*` reaches `visit_stmt` (the gap `core/tests/visitor_local_types.rs` documents); a
-  same-last-segment `#[subast]` collision (`a::Foo`, `b::Foo`) fails at the derive with a located
-  error.
-- Auto-discovery scale: `visitor!(super::Root)` over a multi-type graph ⇒ every reachable non-leaf
-  type gets a method and is traversed.
+- Spec graph: `Type`, `Cast(Type)`, `Expr { Cast(Cast) }` with `#[subast(super::Cast)]` on `Expr`
+  and `#[subast(super::Type)]` on `Cast`; `visitor!(super::Expr)` ⇒ traversal reaches `Type` through
+  `Cast` (auto-generated `visit_cast` → `visit_type`); a closure `|t: &Type<()>| …` fires once; `Cast`
+  is also visitable (`visit_cast` exists — the visit-all consequence).
+- Allowlist: a field whose head is listed (`#[subast(crate::ast::Stmt)]`, field `Box<Stmt<S>>`) is
+  followed (`visit_stmt`); an **unlisted** field type is silently ignored (bound `_`, not traversed);
+  an imported/aliased field (`use other::Stmt; … s: Stmt` with `#[subast(other::Stmt)]`) reaches
+  `visit_stmt` (the gap `core/tests/visitor_local_types.rs` documents); a same-last-segment collision
+  (`#[subast(a::Foo, b::Foo)]`) fails at the derive with a located error.
+- Self-recursion: `Expr { Bin(Box<Expr<…>>, …) }` with `Expr` *not* in its own `#[subast]` still
+  recurses via `@SELF`.
+- Containers: a type with `Vec<Stmt>` / `Option<Expr>` / `Box<Expr>` fields (with `Stmt`/`Expr`
+  listed) descends into each element; reduce/append via overriding the parent's `visit_*_mut`.
+- Auto-discovery scale: `visitor!(super::Root)` over a multi-type graph ⇒ every type reachable
+  through `#[subast]` edges gets a method and is traversed.
 
 # TODOs
 
