@@ -58,22 +58,46 @@ time. The **`#[no_ast]` convention** removes it: in a `#[derive(Ast)]`
 struct/enum, **every field's (head) type is itself `#[derive(Ast)]`** — so it has a metadata macro
 reachable by name — **unless the field is `#[no_ast]`** (leaf: `Token![..]`, `Integer`, primitives,
 `PhantomData`, spans, …). The generator never tests Ast-ness: non-`#[no_ast]` ⇒ Ast by contract; a
-forgotten `#[no_ast]` surfaces as a clear "cannot find macro `Foo`" error. This also gives the
-`Repeater` impls (already emitted by `#[derive(Ast)]`) their consumer: portable sub-AST references.
+forgotten `#[no_ast]` surfaces as a clear "cannot find macro `Foo`" error. Two orthogonal axes do the
+work: **`#[no_ast]`** owns classification (Ast vs leaf, a denylist), and a complementary type-level
+**`#[subast(...)]`** owns path resolution (reaching a followed head's macro from the visitor context)
+— `#[subast]` never changes membership. This also gives the `Repeater` impls (already emitted by
+`#[derive(Ast)]`) a fallback consumer: portable sub-AST references.
 
 ## `#[derive(Ast)]` (`macro/ast.rs`)
 
-- Add `no_ast` to the helper attributes: `#[proc_macro_derive(Ast, attributes(syan, no_ast))]`;
-  read `#[no_ast]` per field (strip it from the embedded def, like other helper attrs).
-- The metadata macro emits, per variant → per field, a record carrying: the **accessor** (tuple
-  index or named ident), the **container** (`direct` / `box` / `vec` / `option` / … — see Decision 1),
-  and for non-`#[no_ast]` fields the inner **head ident** plus a **portable macro path** to that
-  field type's metadata macro (so it is callable from the visitor's context). `#[no_ast]` fields
-  carry just `@no_ast`. (Equivalently, the derive could keep embedding the cleaned def and let
-  `__visitor_build` re-derive these per field — but emitting explicit records lets the derive own
-  container/`#[no_ast]` classification.)
-- Keep the `Leaker` + `Repeater<N>` impls; use the `Referrer` to make the per-field type/macro path
-  portable (the consumer that justifies the type-leak work).
+Two orthogonal axes: **`#[no_ast]`** owns *classification* (Ast vs leaf), **`#[subast]`** owns *path
+resolution*. Helper attributes: `#[proc_macro_derive(Ast, attributes(syan, no_ast, subast))]`.
+
+- **`#[no_ast]`** (denylist) — per **field** marks a leaf (bind `_`, never followed); per **type**
+  marks a whole leaf type (no `visit_*`, never descended — e.g. an all-`Token!` `BinOp` in one mark).
+  Everything not `#[no_ast]` is an Ast child and is followed. The loud "cannot find macro `Foo`"
+  failure is the safety net for a forgotten mark — strictly safer than an allowlist's silent omission
+  (which is why classification is a denylist, not a `#[subast]` allowlist).
+- **`#[subast(<paths>)]`** (pathing, **not** membership) — a type-level dictionary of resolvable
+  paths to followed heads, resolved **at the defining module** (forms: `crate::` / `::abs::` /
+  `super::` / `self::` / bare sibling / `b::Foo as BFoo`; no generic args). It only tells the derive
+  *where* a followed head lives; it never adds/removes anything from the visited closure. **Self is
+  never listed** (the derive errors if it is — self-refs resolve via `@SELF`, below).
+- **Default path rule** per followed field (peel the container to the inner head; §Decision 1),
+  priority order: (1) the field's own path **if multi-segment** (`Vec<crate::ast::Pat<S>>` ⇒
+  `crate::ast::Pat`) — used verbatim, so most explicitly-pathed fields need no entry; (2) else a bare
+  head matched (last segment, alias-aware) against a `#[subast]` entry ⇒ that entry's path; (3) else a
+  bare head ⇒ treated as a same-module **sibling**, emitted as a derive-generated portable re-export
+  `#[doc(hidden)] pub use Head as __subast_…;` in the defining module (one `pub use` republishes
+  **both** the type and its `Head!` macro). A bare head that is *not* a real sibling (came via a
+  private `use`, unlisted) makes that `pub use` fail **at the field, in the defining module** — a
+  clear, located error. So `#[subast]` is consulted only at step 2: the bare cross-module/aliased
+  residual; same-module siblings and explicitly-pathed fields need none.
+- The metadata macro emits, per variant → per field, an explicit record: **accessor** (tuple index /
+  named ident), **container** (`direct`/`box`/`vec`/`vecdeque`/`option`/`slice`/`punctuated`), the
+  inner **head ident** (literal — for `visit_<snake(head)>` construction in the proc-macro, *never*
+  in `macro_rules!`), and the **resolved path** (the rule above; `@SELF` for a self-referential head,
+  substituted by `__visitor_build` with the path it fetched the type by). `#[no_ast]` fields carry
+  just `@no_ast`. The derive runs definition-site diagnostics: ambiguous last-segment across
+  `#[subast]` entries (error), an entry matching no field (warning).
+- Keep the `Leaker` + `Repeater<N>` impls as a last-resort type-namer / for external metadata
+  consumers; the visitor path now uses `#[subast]`-resolved paths instead.
 
 ## Model — visit-all-reachable (this is what "drill-in" becomes)
 
@@ -90,13 +114,16 @@ Prune a subtree by `#[no_ast]`-ing the field that leads into it.
 
 - **Auto-discovery + incremental emission** (see *Scale*): each ping-pong bounce fetches one type's
   structure, emits *that type's* free `visit_*` / `visit_*_mut` fn immediately, records its
-  name/path/own-generics in a carried name-list, queues its undiscovered non-`#[no_ast]`
-  field-head types, and drops the structure.
+  name/path/own-generics in a carried name-list, queues each followed field's **resolved path**
+  (deduped on the path's last-segment **string** — a proc-macro string compare, allowed), and drops
+  the structure.
 - **Body lowering** per field (peel the container, then visit the inner head):
   - `#[no_ast]` ⇒ bind `_`, skip.
-  - otherwise ⇒ `this.visit_<inner-head>(<access expr>)`, where the access expr applies the
-    container lowering. Every inner head is a discovered type with a method, so **no membership
-    test is needed**.
+  - otherwise ⇒ `this.visit_<inner-head>(<access expr>)` — the method name is built in-proc from the
+    literal head ident (`to_snake`; never in `macro_rules!`), the access expr applies the container
+    lowering, and the enqueue path + enum match scrutinee use the record's **resolved path** (no
+    `path_of` / no inference). Every inner head is a discovered type with a method, so **no
+    membership test is needed**.
 - **One-shot items** (final bounce, from the name-list — signatures only, no structures): the
   `Visit`/`VisitMut` traits (one method per discovered type), `Driver`/`Hook`/`Chain`, the
   `IntoVisitor`/`IntoVisitorMut` closure & tuple impls, and the inherent `visit`/`visit_mut`.
@@ -121,7 +148,9 @@ Two hard `macro_rules!` facts settle it: (1) it **cannot compare two idents** fo
 proc-macro. "Delegate via `macro_rules!`" is therefore the metadata macros *supplying each type's
 structure* (the ping-pong fetch *is* the delegation); `__visitor_build` composes. Because the
 proc-macro composes, **visit-all-reachable** is chosen over selective drilling — it eliminates
-inline-drill recursion and cycle handling (recursion is via method calls).
+inline-drill recursion and cycle handling (recursion is via method calls). `#[subast]` fits here as a
+*pathing dictionary*, not an allowlist: it supplies resolvable paths but declares no membership (that
+stays `#[no_ast]`-only), so visit-all-reachable is preserved.
 
 ### Scale — incremental emission (avoids O(N²)).
 A full AST closure can be ~100 types; accumulating every fetched structure in the ping-pong state and
@@ -133,12 +162,17 @@ once at the end from that name-list. The trait's **union generics = the root typ
 (known from the first fetched type, before any body is emitted, so closures keep working); a sub-type
 that introduces a new generic param name is an error.
 
-### Pathing.
-A discovered sub-type's macro/type path = the field type's path as written, made absolute by
-prefixing the *defining* type's module when relative (`Stmt` in `Expr @ super::ast` ⇒
-`super::ast::Stmt`); explicit paths (`crate::other::Stmt`) are used as-is. Imported-relative paths
-(`use other::Stmt; … Stmt`) are the residual gap that the `Leaker`/`Repeater` + `$crate` machinery
-closes (canonical identity / portable path).
+### Pathing — `#[subast]` dictionary (replaces module-prefix inference).
+A followed head's resolvable path comes from the **default path rule** (§`#[derive(Ast)]`): the
+field's own multi-segment path verbatim, else its bare head matched (alias-aware) against `#[subast]`,
+else a derive-emitted same-module sibling re-export. The `#[subast]` dictionary is resolved at the
+*defining* module and republished portably — one `pub use` carries **both** the type and
+metadata-macro namespaces, and `$crate`-rooting the `#[macro_export]` half makes it resolve same-crate
+and downstream. The old "prefix the defining module" inference is removed (it silently mis-resolved
+imported/aliased heads); now errors surface at the field, in the defining module, not as a downstream
+"cannot find macro". Residual hole: naming a sub-AST *type* when the `visitor!(...)` *entry* path is
+itself a non-canonical re-export — closed by requiring canonical (`crate::`/`super::`-rooted) entry
+paths in `visitor!(...)` (which also lets the `Leaker` be dropped, per the standing TODO).
 
 ## Tests (`core/tests`)
 
@@ -148,7 +182,16 @@ closes (canonical identity / portable path).
   exists — the visit-all consequence).
 - Containers: a type with `Vec<Stmt>` / `Option<Expr>` / `Box<Expr>` fields descends into each
   element; reduce/append via overriding the parent's `visit_*_mut`.
-- `#[no_ast]`: a leaf/container-of-leaf field is skipped; a non-Ast field without `#[no_ast]` gives a
-  clear "cannot find macro" error.
+- `#[no_ast]`: a leaf/container-of-leaf field is skipped; type-level `#[no_ast]` (e.g. an all-`Token!`
+  `BinOp`) yields no `visit_*` and is not descended into; a non-Ast field without `#[no_ast]` fails at
+  the definition site (sibling re-export error) or downstream as "cannot find macro".
+- `#[subast]`: an imported/aliased field (`use other::Stmt; … s: Stmt` with `#[subast(other::Stmt)]`)
+  ⇒ `visit_*` reaches `visit_stmt` (the gap `core/tests/visitor_local_types.rs` documents); a
+  same-last-segment `#[subast]` collision (`a::Foo`, `b::Foo`) fails at the derive with a located
+  error.
 - Auto-discovery scale: `visitor!(super::Root)` over a multi-type graph ⇒ every reachable non-leaf
   type gets a method and is traversed.
+
+# TODOs
+
+- [ ] Do not define leaker type in output of `#[derive(Ast)]`, instead implement Repeater directly for macro target.
