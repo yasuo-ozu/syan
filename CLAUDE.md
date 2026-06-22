@@ -30,7 +30,11 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   listed lowers to `this.visit_<head>(…)`, a followed **unlisted intermediate** is **drilled through
   inline** (its def destructured, recursing into *its* `#[subast]` fields) and gets no `visit_*`. A
   cycle of unlisted intermediates is a build error; a finite dead-end is a no-op. Tests:
-  `visitor_drill*.rs`. (See "Drill-in — as implemented" below.)
+  `visitor_drill*.rs`. (See "Drill-in — as implemented" below.) Diagnostics: a same-last-segment
+  `#[subast]` collision is a derive error; an `unused entry` warning fires for a matchkey matching no
+  field; a **"follows nothing" lint** warns when a type with no `#[subast]` has an AST-looking field
+  (heuristic; `#[subast()]` opts out). Like all syan derive warnings these are visible on nightly,
+  silent on stable.
 - **Containers** (shipped): `Box` (transparent; tracked as box-depth for `&**` drill deref), `Vec` /
   `VecDeque` / slice / array / `Punctuated` (`for x in …iter()/iter_mut()`), `Option`
   (`if let Some(x) = …`, dereffing through any wrapping `Box`). Nested containers (`Vec<Option<T>>`)
@@ -74,11 +78,6 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   coexistence would need full-path-disambiguated names.
 - **Nested containers** (`Vec<Option<T>>`) are unsupported (clear build error); wrap the inner part
   in its own `#[derive(Ast)]` type.
-- **"Follows nothing" lint — not implemented (decided against)**: a derive-time warning for a type
-  that has AST children but no `#[subast]` can't be made reliable — the derive cannot tell an AST
-  field type from a non-AST one (`String`, `Span`, a user non-AST struct) without the very
-  `#[subast]` declaration it would be checking for, so it would false-warn heavily. The
-  `unused entry` warning (a `#[subast]` matchkey matching no field) covers the typo case instead.
 
 ---
 
@@ -97,12 +96,12 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 > - **Effective head.** A followed field's method/drill decision uses the matched `#[subast]` entry's
 >   path **last segment** (the real type name), not the field's possibly-aliased head — so
 >   `#[subast(crate::Real as Aliased)]` on a *visited* `Real` dispatches to `visit_real`.
-> - **Pathing.** `#[subast]` paths are emitted verbatim; canonical `crate::`-rooted paths are
->   recommended (they resolve from the visitor module same-crate). `$crate`-rooting for a visitor
->   built **downstream** over an upstream crate's `#[subast]` types is **not yet** done (the cross-crate
->   test builds the visitor in the defining crate).
-> - **Lints.** The `unused entry` warning is implemented; the optional "this type follows nothing"
->   lint is **not**.
+> - **Pathing.** Canonical `crate::`-rooted `#[subast]` paths are recommended; they are emitted
+>   `$crate`-rooted in the metadata macro, so a visitor built **downstream** over an upstream crate's
+>   `#[subast]` types resolves them (`rust/tests/cross_crate_drill.rs`). Non-`crate` paths
+>   (`super`/`self`/abs/bare) are emitted verbatim.
+> - **Lints.** Both the `unused entry` warning and the "this type follows nothing" lint are
+>   implemented (nightly-visible, like all syan derive warnings).
 
 ## Context
 
@@ -278,8 +277,11 @@ lets the `Leaker` be dropped, per the standing TODO).
       params (fresh-name + `mixed_site`).~~ Done (`visitor_hygiene.rs`).
 - [x] ~~`$crate`-root `crate::` `#[subast]` paths so a downstream crate can drill through an upstream
       crate's types.~~ Done (`rust/tests/cross_crate_drill.rs`).
+- [x] ~~Multi-level inheritance `base => mid => New` (transitive supertrait obligations via `@an`).~~
+      Done (`visitor_inherit_multilevel.rs`).
+- [x] ~~"Follows nothing" lint.~~ Done — a heuristic warning (nightly-visible) when a type with no
+      `#[subast]` has an AST-looking field; `#[subast()]` opts out.
 - [ ] Visitor over a `#[recurse]` cycle — large co-design (see "Known gaps"): `#[recurse]` must
       co-transform `#[subast]` matchkeys/paths to the renamed internal types, expose an
-      alias-reachable metadata macro, and the visitor must become depth-generic over `__Rec`.
-- [ ] ~~Optional "follows nothing" lint~~ — decided against (can't distinguish AST from non-AST
-      field types at derive time; would false-warn). See "Known gaps".
+      alias-reachable metadata macro, and the visitor must become depth-generic over `__Rec`. This is
+      a from-scratch depth-generic visitor subsystem, not a bounded fix.
