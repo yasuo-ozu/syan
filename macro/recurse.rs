@@ -1,3 +1,4 @@
+use crate::ast::to_snake;
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::emit_warning;
@@ -14,26 +15,35 @@ const DEFAULT_RECURSION_DEPTH: usize = 4;
 
 struct RecurseArgs {
     limit: usize,
+    /// `#[recurse(visit)]`: also generate a depth-generic visitor over the cycle.
+    visit: bool,
 }
 
 impl syn::parse::Parse for RecurseArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        if input.is_empty() {
-            return Ok(RecurseArgs {
-                limit: DEFAULT_RECURSION_DEPTH,
-            });
+        let mut limit = DEFAULT_RECURSION_DEPTH;
+        let mut visit = false;
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            if ident == "limit" {
+                let _: Token![=] = input.parse()?;
+                let lit: syn::LitInt = input.parse()?;
+                limit = lit.base10_parse()?;
+            } else if ident == "visit" {
+                visit = true;
+            } else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "expected `limit = <integer>` or `visit`",
+                ));
+            }
+            if input.peek(Token![,]) {
+                let _: Token![,] = input.parse()?;
+            } else {
+                break;
+            }
         }
-        let ident: Ident = input.parse()?;
-        if ident != "limit" {
-            return Err(syn::Error::new(
-                ident.span(),
-                "expected `limit = <integer>`",
-            ));
-        }
-        let _: Token![=] = input.parse()?;
-        let lit: syn::LitInt = input.parse()?;
-        let limit: usize = lit.base10_parse()?;
-        Ok(RecurseArgs { limit })
+        Ok(RecurseArgs { limit, visit })
     }
 }
 
@@ -415,6 +425,278 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `#[recurse(visit)]`: a depth-generic visitor over the cycle.
+//
+// `#[recurse]` rewrites the cycle's back-edges to the root into the generic `__Rec` param and each
+// nesting level into a distinct concrete type, so a fixed-type visitor cannot traverse it. Instead
+// we generate visit methods generic over the depth (`__R`) plus a `VisitRec` dispatch trait that the
+// root's depth chain (`__RootRec<.., __R>`) and the terminator implement, turning the depth recursion
+// into trait dispatch. Single-root cycles only.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum RCont {
+    Direct,
+    Seq,
+    Opt,
+}
+
+fn r_first_ty_arg(seg: &PathSegment) -> Option<&Type> {
+    if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+        ab.args.iter().find_map(|a| match a {
+            GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+    } else {
+        None
+    }
+}
+
+/// Peel a field type to `(container, head ident, box-depth-around-head)` (mirrors the visitor's
+/// peel): `Box` transparent (counted), `Vec`/`VecDeque`/slice/array/`Punctuated` -> `Seq`,
+/// `Option` -> `Opt`.
+fn rpeel(ty: &Type) -> Option<(RCont, Ident, usize)> {
+    match ty {
+        Type::Reference(r) => rpeel(&r.elem),
+        Type::Paren(p) => rpeel(&p.elem),
+        Type::Group(g) => rpeel(&g.elem),
+        Type::Slice(s) => rpeel(&s.elem).map(|(_, h, b)| (RCont::Seq, h, b)),
+        Type::Array(a) => rpeel(&a.elem).map(|(_, h, b)| (RCont::Seq, h, b)),
+        Type::Path(tp) => {
+            let seg = tp.path.segments.last()?;
+            match seg.ident.to_string().as_str() {
+                "Box" => {
+                    let (c, h, b) = rpeel(r_first_ty_arg(seg)?)?;
+                    Some(match c {
+                        RCont::Direct => (RCont::Direct, h, b + 1),
+                        _ => (c, h, b),
+                    })
+                }
+                "Vec" | "VecDeque" | "Punctuated" => {
+                    let (_, h, b) = rpeel(r_first_ty_arg(seg)?)?;
+                    Some((RCont::Seq, h, b))
+                }
+                "Option" => {
+                    let (_, h, b) = rpeel(r_first_ty_arg(seg)?)?;
+                    Some((RCont::Opt, h, b))
+                }
+                _ => Some((RCont::Direct, seg.ident.clone(), 0)),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Dispatch one field of a cycle type: a back-edge to the root drives via `__R` (the depth param);
+/// a cross-edge to another cycle type calls that type's visit method; anything else is a leaf
+/// (`None`, caller binds `_`). `binding` is the destructured field (a `&Field`).
+fn recurse_dispatch_field(
+    ty: &Type,
+    binding: &TokenStream,
+    cycle_types: &std::collections::HashSet<String>,
+    root_name: &str,
+) -> Option<TokenStream> {
+    let (cont, head, box_depth) = rpeel(ty)?;
+    let hs = head.to_string();
+    let is_root = hs == root_name;
+    if !is_root && !cycle_types.contains(&hs) {
+        return None; // leaf
+    }
+    let stars: TokenStream = (0..=box_depth).map(|_| quote!(*)).collect();
+    Some(match cont {
+        RCont::Direct => recurse_visit_one(is_root, &head, &stars, binding),
+        RCont::Seq => {
+            let inner = recurse_visit_one(is_root, &head, &stars, &quote!(__x));
+            quote!( for __x in #binding.iter() { #inner } )
+        }
+        RCont::Opt => {
+            let inner = recurse_visit_one(is_root, &head, &stars, &quote!(__x));
+            quote!( if let ::core::option::Option::Some(__x) = #binding { #inner } )
+        }
+    })
+}
+
+/// Emit the visit of a single value `acc` (a `&Box^n<head>`): drive via `__R` for the root, or call
+/// `v.visit_<head>` for a cross-edge; `stars` derefs through any `Box` to a `&head`.
+fn recurse_visit_one(
+    is_root: bool,
+    head: &Ident,
+    stars: &TokenStream,
+    acc: &TokenStream,
+) -> TokenStream {
+    if is_root {
+        quote!( __R::visit_rec(& #stars #acc, v); )
+    } else {
+        let m = Ident::new(&format!("visit_{}", to_snake(head)), Span::call_site());
+        quote!( v.#m(& #stars #acc); )
+    }
+}
+
+/// `(pattern, statements)` for a cycle type's fields, dispatching followed fields.
+fn recurse_visit_fields(
+    fields: &Fields,
+    cycle_types: &std::collections::HashSet<String>,
+    root_name: &str,
+) -> (TokenStream, TokenStream) {
+    match fields {
+        Fields::Named(named) => {
+            let mut binds = Vec::new();
+            let mut stmts = Vec::new();
+            for f in &named.named {
+                let name = f.ident.clone().unwrap();
+                if let Some(stmt) =
+                    recurse_dispatch_field(&f.ty, &quote!(#name), cycle_types, root_name)
+                {
+                    binds.push(quote!(#name));
+                    stmts.push(stmt);
+                }
+            }
+            (quote!( { #(#binds,)* .. } ), quote!( #(#stmts)* ))
+        }
+        Fields::Unnamed(unnamed) => {
+            let mut pats = Vec::new();
+            let mut stmts = Vec::new();
+            for (i, f) in unnamed.unnamed.iter().enumerate() {
+                let b = Ident::new(&format!("__f{i}"), Span::call_site());
+                if let Some(stmt) =
+                    recurse_dispatch_field(&f.ty, &quote!(#b), cycle_types, root_name)
+                {
+                    pats.push(quote!(#b));
+                    stmts.push(stmt);
+                } else {
+                    pats.push(quote!(_));
+                }
+            }
+            (quote!( ( #(#pats),* ) ), quote!( #(#stmts)* ))
+        }
+        Fields::Unit => (quote!(), quote!()),
+    }
+}
+
+/// Body of a cycle type's `visit_*` drive fn: destructure `i` (the internal `__XxxRec` type) and
+/// dispatch followed fields.
+fn recurse_visit_body(
+    orig: &Item,
+    internal: &Ident,
+    cycle_types: &std::collections::HashSet<String>,
+    root_name: &str,
+) -> TokenStream {
+    match orig {
+        Item::Enum(e) => {
+            let arms = e.variants.iter().map(|v| {
+                let (pat, stmts) = recurse_visit_fields(&v.fields, cycle_types, root_name);
+                let vid = &v.ident;
+                quote!( #internal::#vid #pat => { #stmts } )
+            });
+            quote!( match i { #(#arms)* } )
+        }
+        Item::Struct(s) => {
+            let (pat, stmts) = recurse_visit_fields(&s.fields, cycle_types, root_name);
+            match &s.fields {
+                Fields::Unit => quote!(),
+                _ => quote!( let #internal #pat = i; #stmts ),
+            }
+        }
+        _ => quote!(),
+    }
+}
+
+/// Generate the depth-generic visitor for a single-root cycle.
+fn generate_recurse_visitor(
+    items: &[Item],
+    cycle_types: &std::collections::HashSet<String>,
+    root_name: &str,
+    internal_names: &HashMap<String, Ident>,
+    term_ident: &Ident,
+    root_params: &[Ident],
+) -> TokenStream {
+    let root_internal = &internal_names[root_name];
+    let visit_root = Ident::new(
+        &format!("visit_{}", to_snake(&Ident::new(root_name, Span::call_site()))),
+        Span::call_site(),
+    );
+
+    // Cycle types in declaration order, paired with their internal (renamed) idents.
+    let cyc: Vec<(&Ident, &Ident, &Item)> = items
+        .iter()
+        .filter_map(|it| {
+            let id = match it {
+                Item::Enum(e) => &e.ident,
+                Item::Struct(s) => &s.ident,
+                _ => return None,
+            };
+            if !cycle_types.contains(&id.to_string()) {
+                return None;
+            }
+            Some((id, &internal_names[&id.to_string()], it))
+        })
+        .collect();
+
+    // Per cycle type: public node alias, the trait method, and the free drive fn.
+    let node_aliases = cyc.iter().map(|(orig, internal, _)| {
+        let node = Ident::new(&format!("{orig}Node"), Span::call_site());
+        quote!(
+            #[doc = "Depth-generic node type for the visitor (an alias of the internal recurse type)."]
+            pub use #internal as #node;
+        )
+    });
+    let methods = cyc.iter().map(|(orig, internal, _)| {
+        let vm = Ident::new(&format!("visit_{}", to_snake(orig)), Span::call_site());
+        quote! {
+            fn #vm< __R: VisitRec< #(#root_params,)* Self > >(
+                &mut self,
+                i: & #internal < #(#root_params,)* __R >,
+            ) where Self: ::core::marker::Sized {
+                #vm(self, i)
+            }
+        }
+    });
+    let drives = cyc.iter().map(|(orig, internal, it)| {
+        let vm = Ident::new(&format!("visit_{}", to_snake(orig)), Span::call_site());
+        let body = recurse_visit_body(it, internal, cycle_types, root_name);
+        quote! {
+            pub fn #vm< #(#root_params,)* __V: Visit< #(#root_params),* >, __R: VisitRec< #(#root_params,)* __V > >(
+                v: &mut __V,
+                i: & #internal < #(#root_params,)* __R >,
+            ) {
+                #body
+            }
+        }
+    });
+
+    quote! {
+        /// Dispatch trait turning the cycle's depth recursion into trait calls: implemented by the
+        /// root's depth chain (drives the root visit) and by the terminator (no-op).
+        pub trait VisitRec< #(#root_params,)* __V > {
+            fn visit_rec(&self, v: &mut __V);
+        }
+
+        /// Depth-generic visitor over the `#[recurse]` cycle. Implement the `visit_*` methods
+        /// (each generic over the remaining depth `__R`); call the free `visit_*` to descend.
+        pub trait Visit< #(#root_params),* > {
+            #(#methods)*
+        }
+
+        #(#drives)*
+
+        #(#node_aliases)*
+
+        impl< #(#root_params,)* __V: Visit< #(#root_params),* >, __R: VisitRec< #(#root_params,)* __V > >
+            VisitRec< #(#root_params,)* __V > for #root_internal < #(#root_params,)* __R >
+        {
+            fn visit_rec(&self, v: &mut __V) {
+                <__V as Visit< #(#root_params),* >>::#visit_root(v, self);
+            }
+        }
+        impl< #(#root_params,)* __V: Visit< #(#root_params),* > >
+            VisitRec< #(#root_params,)* __V > for #term_ident
+        {
+            fn visit_rec(&self, _v: &mut __V) {}
+        }
+    }
+}
+
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     let args: RecurseArgs = match syn::parse(attr) {
         Ok(a) => a,
@@ -636,6 +918,8 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     // The root type's direct references also become __Rec, so we add it to root_types set.
     let mut effective_roots = root_types.clone();
     effective_roots.insert(root_name.clone());
+    // A visitor is only sound for a single effective root (else back-edges collapse ambiguously).
+    let single_root = effective_roots.len() == 1;
 
     let ctx = TransformCtx {
         cycle_types: cycle_types.clone(),
@@ -657,6 +941,21 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     for _ in 0..(recursion_depth - 1) {
         depth_ty = quote!(#root_internal<#(#root_params,)* #depth_ty>);
     }
+
+    // `#[recurse(visit)]`: a depth-generic visitor over the cycle (single-root cycles only — with
+    // multiple effective roots every back-edge collapses to one `__Rec`, which is ambiguous).
+    let visitor_ts = if args.visit && single_root {
+        generate_recurse_visitor(
+            &items,
+            &cycle_types,
+            root_name.as_str(),
+            &internal_names,
+            &term_ident,
+            &root_type_params,
+        )
+    } else {
+        quote!()
+    };
 
     quote! {
         #(#mod_attrs)* #mod_vis mod #mod_ident {
@@ -690,6 +989,8 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
                 pub type #{Ident::new(orig_name, Span::call_site())}<#(#root_params),*> =
                     #non_root_internal<#(#root_params,)* #default_alias<#(#root_params),*>>;
             }
+
+            #visitor_ts
         }
     }
     .into()
