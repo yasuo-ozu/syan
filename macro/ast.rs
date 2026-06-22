@@ -160,26 +160,6 @@ fn gargs(g: &Generics) -> Vec<TokenStream> {
         .collect()
 }
 
-/// A `PhantomData` payload that mentions every generic param (so the leaker marker has no
-/// unconstrained parameters).
-fn phantom_payload(g: &Generics) -> TokenStream {
-    let elems = g.params.iter().map(|p| match p {
-        GenericParam::Lifetime(l) => {
-            let lt = &l.lifetime;
-            quote!(& #lt ())
-        }
-        GenericParam::Type(t) => {
-            let i = &t.ident;
-            quote!(#i)
-        }
-        GenericParam::Const(c) => {
-            let i = &c.ident;
-            quote!([(); #i])
-        }
-    });
-    quote!( ::core::marker::PhantomData<( #(#elems,)* )> )
-}
-
 /// Build a `type_leak::Referrer` for the definition (the ordered list of field types that depend on
 /// the definition's type context). `None` if type-leak can't analyze it (e.g. a union, or a
 /// not-internable contradiction); the derive then simply omits the leaker.
@@ -215,17 +195,6 @@ fn build_referrer(input: &DeriveInput) -> Option<type_leak::Referrer> {
     Some(leaker.finish())
 }
 
-/// `#[derive(Ast)]` expansion.
-///
-/// Emits:
-/// * `impl Ast for T<..> {}` (the empty marker trait from `syan::visit`),
-/// * a `type-leak` leaker marker + `Repeater<N>` impls carrying each context-dependent field type
-///   out of the definition's type context (so it can be named portably as
-///   `<leaker as Repeater<N>>::Type`),
-/// * a `#[macro_export]` callback metadata `macro_rules!` carrying a cleaned copy of the
-///   definition, and
-/// * a macro-namespace re-export under the type's own name so a generated visitor can reach it as
-///   `path::to::T! { .. }`.
 /// Collect every ident that appears as a path-segment head anywhere inside a field type (so
 /// `Vec<Box<Stmt<S>>>` contributes `Vec`, `Box`, `Stmt`, `S`). Used only to warn about `#[subast]`
 /// entries that match no field — an over-approximation, so it never false-warns.
@@ -280,6 +249,17 @@ fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
     out
 }
 
+/// `#[derive(Ast)]` expansion.
+///
+/// Emits:
+/// * `impl Ast for T<..> {}` (the empty marker trait from `syan::visit`),
+/// * one `impl Repeater<N> for T<..>` per context-dependent field type, so it can be named
+///   portably as `<T<..> as Repeater<N>>::Type` (external-metadata fallback; the visitor/drill path
+///   uses `#[subast]`-resolved paths),
+/// * a `#[macro_export]` callback metadata `macro_rules!` carrying a cleaned copy of the definition
+///   plus the `#[subast]` allowlist, and
+/// * a macro-namespace re-export under the type's own name so a generated visitor can reach it as
+///   `path::to::T! { .. }`.
 pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -310,27 +290,30 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
 
     let cleaned = cleaned_definition(input);
     let macro_name = Ident::new(&format!("__{}_ast_{}", to_snake(ident), nonce), Span::call_site());
-    let leaker_ident = Ident::new(
-        &format!("__{}_leaker_{}", to_snake(ident), nonce),
-        Span::call_site(),
-    );
 
-    // type-leak: leaker marker + one `Repeater<N>` impl per leaked field type.
+    // type-leak: one `Repeater<N>` impl **on the AST type itself** per context-dependent field type
+    // (`<T as Repeater<N>>::Type` names that type portably from another crate). No separate leaker
+    // marker — the type is its own host (same generics + where-clause).
     let referrer = build_referrer(input);
-    let leaker_items: TokenStream = if let Some(referrer) = &referrer {
+    let repeater_items: TokenStream = if let Some(referrer) = &referrer {
         let g_params = gparams(&input.generics);
         let g_args = gargs(&input.generics);
-        let phantom = phantom_payload(&input.generics);
+        let g_def = if g_params.is_empty() {
+            quote!()
+        } else {
+            quote!( < #(#g_params),* > )
+        };
+        let g_use = if g_args.is_empty() {
+            quote!()
+        } else {
+            quote!( < #(#g_args),* > )
+        };
         let leak_tys: Vec<&Type> = referrer.iter().collect();
         quote! {
-            #[doc(hidden)]
-            #[allow(non_camel_case_types, dead_code)]
-            pub struct #leaker_ident < #(#g_params),* > ( #phantom );
-
             #(for (n, ty) in leak_tys.iter().enumerate()) {
                 #[automatically_derived]
-                impl < #(#g_params),* > #syan::visit::Repeater< #{Literal::usize_unsuffixed(n)} >
-                    for #leaker_ident < #(#g_args),* > #where_clause
+                impl #g_def #syan::visit::Repeater< #{Literal::usize_unsuffixed(n)} >
+                    for #ident #g_use #where_clause
                 {
                     type Type = #ty;
                 }
@@ -344,7 +327,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
         #[automatically_derived]
         impl #impl_generics #syan::visit::Ast for #ident #ty_generics #where_clause {}
 
-        #leaker_items
+        #repeater_items
 
         #[macro_export]
         #[doc(hidden)]

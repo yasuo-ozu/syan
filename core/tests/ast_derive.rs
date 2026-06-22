@@ -42,6 +42,16 @@ fn marker_trait_is_implemented() {
 }
 
 #[test]
+fn repeater_is_implemented_on_the_type_itself() {
+    // `#[derive(Ast)]` impls `Repeater<N>` on the AST type directly (no separate leaker host).
+    // `Wrap { inner: Expr<S> }` has one context-dependent field, so `Repeater<0>` resolves.
+    fn leaked0<T: syan::visit::Repeater<0>>() -> core::marker::PhantomData<T::Type> {
+        core::marker::PhantomData
+    }
+    let _ = leaked0::<Wrap<()>>();
+}
+
+#[test]
 fn metadata_macro_round_trips_definition() {
     // A local callback that receives the forwarded `@ast { <item> }` and re-parses the embedded
     // definition into a real (renamed) type, proving the metadata macro carries a syn-parseable
