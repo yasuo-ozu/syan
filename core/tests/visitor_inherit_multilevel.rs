@@ -95,3 +95,32 @@ fn three_level_closure_uses_transitive_driver() {
     sample().visit(|_i: &Item<()>| items += 1);
     assert_eq!(items, 1);
 }
+
+// 3-level chain AND arity widening at the leaf: top2's union is <S, T> while mid/base are <S>. Each
+// transitive ancestor impl must be quantified over only its own param (S), leaving T out.
+#[derive(Ast)]
+#[subast(crate::Stmt)]
+pub enum Item2<S, T> {
+    S(Box<Stmt<S>>),
+    Tag(PhantomData<T>),
+}
+
+pub mod top2 {
+    syan::visit::visitor!(crate::mid => crate::Item2);
+}
+
+impl<S, T> top2::Visit<S, T> for Counter {
+    fn visit_item2(&mut self, i: &Item2<S, T>) {
+        self.items += 1;
+        top2::visit_item2(self, i);
+    }
+}
+
+#[test]
+fn three_level_with_arity_widening() {
+    let ast: Item2<(), ()> =
+        Item2::S(Box::new(Stmt::E(Box::new(Expr::Typed(Box::new(Type::Unit(PhantomData)))))));
+    let mut c = Counter::default();
+    ast.visit(&mut c);
+    assert_eq!((c.items, c.stmts, c.exprs, c.types), (1, 1, 1, 1));
+}
