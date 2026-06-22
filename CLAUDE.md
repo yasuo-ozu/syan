@@ -12,8 +12,9 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **`#[derive(Ast)]`**: empty `Ast` marker impl + a `#[macro_export]` callback "metadata" macro
   carrying a cleaned copy of the definition (re-parsed downstream as a `syn::Item`), re-exported
   under the type's own name so it's reachable as `path::to::T!{..}` (type vs. macro namespaces
-  coexist). Also emits a `type_leak::Leaker` marker + one `::syan::visit::Repeater<N>` impl per
-  context-dependent field type (portable refs; consumer = drill-in / external metadata users).
+  coexist). Also emits one `::syan::visit::Repeater<N>` impl **on the type itself** per
+  context-dependent field type (`<T as Repeater<N>>::Type`; external-metadata fallback). `crate::`-
+  rooted `#[subast]` paths are emitted `$crate`-rooted so they resolve downstream.
 - **`visitor!([base =>] T, …)`** invoked **inside** an (otherwise empty) `mod` (function-like; a
   `macro_rules!` shim in `syan` captures `$crate` and forwards the syan path to `__visitor_entry`,
   so no `#[syan(..)]` needed). A metadata ping-pong through `__visitor_build` generates, per visited
@@ -40,35 +41,42 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **`visit_mut`** full mirror (in-place mutation). **Reduce/append**: override the *parent* node's
   `visit_*_mut` (it owns the `&mut Vec`/`&mut Option`), then descend — see `visitor_reduce.rs`.
 - **Inheritance** `visitor!(base => New)` for new→base reference DAGs (base exports a
-  `__syan_visited` list macro; the new trait extends it via supertrait).
+  `__syan_visited` list macro carrying its visited idents **and its generic-param union `@bg`**; the
+  new trait extends it via supertrait, referencing `base::Visit<…>` with the base's own arity — so a
+  wider new union works (`visitor_inherit_arity.rs`)).
 - **Generics**: the trait is parameterized by the **union** of visited types' generic params
   (`Visit<S, Tokens>`); each type uses its own subset, so mixed arities work (`visitor_generics.rs`).
-  Caveat: `.visit()` on a root that doesn't use every union param may need a turbofish.
+  Caveat: `.visit()` on a root that doesn't use every union param may need a turbofish. Generated
+  helper params avoid the visited types' param names, so a visited type may declare a param literally
+  named `__V`/`__T`/`__H`/`__F`/`__A`/`__B` (`visitor_hygiene.rs`).
 - **Cross-crate** validated: visited types are named by the full path given to `visitor!(...)`, so a
-  downstream crate needs no import (`rust/tests/cross_crate.rs`).
+  downstream crate needs no import (`rust/tests/cross_crate.rs`); a downstream-built visitor can also
+  drill through an upstream crate's types (`$crate`-rooted `#[subast]`; `rust/tests/cross_crate_drill.rs`).
 
 ## Known gaps / limitations
 
-- **Visitor over a `#[recurse]` *cycle*** (open): `#[derive(Ast)]` inside `#[recurse]` applies to the
-  *renamed* internal type, so its metadata macro is reachable only under that name, not the public
-  alias (`crate::ast::Expr!` finds no macro — `visitor_recurse_gap.rs` pins this). Even if bridged,
-  `#[recurse]` rewrites the cycle's back-edges to a generic `__Rec` param, so they are not
-  name-resolvable traversal edges — visiting *through* the cycle needs recurse-aware co-design.
-  **Drill-in over *acyclic* types in a `#[recurse]` module works today** (recurse leaves them
-  untouched) — `visitor_recurse_drill.rs`.
+- **Visitor over a `#[recurse]` *cycle*** (open — large co-design, not a quick bridge): two
+  compounding blockers. (1) `#[derive(Ast)]` inside `#[recurse]` applies to the *renamed* internal
+  type (`__ExprRec`), so its metadata macro is reachable only under that name, not the public alias
+  (`crate::ast::Expr!` finds no macro — `visitor_recurse_gap.rs` pins this). (2) Even with an
+  alias-reachable metadata macro, `#[recurse]` rewrites the cycle's fields: self/root references
+  become the generic `__Rec` param and cross-references become `__StmtRec<…, __Rec>`. So the field
+  *heads* no longer match the user's `#[subast]` matchkeys (`Stmt` vs `__StmtRec`) — every field is a
+  leaf — and each nesting level is a *different* concrete type (different depth arg), so a single
+  `visit_stmt(&Stmt<S>)` can't type-check against `&__StmtRec<S, __Rec>`. Visiting through the cycle
+  needs `#[recurse]` to co-transform the `#[subast]` matchkeys/paths **and** a depth-generic visitor
+  (`visit_*<R>(… __Rec = R …)`). **Drill-in over *acyclic* types in a `#[recurse]` module works
+  today** (recurse leaves them untouched) — `visitor_recurse_drill.rs`.
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.
-- **Inheritance with differing generic arity**: `visitor!(base => New)` where `New`'s union
-  introduces a generic param the base lacks emits the base supertrait with the wrong arity (opaque
-  `E0107`). The base's generic union is not communicated through `__syan_visited` — future.
-- **Reserved generated idents**: a visited type whose generic param is literally named
-  `__V`/`__T`/`__H`/`__F`/`__A`/`__B` (or `__F0`…) collides with generated helpers (call-site
-  hygiene). Avoid those names; a mixed-site-hygiene fix is future.
 - **Nested containers** (`Vec<Option<T>>`) are unsupported (clear build error); wrap the inner part
   in its own `#[derive(Ast)]` type.
-- The `Leaker` + `Repeater<N>` impls from `#[derive(Ast)]` are now only an external-metadata
-  fallback; the visitor/drill path uses `#[subast]`-resolved paths (see TODO).
+- **"Follows nothing" lint — not implemented (decided against)**: a derive-time warning for a type
+  that has AST children but no `#[subast]` can't be made reliable — the derive cannot tell an AST
+  field type from a non-AST one (`String`, `Span`, a user non-AST struct) without the very
+  `#[subast]` declaration it would be checking for, so it would false-warn heavily. The
+  `unused entry` warning (a `#[subast]` matchkey matching no field) covers the typo case instead.
 
 ---
 
@@ -261,12 +269,15 @@ lets the `Leaker` be dropped, per the standing TODO).
 
 # TODOs
 
-- [ ] Do not define leaker type in output of `#[derive(Ast)]`, instead implement Repeater directly for macro target.
-- [ ] Inheritance: communicate the base's generic-param union through `__syan_visited` so a `base => New`
-      visitor can emit the base supertrait with the base's arity (fixes the opaque `E0107`).
-- [ ] Hygiene: mint generated helper params (`__V`/`__T`/`__H`/`__F`/`__A`/`__B`/`__F0…`) with
-      `Span::mixed_site()` so a visited type may use those names.
-- [ ] Pathing: `$crate`-root `#[subast]` paths in the metadata macro so a **downstream** crate can
-      build a visitor that drills through an upstream crate's types.
-- [ ] Visitor over a `#[recurse]` cycle (alias-reachable metadata macro + `__Rec` back-edge handling).
-- [ ] Optional "this `#[derive(Ast)]` type follows nothing" lint.
+- [x] ~~Implement `Repeater` directly on the macro target (drop the leaker struct).~~ Done.
+- [x] ~~Inheritance: communicate the base's generic-param union (`@bg`) so `base => New` emits the
+      base supertrait with the base's arity (fixed the opaque `E0107`).~~ Done (`visitor_inherit_arity.rs`).
+- [x] ~~Hygiene: generated helper params (`__V`/`__T`/…) no longer collide with a visited type's
+      params (fresh-name + `mixed_site`).~~ Done (`visitor_hygiene.rs`).
+- [x] ~~`$crate`-root `crate::` `#[subast]` paths so a downstream crate can drill through an upstream
+      crate's types.~~ Done (`rust/tests/cross_crate_drill.rs`).
+- [ ] Visitor over a `#[recurse]` cycle — large co-design (see "Known gaps"): `#[recurse]` must
+      co-transform `#[subast]` matchkeys/paths to the renamed internal types, expose an
+      alias-reachable metadata macro, and the visitor must become depth-generic over `__Rec`.
+- [ ] ~~Optional "follows nothing" lint~~ — decided against (can't distinguish AST from non-AST
+      field types at derive time; would false-warn). See "Known gaps".

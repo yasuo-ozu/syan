@@ -14,9 +14,9 @@ AST 型定義から `syn` スタイルのビジターを生成する。
 - **`#[derive(Ast)]`**: 空の `Ast` マーカー impl ＋ `#[macro_export]` なコールバック「メタデータ」
   マクロ（定義のクリーンな複製を保持し、下流で `syn::Item` として再パースされる）。型自身の名前で
   再エクスポートされ `path::to::T!{..}` として到達可能（型とマクロは別の名前空間なので共存できる）。
-  さらに、型コンテキストに依存する各フィールド型につき `type_leak::Leaker` マーカー ＋
-  `::syan::visit::Repeater<N>` impl を 1 つ生成する（ポータブルな参照；消費者は drill-in / 外部の
-  メタデータ利用者）。
+  さらに、型コンテキストに依存する各フィールド型につき `::syan::visit::Repeater<N>` impl を**型自身に**
+  1 つ生成する（`<T as Repeater<N>>::Type`；外部メタデータ用フォールバック）。`crate::` 根付けの
+  `#[subast]` パスは `$crate` 根付けで出力され、下流でも解決する。
 - **`visitor!([base =>] T, …)`**: （それ以外は空の）`mod` の**内側**で呼ぶ関数形式マクロ。`syan`
   内の `macro_rules!` シムが `$crate` を捕捉して syan のパスを `__visitor_entry` に渡すので
   `#[syan(..)]` は不要。`__visitor_build` を介したメタデータの往復（ping-pong）で、visit 対象の型ごとに
@@ -42,35 +42,41 @@ AST 型定義から `syn` スタイルのビジターを生成する。
 - **`visit_mut`** の完全な鏡像（インプレース変更）。**削除/追加（reduce/append）**: *親*ノードの
   `visit_*_mut` をオーバーライドし（親が `&mut Vec`/`&mut Option` を所有）、その後 descend する —
   `visitor_reduce.rs` 参照。
-- **継承** `visitor!(base => New)`: new→base の参照 DAG 向け（base が `__syan_visited` リストマクロを
-  エクスポートし、new トレイトがスーパートレイトで拡張する）。
+- **継承** `visitor!(base => New)`: new→base の参照 DAG 向け（base が `__syan_visited` リストマクロで
+  visited ident **と自身のジェネリック和集合 `@bg`** をエクスポートし、new トレイトがスーパートレイトで
+  拡張する。`base::Visit<…>` は base 自身のアリティで参照するので、より広い new 和集合でも動く
+  （`visitor_inherit_arity.rs`））。
 - **ジェネリクス**: トレイトは visit 対象型のジェネリックパラメータの**和集合**でパラメータ化される
   （`Visit<S, Tokens>`）；各型は自分の部分集合を使うので、アリティ混在も動く（`visitor_generics.rs`）。
-  注意: 和集合の全パラメータを使わないルート型で `.visit()` を呼ぶと turbofish が要ることがある。
+  注意: 和集合の全パラメータを使わないルート型で `.visit()` を呼ぶと turbofish が要ることがある。生成
+  ヘルパーパラメータは visit 対象型のパラメータ名を避けるので、visited 型は `__V`/`__T`/`__H`/`__F`/`__A`/
+  `__B` という名前のパラメータを宣言できる（`visitor_hygiene.rs`）。
 - **クレート跨ぎ**を検証済み: visit 対象型は `visitor!(...)` に渡したフルパスで名指しされるので、下流
-  クレートで import 不要（`rust/tests/cross_crate.rs`）。
+  クレートで import 不要（`rust/tests/cross_crate.rs`）。下流で構築したビジターが上流クレートの型を
+  ドリルスルーすることも可能（`$crate` 根付けの `#[subast]`；`rust/tests/cross_crate_drill.rs`）。
 
 ## 既知のギャップ / 制限
 
-- **`#[recurse]` の*循環*上のビジター**（未対応）: `#[recurse]` 内の `#[derive(Ast)]` は*リネーム後*の
-  内部型に適用されるため、メタデータマクロはその名前でしか到達できず、公開エイリアスでは到達できない
-  （`crate::ast::Expr!` はマクロを見つけられない — `visitor_recurse_gap.rs` が固定）。仮に橋渡ししても、
-  `#[recurse]` は循環の後退辺をジェネリックの `__Rec` パラメータに書き換えるため、名前解決可能な走査辺では
-  ない — 循環を*通り抜けて*visit するには recurse 対応の協調設計が要る。**`#[recurse]` モジュール内の
-  *非循環*型に対する drill-in は現状で動く**（recurse はそれらに触れない）— `visitor_recurse_drill.rs`。
+- **`#[recurse]` の*循環*上のビジター**（未対応 — 橋渡しでは済まない大規模な協調設計）: 2 つの障害が
+  重なる。(1) `#[recurse]` 内の `#[derive(Ast)]` は*リネーム後*の内部型（`__ExprRec`）に適用されるため、
+  メタデータマクロはその名前でしか到達できず公開エイリアスでは到達できない（`crate::ast::Expr!` は
+  マクロを見つけられない — `visitor_recurse_gap.rs` が固定）。(2) エイリアスで到達可能にしても、`#[recurse]`
+  は循環のフィールドを書き換える: 自己/ルート参照はジェネリック `__Rec` パラメータに、相互参照は
+  `__StmtRec<…, __Rec>` になる。よってフィールドの*ヘッド*がユーザの `#[subast]` matchkey と一致しなくなり
+  （`Stmt` 対 `__StmtRec`）すべてリーフになる上、入れ子の各レベルが*別の*具体型（別の深さ引数）なので、
+  単一の `visit_stmt(&Stmt<S>)` は `&__StmtRec<S, __Rec>` に型が合わない。循環を通り抜けて visit するには、
+  `#[recurse]` が `#[subast]` の matchkey/パスを co-transform し、ビジターが深さジェネリック
+  （`visit_*<R>(… __Rec = R …)`）になる必要がある。**`#[recurse]` モジュール内の*非循環*型に対する drill-in
+  は現状で動く**（recurse はそれらに触れない）— `visitor_recurse_drill.rs`。
 - **末尾セグメントが同じ 2 つの visited 型**（`visitor!(a::Foo, b::Foo)`）: 生成名はすべて末尾セグメントを
   鍵にするので衝突する。現在は明確なビルドエラー（`visitor_diagnostics.rs`）；真の共存にはフルパスで
   曖昧性解消した名前付けが要る。
-- **アリティの異なる継承**: `visitor!(base => New)` で `New` の和集合が base に無いジェネリックパラメータを
-  導入すると、base スーパートレイトを誤ったアリティで出す（不透明な `E0107`）。base の和集合ジェネリクスが
-  `__syan_visited` 経由で伝わらない — 将来対応。
-- **予約された生成 ident**: visited 型のジェネリックパラメータが `__V`/`__T`/`__H`/`__F`/`__A`/`__B`
-  （または `__F0`…）という名前だと生成ヘルパーと衝突する（call-site 衛生）。これらの名前を避けること；
-  mixed-site 衛生による修正は将来対応。
 - **入れ子コンテナ**（`Vec<Option<T>>`）は非対応（明確なビルドエラー）；内側を独自の `#[derive(Ast)]` 型に
   包むこと。
-- `#[derive(Ast)]` の `Leaker` ＋ `Repeater<N>` impl は今や外部メタデータ用のフォールバックのみ；
-  ビジター/ドリル経路は `#[subast]` 解決パスを使う（TODO 参照）。
+- **「何も辿らない」リント — 未実装（見送り）**: `#[subast]` の無い型に AST の子があるかを derive 時に
+  警告するのは確実にできない — derive は `#[subast]` 宣言なしに AST フィールド型と非 AST 型（`String`、
+  `Span`、ユーザの非 AST 構造体）を区別できないため、誤検知が多発する。打ち間違いは代わりに `unused entry`
+  警告（どのフィールドにも一致しない `#[subast]` matchkey）が拾う。
 
 ---
 
@@ -254,12 +260,15 @@ name-list ＋ 現在のドリル閉包だけ。トレイトの**和集合ジェ�
 
 # TODOs
 
-- [ ] `#[derive(Ast)]` の出力で leaker 型を定義せず、代わりにマクロ対象に直接 Repeater を実装する。
-- [ ] 継承: base の和集合ジェネリクスを `__syan_visited` 経由で伝え、`base => New` ビジターが base
-      スーパートレイトを base のアリティで出せるようにする（不透明な `E0107` を解消）。
-- [ ] 衛生: 生成ヘルパーパラメータ（`__V`/`__T`/`__H`/`__F`/`__A`/`__B`/`__F0…`）を `Span::mixed_site()`
-      で生成し、visited 型がそれらの名前を使えるようにする。
-- [ ] パス解決: メタデータマクロ内で `#[subast]` パスを `$crate` 根付けし、**下流**クレートが上流クレートの
-      型をドリルスルーするビジターを構築できるようにする。
-- [ ] `#[recurse]` の循環上のビジター（エイリアスで到達可能なメタデータマクロ ＋ `__Rec` 後退辺の処理）。
-- [ ] 任意の「この `#[derive(Ast)]` 型は何も辿らない」リント。
+- [x] ~~`Repeater` をマクロ対象の型に直接実装する（leaker 構造体を廃止）。~~ 完了。
+- [x] ~~継承: base の和集合ジェネリクス（`@bg`）を伝え、`base => New` が base スーパートレイトを base の
+      アリティで出せるようにする（不透明な `E0107` を解消）。~~ 完了（`visitor_inherit_arity.rs`）。
+- [x] ~~衛生: 生成ヘルパーパラメータ（`__V`/`__T`/…）が visited 型のパラメータと衝突しないようにする
+      （fresh-name ＋ `mixed_site`）。~~ 完了（`visitor_hygiene.rs`）。
+- [x] ~~`crate::` 根付けの `#[subast]` パスを `$crate` 根付けにし、下流クレートが上流の型をドリルスルー
+      できるようにする。~~ 完了（`rust/tests/cross_crate_drill.rs`）。
+- [ ] `#[recurse]` の循環上のビジター — 大規模な協調設計（「既知のギャップ」参照）: `#[recurse]` が
+      `#[subast]` の matchkey/パスをリネーム後の内部型へ co-transform し、エイリアスで到達可能な
+      メタデータマクロを出し、ビジターが `__Rec` に対して深さジェネリックになる必要がある。
+- [ ] ~~任意の「何も辿らない」リント~~ — 見送り（derive 時に AST/非 AST フィールド型を区別できず誤検知する）。
+      「既知のギャップ」参照。
