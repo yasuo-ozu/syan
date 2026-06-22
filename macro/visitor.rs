@@ -191,6 +191,10 @@ struct BuildInput {
     /// `__syan_visited` macro, so the new trait can reference `base::Visit<..>` with the *base's*
     /// arity instead of the new union's.
     base_generics: Vec<GenericParam>,
+    /// The direct base's own transitive ancestors (for multi-level `base => mid => new`), so the new
+    /// visitor can emit the empty `Driver` impl for every transitive supertrait, not just the direct
+    /// base.
+    base_ancestors: Vec<AncIn>,
     /// Path of the type whose `@ast`/`@subast` trail in this bounce (so the fetched def is recorded
     /// under the path it was fetched by). Empty before any type is fetched.
     fetching: Option<Path>,
@@ -207,6 +211,60 @@ fn parse_section(input: ParseStream) -> Result<(Ident, TokenStream)> {
     let content;
     braced!(content in input);
     Ok((name, content.parse()?))
+}
+
+/// One transitive-base obligation for multi-level inheritance: an ancestor visitor's path and the
+/// names of its generic params (re-mapped into the extending visitor's union when emitted).
+#[derive(Clone)]
+struct AncIn {
+    path: Path,
+    names: Vec<Ident>,
+}
+
+/// Parse `@anc { @a { @p {PATH} @n {name…} } … }`.
+fn parse_ancestors(ts: TokenStream) -> Result<Vec<AncIn>> {
+    let parser = |input: ParseStream| {
+        let mut out = Vec::new();
+        while !input.is_empty() {
+            input.parse::<Token![@]>()?;
+            let kw: Ident = input.parse()?;
+            if kw != "a" {
+                return Err(Error::new(kw.span(), "expected `@a` in @anc"));
+            }
+            let content;
+            braced!(content in input);
+            let mut path = None;
+            let mut names = Vec::new();
+            while !content.is_empty() {
+                let (name, inner) = parse_section(&content)?;
+                match name.to_string().as_str() {
+                    "p" => path = Some(syn::parse2(inner)?),
+                    "n" => names = parse_idents(inner)?,
+                    other => {
+                        return Err(Error::new(name.span(), format!("unknown @a section @{other}")))
+                    }
+                }
+            }
+            out.push(AncIn {
+                path: path.ok_or_else(|| Error::new(Span::call_site(), "missing @p in @a"))?,
+                names,
+            });
+        }
+        Ok(out)
+    };
+    parser.parse2(ts)
+}
+
+fn emit_ancestors(anc: &[AncIn]) -> TokenStream {
+    let blocks: Vec<TokenStream> = anc
+        .iter()
+        .map(|a| {
+            let path = &a.path;
+            let names = &a.names;
+            quote! { @a { @p { #path } @n { #(#names)* } } }
+        })
+        .collect();
+    quote!( #(#blocks)* )
 }
 
 /// Parse `@done { @t { @path {..} @def {..} @subast {..} } .. }`.
@@ -258,6 +316,7 @@ impl Parse for BuildInput {
         let mut visited = Vec::new();
         let mut inherited = Vec::new();
         let mut base_generics = Vec::new();
+        let mut base_ancestors = Vec::new();
         let mut fetching = None;
         let mut done = Vec::new();
         let mut rest = Vec::new();
@@ -291,6 +350,8 @@ impl Parse for BuildInput {
                             .collect();
                     }
                 }
+                // `@anc` is the carried ancestor chain; `@an` is appended by a base's macro.
+                "anc" | "an" => base_ancestors = parse_ancestors(content)?,
                 "fetching" => {
                     if !content.is_empty() {
                         fetching = Some(syn::parse2(content)?);
@@ -317,6 +378,7 @@ impl Parse for BuildInput {
             visited,
             inherited,
             base_generics,
+            base_ancestors,
             fetching,
             done,
             rest,
@@ -388,6 +450,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             visited,
             inherited,
             base_generics,
+            base_ancestors,
             done,
             rest,
             ..
@@ -397,6 +460,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             None => quote!(),
         };
         let done_tokens = emit_done(done);
+        let anc_tokens = emit_ancestors(base_ancestors);
         return quote! {
             #next ! {
                 @ast #build {
@@ -406,6 +470,7 @@ pub fn build(input: TokenStream) -> TokenStream {
                     @visited { #(#visited),* }
                     @inherited { #(#inherited)* }
                     @baseg { #(#base_generics),* }
+                    @anc { #anc_tokens }
                     @fetching { #next }
                     @done { #done_tokens }
                     @rest { #(#rest),* }
@@ -1019,6 +1084,14 @@ struct VType {
     body_mut: TokenStream,
 }
 
+/// A transitive supertrait obligation (an ancestor visitor), resolved against the new union: the
+/// ancestor's path, the union params it is parameterized by, and the matching use-side args.
+struct Ancestor {
+    path: TokenStream,
+    g_params: Vec<GenericParam>,
+    g_use: TokenStream,
+}
+
 /// Generate every item for one mutability "side" (`Visit`/`VisitMut`, etc.).
 #[allow(clippy::too_many_arguments)]
 fn gen_side(
@@ -1029,7 +1102,7 @@ fn gen_side(
     g_def: &TokenStream,
     g_use: &TokenStream,
     base_g_use: &TokenStream,
-    base_g_params: &[GenericParam],
+    ancestors: &[Ancestor],
     base: &Option<Path>,
 ) -> TokenStream {
     let suffix = if mutable { "Mut" } else { "" };
@@ -1174,11 +1247,12 @@ fn gen_side(
                 }
             }
         }
-        // The new trait extends the base, so Driver must satisfy the base too (via base defaults).
-        // Quantified over only the base's params (+ the wrapped hook) so a wider new-union param
-        // does not become an unconstrained impl param.
-        #(if let Some(b) = base) {
-            impl< #(#base_g_params,)* #p_h > #b::#visit_tr #base_g_use for #driver<#p_h> {}
+        // The new trait extends the base (transitively), so Driver must satisfy *every* ancestor
+        // supertrait (via their defaults). Each empty impl is quantified over only that ancestor's
+        // params (+ the wrapped hook) so a wider new-union param is not an unconstrained impl param.
+        #(for a in ancestors) {
+            impl< #(for p in &a.g_params) { #p, } #p_h >
+                #{&a.path}::#visit_tr #{&a.g_use} for #driver<#p_h> {}
         }
 
         #(for s in &sides) {
@@ -1293,6 +1367,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     }
     let by_name: HashMap<String, TokenStream> =
         g_params.iter().map(|p| (param_name(p), param_use(p))).collect();
+    let by_name_param: HashMap<String, GenericParam> =
+        g_params.iter().map(|p| (param_name(p), p.clone())).collect();
     let base_args: Vec<TokenStream> = st
         .base_generics
         .iter()
@@ -1303,14 +1379,49 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     } else {
         quote!( < #(#base_args),* > )
     };
-    // The base's own params (a subset of the union) — used to quantify the empty `base::Visit` impl
-    // for `Driver` over exactly the base's params, so a wider new-union param stays out of it (it
-    // would otherwise be an unconstrained impl param: E0207).
-    let base_names: HashSet<String> = st.base_generics.iter().map(param_name).collect();
-    let base_g_params: Vec<GenericParam> = g_params
+
+    // The full transitive ancestor chain (direct base first), so the new visitor's `Driver` can
+    // satisfy *every* supertrait obligation — `mid::Visit: base::Visit` means a `mid => new` visitor
+    // must impl both `mid::Visit` and `base::Visit` for its `Driver`. Each ancestor's params are a
+    // subset of the union (the base's `@bg` transitively carries its own ancestors' params), looked
+    // up by name; each impl is quantified over exactly those params (+ the hook) to avoid E0207.
+    let mut chain: Vec<AncIn> = Vec::new();
+    if let Some(b) = &st.base {
+        chain.push(AncIn {
+            path: b.clone(),
+            names: st
+                .base_generics
+                .iter()
+                .map(|p| Ident::new(&param_name(p), Span::call_site()))
+                .collect(),
+        });
+        chain.extend(st.base_ancestors.iter().cloned());
+    }
+    let ancestors: Vec<Ancestor> = chain
         .iter()
-        .filter(|p| base_names.contains(&param_name(p)))
-        .cloned()
+        .map(|a| {
+            let g_params: Vec<GenericParam> = a
+                .names
+                .iter()
+                .filter_map(|n| by_name_param.get(&n.to_string()).cloned())
+                .collect();
+            let args: Vec<TokenStream> = a
+                .names
+                .iter()
+                .filter_map(|n| by_name.get(&n.to_string()).cloned())
+                .collect();
+            let g_use = if args.is_empty() {
+                quote!()
+            } else {
+                quote!( < #(#args),* > )
+            };
+            let path = &a.path;
+            Ancestor {
+                path: quote!(#path),
+                g_params,
+                g_use,
+            }
+        })
         .collect();
 
     let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
@@ -1370,22 +1481,21 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .collect();
 
     let shared = gen_side(
-        false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &base_g_params, &st.base,
+        false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
     );
     let mutable = gen_side(
-        true, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &base_g_params, &st.base,
+        true, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
     );
 
-    let base = &st.base;
-
-    // Every visitor module exports its full visited-type set (idents) so another visitor can
-    // inherit it; inherited types are reached only by method, so idents suffice.
+    // Every visitor module exports its full visited-type set (idents), its generic-param union
+    // (`@bg`), and its full ancestor chain (`@an`) so another visitor can inherit it (transitively).
     let all_visible: Vec<Ident> = st
         .visited
         .iter()
         .map(|p| last_ident(p).clone())
         .chain(st.inherited.iter().cloned())
         .collect();
+    let anc_export = emit_ancestors(&chain);
     let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
 
     // Items are emitted directly into the enclosing module (where `visitor!(...)` was invoked).
@@ -1394,15 +1504,19 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         #[doc(hidden)]
         macro_rules! #vmacro {
             (@visited $cb:path { $($pre:tt)* }) => {
-                $cb ! { $($pre)* @inh { #(#all_visible)* } @bg { #(#g_params),* } }
+                $cb ! {
+                    $($pre)* @inh { #(#all_visible)* } @bg { #(#g_params),* } @an { #anc_export }
+                }
             };
         }
         #[doc(hidden)]
         pub use #vmacro as __syan_visited;
 
-        #(if let Some(b) = base) {
+        // Bring every ancestor's traits in scope so the generated `Driver` impls / method calls
+        // resolve (transitive supertraits included).
+        #(for a in &ancestors) {
             #[allow(unused_imports)]
-            use #b::{Visit as _, VisitMut as _};
+            use #{&a.path}::{Visit as _, VisitMut as _};
         }
 
         #shared
