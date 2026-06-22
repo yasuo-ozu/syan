@@ -86,36 +86,94 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
     let all_types = &args.types;
 
     // `@visited` carries the *full paths* as written, so the generated items name the visited types
-    // in the caller's path context.
-    let make_state = |rest: &[Path]| {
+    // in the caller's path context. `@fetching` is the path of the type whose def trails the next
+    // bounce (so the fetched def is recorded under it).
+    let make_state = |fetching: TokenStream, rest: &[Path]| {
         quote! {
             @base { #base_tokens }
             @build { #build }
             @nonce { #nonce }
             @visited { #(#all_types),* }
             @inherited { }
+            @fetching { #fetching }
             @done { }
             @rest { #(#rest),* }
         }
     };
 
     match &args.base {
-        // With a base: first fetch the base module's visited-type list, then fetch all types.
+        // With a base: first fetch the base module's visited-type list, then fetch all types. No type
+        // is fetched yet, so `@fetching` is empty; the first `build` bounce pops `rest`.
         Some(base) => {
-            let state = make_state(all_types);
+            let state = make_state(quote!(), all_types);
             quote! {
                 #base::__syan_visited ! { @visited #build { #state } }
             }
         }
-        // No base: pop the first type now (so `rest` carries the remainder).
+        // No base: pop the first type now (so `rest` carries the remainder), recording it under
+        // `@fetching`.
         None => {
             let first = &args.types[0];
-            let state = make_state(&args.types[1..]);
+            let state = make_state(quote!(#first), &args.types[1..]);
             quote! {
                 #first ! { @ast #build { #state } }
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Subast records carried through the ping-pong.
+// ---------------------------------------------------------------------------
+
+/// One `<path> as <matchkey>` entry from a type's `#[subast]`, as carried in the metadata. `key` is
+/// the ident a (container-peeled) field head is matched against; `path` is the resolvable path used
+/// to fetch that sub-AST's metadata macro and as a drill match-scrutinee.
+struct SubEntry {
+    path: Path,
+    key: Ident,
+}
+
+impl Parse for SubEntry {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let path: Path = input.parse()?;
+        input.parse::<Token![as]>()?;
+        let key: Ident = input.parse()?;
+        Ok(SubEntry { path, key })
+    }
+}
+
+fn parse_subentries(ts: TokenStream) -> Result<Vec<SubEntry>> {
+    Ok(Punctuated::<SubEntry, Token![,]>::parse_terminated
+        .parse2(ts)?
+        .into_iter()
+        .collect())
+}
+
+/// Re-serialize subast entries as `<path> as <key>, ...` for the next ping-pong bounce.
+fn subentries_tokens(entries: &[SubEntry]) -> TokenStream {
+    let parts: Vec<TokenStream> = entries
+        .iter()
+        .map(|e| {
+            let p = &e.path;
+            let k = &e.key;
+            quote!(#p as #k)
+        })
+        .collect();
+    quote!( #(#parts),* )
+}
+
+/// Whitespace-insensitive string form of a path, for full-path fetch-dedup and drill lookup (so
+/// `a::Cast` and `b::Cast` are distinct).
+fn norm_path(p: &Path) -> String {
+    quote!(#p).to_string().replace(' ', "")
+}
+
+/// A fetched AST type: the path it was fetched by, its (cleaned) definition, and its `#[subast]`.
+struct DoneType {
+    path: Path,
+    def: Item,
+    subast: Vec<SubEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,9 +187,13 @@ struct BuildInput {
     nonce: TokenStream,
     visited: Vec<Path>,
     inherited: Vec<Ident>,
-    done: Vec<Item>,
+    /// Path of the type whose `@ast`/`@subast` trail in this bounce (so the fetched def is recorded
+    /// under the path it was fetched by). Empty before any type is fetched.
+    fetching: Option<Path>,
+    done: Vec<DoneType>,
     rest: Vec<Path>,
-    just: Option<Item>,
+    just_def: Option<Item>,
+    just_subast: Vec<SubEntry>,
 }
 
 /// Parse one `@<name> { .. }` section, returning the name and the braced content as tokens.
@@ -143,6 +205,47 @@ fn parse_section(input: ParseStream) -> Result<(Ident, TokenStream)> {
     Ok((name, content.parse()?))
 }
 
+/// Parse `@done { @t { @path {..} @def {..} @subast {..} } .. }`.
+fn parse_done(ts: TokenStream) -> Result<Vec<DoneType>> {
+    let parser = |input: ParseStream| {
+        let mut out = Vec::new();
+        while !input.is_empty() {
+            input.parse::<Token![@]>()?;
+            let kw: Ident = input.parse()?;
+            if kw != "t" {
+                return Err(Error::new(kw.span(), "expected `@t` in @done"));
+            }
+            let content;
+            braced!(content in input);
+            out.push(parse_done_type(&content)?);
+        }
+        Ok(out)
+    };
+    parser.parse2(ts)
+}
+
+fn parse_done_type(input: ParseStream) -> Result<DoneType> {
+    let mut path = None;
+    let mut def = None;
+    let mut subast = Vec::new();
+    while !input.is_empty() {
+        let (name, content) = parse_section(input)?;
+        match name.to_string().as_str() {
+            "path" => path = Some(syn::parse2(content)?),
+            "def" => def = Some(syn::parse2(content)?),
+            "subast" => subast = parse_subentries(content)?,
+            other => {
+                return Err(Error::new(name.span(), format!("unknown @t section @{other}")))
+            }
+        }
+    }
+    Ok(DoneType {
+        path: path.ok_or_else(|| Error::new(Span::call_site(), "missing @path in @t"))?,
+        def: def.ok_or_else(|| Error::new(Span::call_site(), "missing @def in @t"))?,
+        subast,
+    })
+}
+
 impl Parse for BuildInput {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut base = None;
@@ -150,9 +253,11 @@ impl Parse for BuildInput {
         let mut nonce = TokenStream::new();
         let mut visited = Vec::new();
         let mut inherited = Vec::new();
+        let mut fetching = None;
         let mut done = Vec::new();
         let mut rest = Vec::new();
-        let mut just = None;
+        let mut just_def = None;
+        let mut just_subast = Vec::new();
 
         while !input.is_empty() {
             let (name, content) = parse_section(input)?;
@@ -172,15 +277,19 @@ impl Parse for BuildInput {
                 }
                 // `@inherited` is the carried set; `@inh` is appended by a base's visited-list macro.
                 "inherited" | "inh" => inherited.extend(parse_idents(content)?),
-                "done" => done = parse_items(content)?,
+                "fetching" => {
+                    if !content.is_empty() {
+                        fetching = Some(syn::parse2(content)?);
+                    }
+                }
+                "done" => done = parse_done(content)?,
                 "rest" => {
                     let paths =
                         Punctuated::<Path, Token![,]>::parse_terminated.parse2(content)?;
                     rest = paths.into_iter().collect();
                 }
-                "ast" => just = Some(syn::parse2(content)?),
-                // Carried in the metadata ping-pong; consumed by drilling in a later stage.
-                "subast" | "fetching" | "subdone" => {}
+                "ast" => just_def = Some(syn::parse2(content)?),
+                "subast" => just_subast = parse_subentries(content)?,
                 other => {
                     return Err(Error::new(name.span(), format!("unknown section @{other}")))
                 }
@@ -193,9 +302,11 @@ impl Parse for BuildInput {
             nonce,
             visited,
             inherited,
+            fetching,
             done,
             rest,
-            just,
+            just_def,
+            just_subast,
         })
     }
 }
@@ -211,25 +322,47 @@ fn parse_idents(ts: TokenStream) -> Result<Vec<Ident>> {
     parser.parse2(ts)
 }
 
-fn parse_items(ts: TokenStream) -> Result<Vec<Item>> {
-    let parser = |input: ParseStream| {
-        let mut out = Vec::new();
-        while !input.is_empty() {
-            out.push(input.parse::<Item>()?);
-        }
-        Ok(out)
-    };
-    parser.parse2(ts)
-}
-
 pub fn build(input: TokenStream) -> TokenStream {
     let mut st: BuildInput = match syn::parse2(input) {
         Ok(s) => s,
         Err(e) => return e.to_compile_error(),
     };
-    if let Some(item) = st.just.take() {
-        st.done.push(item);
+
+    // Record the just-fetched type (def + subast) under the path it was fetched by, then discover
+    // the followed-but-unvisited intermediates it references and enqueue them for drilling.
+    if let Some(def) = st.just_def.take() {
+        let path = match st.fetching.clone() {
+            Some(p) => p,
+            None => {
+                return Error::new(Span::call_site(), "internal: @ast without @fetching")
+                    .to_compile_error()
+            }
+        };
+        let subast = std::mem::take(&mut st.just_subast);
+
+        let method_set: HashSet<String> = st
+            .visited
+            .iter()
+            .map(|p| last_ident(p).to_string())
+            .chain(st.inherited.iter().map(|i| i.to_string()))
+            .collect();
+        let self_ident = item_ident(&def).map(|i| i.to_string());
+        let mut seen: HashSet<String> = st
+            .done
+            .iter()
+            .map(|d| norm_path(&d.path))
+            .chain(st.rest.iter().map(norm_path))
+            .collect();
+        for entry_path in
+            followed_intermediates(&def, &subast, &method_set, self_ident.as_deref())
+        {
+            if seen.insert(norm_path(&entry_path)) {
+                st.rest.push(entry_path);
+            }
+        }
+        st.done.push(DoneType { path, def, subast });
     }
+    st.fetching = None;
 
     if !st.rest.is_empty() {
         let next = st.rest.remove(0);
@@ -247,6 +380,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             Some(p) => quote!(#p),
             None => quote!(),
         };
+        let done_tokens = emit_done(done);
         return quote! {
             #next ! {
                 @ast #build {
@@ -255,7 +389,8 @@ pub fn build(input: TokenStream) -> TokenStream {
                     @nonce { #nonce }
                     @visited { #(#visited),* }
                     @inherited { #(#inherited)* }
-                    @done { #(#done)* }
+                    @fetching { #next }
+                    @done { #done_tokens }
                     @rest { #(#rest),* }
                 }
             }
@@ -265,22 +400,73 @@ pub fn build(input: TokenStream) -> TokenStream {
     generate_module(&st)
 }
 
+/// Re-serialize `@done` (the fetched types) for the next ping-pong bounce.
+fn emit_done(done: &[DoneType]) -> TokenStream {
+    let blocks: Vec<TokenStream> = done
+        .iter()
+        .map(|d| {
+            let path = &d.path;
+            let def = &d.def;
+            let subast = subentries_tokens(&d.subast);
+            quote! { @t { @path { #path } @def { #def } @subast { #subast } } }
+        })
+        .collect();
+    quote!( #(#blocks)* )
+}
+
+/// Resolvable paths of `def`'s field types that are *followed* (head in `subast`) but neither
+/// visited/inherited (a method call) nor self (already in `done`) — i.e. unlisted intermediates to
+/// fetch so they can be drilled through.
+fn followed_intermediates(
+    def: &Item,
+    subast: &[SubEntry],
+    method_set: &HashSet<String>,
+    self_ident: Option<&str>,
+) -> Vec<Path> {
+    let mut out = Vec::new();
+    for_each_field_type(def, &mut |ty| {
+        if let Some((_, head, _)) = peel(ty) {
+            let hs = head.to_string();
+            if Some(hs.as_str()) == self_ident || method_set.contains(&hs) {
+                return;
+            }
+            if let Some(e) = subast.iter().find(|e| e.key == head) {
+                out.push(e.path.clone());
+            }
+        }
+    });
+    out
+}
+
+fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
+    match def {
+        Item::Enum(e) => {
+            for v in &e.variants {
+                for field in &v.fields {
+                    f(&field.ty);
+                }
+            }
+        }
+        Item::Struct(s) => {
+            for field in &s.fields {
+                f(&field.ty);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Module generation
 // ---------------------------------------------------------------------------
 
-fn strip_ref(ty: &Type) -> &Type {
-    match ty {
-        Type::Reference(r) => strip_ref(&r.elem),
-        other => other,
-    }
-}
-
-fn type_head(ty: &Type) -> Option<&PathSegment> {
-    match strip_ref(ty) {
-        Type::Path(TypePath { path, .. }) => path.segments.last(),
-        _ => None,
-    }
+/// How a field type wraps its (visitable) head: a single value, a sequence (`Vec`/`VecDeque`/slice/
+/// array/`Punctuated`), or an `Option`. `Box` is transparent (folded into the head's box-depth).
+#[derive(Clone, Copy, PartialEq)]
+enum Container {
+    Direct,
+    Seq,
+    Opt,
 }
 
 fn first_ty_arg(seg: &PathSegment) -> Option<&Type> {
@@ -294,14 +480,42 @@ fn first_ty_arg(seg: &PathSegment) -> Option<&Type> {
     None
 }
 
-/// Head identifier of a field type, peeling `Box` (so `Box<Stmt<S>>` -> `Stmt`). `None` => not a
-/// path type. The caller treats a head that isn't a visited type as a leaf.
-fn classify(ty: &Type) -> Option<Ident> {
-    let seg = type_head(ty)?;
-    if seg.ident == "Box" {
-        return classify(first_ty_arg(seg)?);
+/// Peel a field type into `(container, head ident, box-depth-around-head)`. `Box` is transparent: a
+/// `Box` directly around the head adds to the box-depth (so a drill can `&**` through it), while a
+/// `Box` around a container is absorbed by the container's iteration/`if let` (auto-deref). `None`
+/// for a non-path leaf. The caller decides whether `head` is followed.
+fn peel(ty: &Type) -> Option<(Container, Ident, usize)> {
+    match ty {
+        Type::Reference(r) => peel(&r.elem),
+        Type::Group(g) => peel(&g.elem),
+        Type::Paren(p) => peel(&p.elem),
+        Type::Slice(s) => peel(&s.elem).map(|(_, h, b)| (Container::Seq, h, b)),
+        Type::Array(a) => peel(&a.elem).map(|(_, h, b)| (Container::Seq, h, b)),
+        Type::Path(tp) => {
+            let seg = tp.path.segments.last()?;
+            match seg.ident.to_string().as_str() {
+                "Box" => {
+                    let (c, h, b) = peel(first_ty_arg(seg)?)?;
+                    match c {
+                        // Box directly around the head: deepen so a drill derefs through it.
+                        Container::Direct => Some((Container::Direct, h, b + 1)),
+                        // Box around a container: the container's iter()/if-let auto-derefs it.
+                        _ => Some((c, h, b)),
+                    }
+                }
+                "Vec" | "VecDeque" | "Punctuated" => {
+                    let (_, h, b) = peel(first_ty_arg(seg)?)?;
+                    Some((Container::Seq, h, b))
+                }
+                "Option" => {
+                    let (_, h, b) = peel(first_ty_arg(seg)?)?;
+                    Some((Container::Opt, h, b))
+                }
+                _ => Some((Container::Direct, seg.ident.clone(), 0)),
+            }
+        }
+        _ => None,
     }
-    Some(seg.ident.clone())
 }
 
 /// `_mut` suffix for the mutable traversal variant.
@@ -376,75 +590,215 @@ fn tuple_impls(
         .collect()
 }
 
-fn emit_visit(head: &Ident, binding: TokenStream, mutable: bool) -> TokenStream {
-    let m = method_ident_m(head, mutable);
-    quote!( this.#m(#binding); )
+/// Lowers a visited type's `visit_*` body: a field followed via a *visited/inherited* head becomes a
+/// `this.visit_<head>(..)` method call; a field followed via an *unlisted intermediate* is drilled
+/// through inline (its def destructured, recursing into its `#[subast]` fields); any other field is
+/// a leaf.
+struct Lower<'a> {
+    /// Heads that get a method call (the `visitor!(..)` set ∪ inherited).
+    method_set: &'a HashSet<String>,
+    /// Fetched types keyed by `norm_path`, for resolving an intermediate's def when drilling.
+    done_by_path: &'a HashMap<String, &'a DoneType>,
+    mutable: bool,
 }
 
-/// Build a pattern + visit statements for a set of fields.
-fn build_fields(
-    fields: &Fields,
-    visited: &HashSet<String>,
-    mutable: bool,
-) -> (TokenStream, TokenStream) {
-    let mut stmts = Vec::new();
-    match fields {
-        Fields::Named(named) => {
-            let mut binds = Vec::new();
-            for f in &named.named {
-                let name = f.ident.clone().unwrap();
-                if let Some(head) = classify(&f.ty) {
-                    if visited.contains(&head.to_string()) {
+impl<'a> Lower<'a> {
+    fn iter_fn(&self) -> Ident {
+        Ident::new(if self.mutable { "iter_mut" } else { "iter" }, Span::call_site())
+    }
+
+    /// Visit a value `access` (an expression of reference type `&Box^box_depth<head>` /
+    /// `&mut ...`). A method head emits a call (deref-coercion handles any `Box`); an intermediate is
+    /// drilled inline (deref `box_depth+1` times to a `&head` scrutinee, then destructure). May be
+    /// empty (a finite drill that reaches no visited type).
+    fn visit_value(
+        &self,
+        access: &TokenStream,
+        head: &Ident,
+        drill_path: &Path,
+        box_depth: usize,
+        depth: usize,
+        stack: &mut Vec<String>,
+    ) -> TokenStream {
+        if self.method_set.contains(&head.to_string()) {
+            let m = method_ident_m(head, self.mutable);
+            return quote!( this.#m(#access); );
+        }
+        // Unlisted intermediate -> inline drill.
+        let key = norm_path(drill_path);
+        if stack.iter().any(|s| s == &key) {
+            abort!(
+                Span::call_site(),
+                "`#[subast]` cycle through unlisted intermediate `{}`: it cannot be drilled inline. \
+                 List one of the cycle's types in `visitor!(..)` so a method call breaks the recursion",
+                head
+            );
+        }
+        let dt = match self.done_by_path.get(&key) {
+            Some(dt) => *dt,
+            None => abort!(
+                Span::call_site(),
+                "internal: no metadata fetched for drilled type `{}` ({})",
+                head,
+                key
+            ),
+        };
+        stack.push(key);
+        let stars: TokenStream = (0..=box_depth).map(|_| quote!(*)).collect();
+        let amp = if self.mutable { quote!(&mut) } else { quote!(&) };
+        let scrut = quote!( #amp #stars #access );
+        let block = self.destructure(&dt.def, &dt.subast, &dt.path, &scrut, depth + 1, stack);
+        stack.pop();
+        block
+    }
+
+    /// Destructure `scrutinee` (a `&T`/`&mut T` expr) per `def`/`subast` and visit followed fields.
+    /// Empty when no followed field anywhere reaches a visited type.
+    fn destructure(
+        &self,
+        def: &Item,
+        subast: &[SubEntry],
+        path: &Path,
+        scrutinee: &TokenStream,
+        depth: usize,
+        stack: &mut Vec<String>,
+    ) -> TokenStream {
+        let self_ident = item_ident(def);
+        match def {
+            Item::Enum(e) => {
+                let mut arms = Vec::new();
+                let mut any = false;
+                for v in &e.variants {
+                    let (pat, stmts, has) =
+                        self.fields(&v.fields, subast, self_ident, path, depth, stack);
+                    any |= has;
+                    let vident = &v.ident;
+                    arms.push(quote!( #path::#vident #pat => { #stmts } ));
+                }
+                if !any {
+                    return quote!();
+                }
+                quote!( match #scrutinee { #(#arms)* } )
+            }
+            Item::Struct(s) => {
+                let (pat, stmts, has) =
+                    self.fields(&s.fields, subast, self_ident, path, depth, stack);
+                if !has {
+                    return quote!();
+                }
+                match &s.fields {
+                    Fields::Unit => quote!(),
+                    _ => quote!( { let #path #pat = #scrutinee; #stmts } ),
+                }
+            }
+            _ => quote!(),
+        }
+    }
+
+    /// Build `(pattern, statements, has_any_visit)` for a field set. `self_ident` is the type being
+    /// destructured (a field whose head is it is followed by implicit self-recursion).
+    fn fields(
+        &self,
+        fields: &Fields,
+        subast: &[SubEntry],
+        self_ident: Option<&Ident>,
+        path: &Path,
+        depth: usize,
+        stack: &mut Vec<String>,
+    ) -> (TokenStream, TokenStream, bool) {
+        match fields {
+            Fields::Named(named) => {
+                let mut binds = Vec::new();
+                let mut stmts = Vec::new();
+                for (idx, f) in named.named.iter().enumerate() {
+                    let name = f.ident.clone().unwrap();
+                    let bind = quote!(#name);
+                    if let Some(stmt) =
+                        self.lower_field(&f.ty, &bind, idx, subast, self_ident, path, depth, stack)
+                    {
                         binds.push(quote!(#name));
-                        stmts.push(emit_visit(&head, quote!(#name), mutable));
+                        stmts.push(stmt);
                     }
                 }
+                let has = !stmts.is_empty();
+                (quote!( { #(#binds,)* .. } ), quote!( #(#stmts)* ), has)
             }
-            (quote!( { #(#binds,)* .. } ), quote!( #(#stmts)* ))
+            Fields::Unnamed(unnamed) => {
+                let mut pats = Vec::new();
+                let mut stmts = Vec::new();
+                for (idx, f) in unnamed.unnamed.iter().enumerate() {
+                    let bind_id = Ident::new(&format!("__f{depth}_{idx}"), Span::call_site());
+                    let bind = quote!(#bind_id);
+                    if let Some(stmt) =
+                        self.lower_field(&f.ty, &bind, idx, subast, self_ident, path, depth, stack)
+                    {
+                        pats.push(quote!(#bind_id));
+                        stmts.push(stmt);
+                    } else {
+                        pats.push(quote!(_));
+                    }
+                }
+                let has = !stmts.is_empty();
+                (quote!( ( #(#pats),* ) ), quote!( #(#stmts)* ), has)
+            }
+            Fields::Unit => (quote!(), quote!(), false),
         }
-        Fields::Unnamed(unnamed) => {
-            let mut pats = Vec::new();
-            for (idx, f) in unnamed.unnamed.iter().enumerate() {
-                let visit = classify(&f.ty).filter(|h| visited.contains(&h.to_string()));
-                if let Some(head) = visit {
-                    let b = Ident::new(&format!("__f{idx}"), Span::call_site());
-                    pats.push(quote!(#b));
-                    stmts.push(emit_visit(&head, quote!(#b), mutable));
+    }
+
+    /// Lower one field. `binding` is the destructured field (a `&Field`/`&mut Field`). Returns the
+    /// visit statement(s), or `None` for a leaf / finite dead-end (the caller binds `_`).
+    #[allow(clippy::too_many_arguments)]
+    fn lower_field(
+        &self,
+        ty: &Type,
+        binding: &TokenStream,
+        idx: usize,
+        subast: &[SubEntry],
+        self_ident: Option<&Ident>,
+        path: &Path,
+        depth: usize,
+        stack: &mut Vec<String>,
+    ) -> Option<TokenStream> {
+        let (container, head, box_depth) = peel(ty)?;
+        // Followed iff the head is self (implicit) or listed in this type's `#[subast]`.
+        let drill_path: Path = if Some(&head) == self_ident {
+            path.clone()
+        } else if let Some(e) = subast.iter().find(|e| e.key == head) {
+            e.path.clone()
+        } else {
+            return None; // leaf
+        };
+        match container {
+            Container::Direct => {
+                let s = self.visit_value(binding, &head, &drill_path, box_depth, depth, stack);
+                if s.is_empty() {
+                    None
                 } else {
-                    pats.push(quote!(_));
+                    Some(s)
                 }
             }
-            (quote!( ( #(#pats),* ) ), quote!( #(#stmts)* ))
-        }
-        Fields::Unit => (quote!(), quote!()),
-    }
-}
-
-/// Body of the free `visit_*` traversal function for one item. `ty_path` is the full path the type
-/// is referenced by (so match scrutinees are portable across crates).
-fn build_body(
-    item: &Item,
-    visited: &HashSet<String>,
-    mutable: bool,
-    ty_path: &TokenStream,
-) -> TokenStream {
-    match item {
-        Item::Enum(e) => {
-            let arms = e.variants.iter().map(|v| {
-                let vident = &v.ident;
-                let (pat, stmts) = build_fields(&v.fields, visited, mutable);
-                quote!( #ty_path::#vident #pat => { #stmts } )
-            });
-            quote!( match i { #(#arms)* } )
-        }
-        Item::Struct(s) => {
-            let (pat, stmts) = build_fields(&s.fields, visited, mutable);
-            match &s.fields {
-                Fields::Unit => quote!(),
-                _ => quote!( let #ty_path #pat = i; #stmts ),
+            Container::Seq => {
+                let elem = Ident::new(&format!("__e{depth}_{idx}"), Span::call_site());
+                let inner =
+                    self.visit_value(&quote!(#elem), &head, &drill_path, box_depth, depth, stack);
+                if inner.is_empty() {
+                    None
+                } else {
+                    let iter = self.iter_fn();
+                    Some(quote!( for #elem in #binding.#iter() { #inner } ))
+                }
+            }
+            Container::Opt => {
+                let elem = Ident::new(&format!("__e{depth}_{idx}"), Span::call_site());
+                let inner =
+                    self.visit_value(&quote!(#elem), &head, &drill_path, box_depth, depth, stack);
+                if inner.is_empty() {
+                    None
+                } else {
+                    Some(quote!( if let Some(#elem) = #binding { #inner } ))
+                }
             }
         }
-        _ => quote!(),
     }
 }
 
@@ -738,19 +1092,22 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .map(|p| (last_ident(p).to_string(), p))
         .collect();
     let visited: HashSet<String> = path_of.keys().cloned().collect();
-    // Fields whose head is any of these recurse via a `visit_*` method (new ones generated here,
-    // inherited ones provided by the base trait).
-    let visitable: HashSet<String> = visited
+    // Heads that recurse via a `visit_*` method (visited here + inherited from a base); every other
+    // followed head is an unlisted intermediate that gets drilled through inline.
+    let method_set: HashSet<String> = visited
         .iter()
         .cloned()
         .chain(st.inherited.iter().map(|i| i.to_string()))
         .collect();
+    // Fetched types keyed by full path, for resolving an intermediate's def while drilling.
+    let done_by_path: HashMap<String, &DoneType> =
+        st.done.iter().map(|d| (norm_path(&d.path), d)).collect();
 
-    // Items that get visitor methods (named in #[visitor(..)]); inherited types are not regenerated.
-    let targets: Vec<&Item> = st
+    // Types that get visitor methods (named in `visitor!(..)`); inherited/intermediate types don't.
+    let targets: Vec<&DoneType> = st
         .done
         .iter()
-        .filter(|it| item_ident(it).map_or(false, |id| visited.contains(&id.to_string())))
+        .filter(|d| item_ident(&d.def).map_or(false, |id| visited.contains(&id.to_string())))
         .collect();
     if targets.is_empty() {
         abort!(Span::call_site(), "no AST definitions resolved for the visitor");
@@ -761,8 +1118,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     // lets one visitor span e.g. `Expr<S, Tokens>` and `BinOp<S>`.
     let mut seen = HashSet::new();
     let mut g_params: Vec<GenericParam> = Vec::new();
-    for it in &targets {
-        for p in gparams(item_generics(it).unwrap()) {
+    for d in &targets {
+        for p in gparams(item_generics(&d.def).unwrap()) {
             if seen.insert(param_name(&p)) {
                 g_params.push(p);
             }
@@ -781,27 +1138,41 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         quote!()
     };
 
+    let lower = Lower {
+        method_set: &method_set,
+        done_by_path: &done_by_path,
+        mutable: false,
+    };
+    let lower_mut = Lower {
+        method_set: &method_set,
+        done_by_path: &done_by_path,
+        mutable: true,
+    };
+
     let vtypes: Vec<VType> = targets
         .iter()
-        .map(|it| {
-            let ident = item_ident(it).unwrap().clone();
-            let own_params = gparams(item_generics(it).unwrap());
-            let own = gargs(item_generics(it).unwrap());
+        .map(|d| {
+            let def = &d.def;
+            let ident = item_ident(def).unwrap().clone();
+            let own_params = gparams(item_generics(def).unwrap());
+            let own = gargs(item_generics(def).unwrap());
             let own_use = if own.is_empty() {
                 quote!()
             } else {
                 quote!( < #(#own),* > )
             };
-            // Full path for type references; falls back to the bare ident if unmapped.
-            let path = path_of
-                .get(&ident.to_string())
-                .map(|p| quote!(#p))
-                .unwrap_or_else(|| quote!(#ident));
-            let body = build_body(it, &visitable, false, &path);
-            let body_mut = build_body(it, &visitable, true, &path);
+            // The path the visited type is named by (its `visitor!(..)` path), also the scrutinee
+            // path for its own body; falls back to the fetched path if somehow unmapped.
+            let scrut_path: &Path = path_of.get(&ident.to_string()).copied().unwrap_or(&d.path);
+            let path_tokens = quote!(#scrut_path);
+            let mut stack = Vec::new();
+            let body = lower.destructure(def, &d.subast, scrut_path, &quote!(i), 0, &mut stack);
+            let mut stack = Vec::new();
+            let body_mut =
+                lower_mut.destructure(def, &d.subast, scrut_path, &quote!(i), 0, &mut stack);
             VType {
                 ident,
-                path,
+                path: path_tokens,
                 own_params,
                 own_use,
                 body,

@@ -5,6 +5,7 @@ use core::marker::PhantomData;
 use syan::visit::Ast;
 
 #[derive(Ast)]
+#[subast(crate::BinOp)]
 pub enum Expr<S, Tokens> {
     Bin(Box<Expr<S, Tokens>>, BinOp<S>, Box<Expr<S, Tokens>>),
     Lit(i64, PhantomData<(S, Tokens)>),

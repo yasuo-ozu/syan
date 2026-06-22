@@ -5,12 +5,14 @@ use core::marker::PhantomData;
 use syan::visit::Ast;
 
 #[derive(Debug, Ast)]
+#[subast(crate::Stmt)]
 pub enum Expr<S> {
     Stmt(Box<Stmt<S>>),
     Other(PhantomData<S>),
 }
 
 #[derive(Debug, Ast)]
+#[subast(crate::Expr)]
 pub enum Stmt<S> {
     Expr(Box<Expr<S>>),
     Other(PhantomData<S>),

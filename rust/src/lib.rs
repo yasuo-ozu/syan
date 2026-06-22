@@ -9,12 +9,14 @@ pub mod ast {
     use syan::visit::Ast;
 
     #[derive(Debug, Ast)]
+    #[subast(crate::ast::Stmt)]
     pub enum Expr<S> {
         Stmt(Box<Stmt<S>>),
         Lit(PhantomData<S>),
     }
 
     #[derive(Debug, Ast)]
+    #[subast(crate::ast::Expr)]
     pub enum Stmt<S> {
         Expr(Box<Expr<S>>),
         Nop(PhantomData<S>),

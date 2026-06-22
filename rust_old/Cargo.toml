@@ -1,0 +1,20 @@
+[package]
+name = "syan-rust"
+description = "Rust AST definitions for syan parser"
+version = "0.1.0"
+edition = "2021"
+authors = ["Yasuo Ozu <yasuo@ozu.email>"]
+repository = "https://github.com/yasuo-ozu/syan"
+keywords = ["macros", "syn", "parser", "proc-macro", "parsing", "rust", "ast"]
+categories = ["data-structures", "rust-patterns", "parser-implementations"]
+license = "MIT"
+
+[dependencies]
+syan = { path = "../core", features = ["proc_macro2"] }
+syan-macro = { path = "../macro" }
+type-macro-derive-tricks = "0.2"
+proc-macro2 = "1.0"
+
+[dev-dependencies]
+template-quote = "0.4"
+proc-macro2 = "1.0"

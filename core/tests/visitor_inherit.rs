@@ -10,12 +10,14 @@ pub enum Type<S> {
 }
 
 #[derive(Ast)]
+#[subast(crate::Type)]
 pub enum Expr<S> {
     Typed(Box<Type<S>>),
     Lit(PhantomData<S>),
 }
 
 #[derive(Ast)]
+#[subast(crate::Expr)]
 pub enum Stmt<S> {
     E(Box<Expr<S>>),
     Empty(PhantomData<S>),

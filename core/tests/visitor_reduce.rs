@@ -8,6 +8,7 @@ use syan::visit::Ast;
 pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
 #[derive(Debug, Ast)]
+#[subast(crate::Stmt)]
 pub struct Block<S> {
     pub stmts: Vec<Stmt<S>>,
     pub tail: Option<Stmt<S>>,
