@@ -78,3 +78,38 @@ fn visits_back_edge_through_depth() {
         "outer Expr + Stmt + inner Expr (reached via the VisitRec back-edge)"
     );
 }
+
+// A single self-recursive root (no other cycle type): both `Add` operands are root back-edges.
+#[recurse(visit)]
+mod tree {
+    use core::marker::PhantomData;
+    use syan::visit::Ast;
+
+    #[derive(Ast)]
+    #[subast()]
+    pub enum Expr<S> {
+        Add(Box<Expr<S>>, Box<Expr<S>>),
+        Lit(PhantomData<S>),
+    }
+}
+
+#[derive(Default)]
+struct Nodes(usize);
+
+impl<S> tree::Visit<S> for Nodes {
+    fn visit_expr<R: tree::VisitRec<S, Self>>(&mut self, i: &tree::ExprNode<S, R>) {
+        self.0 += 1;
+        tree::visit_expr(self, i);
+    }
+}
+
+#[test]
+fn visits_self_recursive_root() {
+    let e: tree::Expr<()> = tree::Expr::Add(
+        Box::new(tree::ExprNode::Lit(PhantomData)),
+        Box::new(tree::ExprNode::Lit(PhantomData)),
+    );
+    let mut n = Nodes::default();
+    tree::Visit::visit_expr(&mut n, &e);
+    assert_eq!(n.0, 3, "the Add node + its two operands (both back-edges to the root)");
+}
