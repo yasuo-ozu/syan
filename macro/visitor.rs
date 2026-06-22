@@ -585,6 +585,29 @@ fn method_ident_m(head: &Ident, mutable: bool) -> Ident {
     )
 }
 
+/// Mint a generated helper param ident whose name avoids every name in `reserved` (the visited
+/// types' generic params), appending `_` until free. Rust rejects two generic params with the same
+/// name string in one item regardless of hygiene, so this — not just `mixed_site` — is what lets a
+/// visited type declare a param literally named `__V`/etc. The `mixed_site` span is kept for extra
+/// isolation from other call-site idents.
+fn fresh_ident(base: &str, reserved: &HashSet<String>) -> Ident {
+    let mut name = base.to_string();
+    while reserved.contains(&name) {
+        name.push('_');
+    }
+    Ident::new(&name, Span::mixed_site())
+}
+
+/// Like [`fresh_ident`] but for an indexed family `<prefix>0..<prefix>{max}` (tuple closure params):
+/// returns a prefix such that no `<prefix>{i}` collides with `reserved`.
+fn fresh_prefix(base: &str, reserved: &HashSet<String>, max: usize) -> String {
+    let mut prefix = base.to_string();
+    while (0..max).any(|i| reserved.contains(&format!("{prefix}{i}"))) {
+        prefix.push('_');
+    }
+    prefix
+}
+
 /// Right-nested `Chain(self.0.into_hook(), Chain(self.1.into_hook(), ...))` over tuple members.
 fn build_chain(members: &[Index], chain: &Ident, into_hook: &Ident) -> TokenStream {
     let m = &members[0];
@@ -612,13 +635,18 @@ fn tuple_impls(
     let visit_tr = Ident::new(&format!("Visit{suffix}"), Span::call_site());
     let driver = Ident::new(&format!("Driver{suffix}"), Span::call_site());
     let chain_id = Ident::new(&format!("Chain{suffix}"), Span::call_site());
+    // Helper param prefixes that avoid the visited types' own generic param names (so a visited type
+    // may declare a param literally named `__F0`/`__T0`/…).
+    let reserved: HashSet<String> = g_params.iter().map(param_name).collect();
+    let pf = fresh_prefix("__F", &reserved, max_arity);
+    let pt = fresh_prefix("__T", &reserved, max_arity);
     (2..=max_arity)
         .map(|n| {
             let fs: Vec<Ident> = (0..n)
-                .map(|i| Ident::new(&format!("__F{i}"), Span::call_site()))
+                .map(|i| Ident::new(&format!("{pf}{i}"), Span::mixed_site()))
                 .collect();
             let ts: Vec<Ident> = (0..n)
-                .map(|i| Ident::new(&format!("__T{i}"), Span::call_site()))
+                .map(|i| Ident::new(&format!("{pt}{i}"), Span::mixed_site()))
                 .collect();
             let members: Vec<Index> = (0..n).map(Index::from).collect();
             let wheres: Vec<TokenStream> = fs
@@ -999,6 +1027,17 @@ fn gen_side(
     let recv = if mutable { quote!(&mut self) } else { quote!(&self) };
     let self_ret = if mutable { quote!(&mut Self) } else { quote!(&Self) };
 
+    // Generated helper type params, named to avoid collision with the visited types' own generic
+    // params (which arrive verbatim via `#g_params`). A visited type may thus declare a param
+    // literally named `__V`/`__T`/`__H`/`__F`/`__A`/`__B` (or `__F0`…).
+    let reserved: HashSet<String> = g_params.iter().map(param_name).collect();
+    let p_v = fresh_ident("__V", &reserved);
+    let p_t = fresh_ident("__T", &reserved);
+    let p_h = fresh_ident("__H", &reserved);
+    let p_f = fresh_ident("__F", &reserved);
+    let p_a = fresh_ident("__A", &reserved);
+    let p_b = fresh_ident("__B", &reserved);
+
     struct S {
         ty: TokenStream,
         method: Ident,
@@ -1050,9 +1089,9 @@ fn gen_side(
             let method = method_ident_m(&vt.ident, mutable);
             quote! {
                 impl #own_def #path #own_use {
-                    pub fn #visit_method< #(#extra,)* __T >(
+                    pub fn #visit_method< #(#extra,)* #p_t >(
                         #recv,
-                        visitor: impl #into_vis_tr< #(#g_args,)* __T >,
+                        visitor: impl #into_vis_tr< #(#g_args,)* #p_t >,
                     ) -> #self_ret {
                         let mut visitor = visitor.#into_vis_fn();
                         visitor.#method(self);
@@ -1072,27 +1111,27 @@ fn gen_side(
             }
         }
 
-        impl< #(#g_params,)* __V: #visit_tr #g_use > #visit_tr #g_use for &mut __V {
+        impl< #(#g_params,)* #p_v: #visit_tr #g_use > #visit_tr #g_use for &mut #p_v {
             #(for s in &sides) {
                 fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
-                    <__V as #visit_tr #g_use>::#{&s.method}(self, i)
+                    <#p_v as #visit_tr #g_use>::#{&s.method}(self, i)
                 }
             }
         }
 
         #(for s in &sides) {
-            pub fn #{&s.method}< #(#g_params,)* __V: #visit_tr #g_use + ?Sized >(
-                this: &mut __V,
+            pub fn #{&s.method}< #(#g_params,)* #p_v: #visit_tr #g_use + ?Sized >(
+                this: &mut #p_v,
                 i: #amp #{&s.ty},
             ) {
                 #{&s.body}
             }
         }
 
-        pub trait #into_vis_tr< #(#g_params,)* __T > {
+        pub trait #into_vis_tr< #(#g_params,)* #p_t > {
             fn #into_vis_fn(self) -> impl #visit_tr #g_use;
         }
-        impl< #(#g_params,)* __V: #visit_tr #g_use > #into_vis_tr< #(#g_args,)* () > for __V {
+        impl< #(#g_params,)* #p_v: #visit_tr #g_use > #into_vis_tr< #(#g_args,)* () > for #p_v {
             fn #into_vis_fn(self) -> impl #visit_tr #g_use { self }
         }
 
@@ -1102,12 +1141,12 @@ fn gen_side(
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { let _ = i; }
             }
         }
-        pub trait #into_hook_tr< #(#g_params,)* __T > {
+        pub trait #into_hook_tr< #(#g_params,)* #p_t > {
             fn #into_hook_fn(self) -> impl #hook_tr #g_use;
         }
 
-        pub struct #driver<__H>(pub __H);
-        impl< #(#g_params,)* __H: #hook_tr #g_use > #visit_tr #g_use for #driver<__H> {
+        pub struct #driver<#p_h>(pub #p_h);
+        impl< #(#g_params,)* #p_h: #hook_tr #g_use > #visit_tr #g_use for #driver<#p_h> {
             #(for s in &sides) {
                 fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                     self.0.#{&s.hook}(i);
@@ -1117,32 +1156,32 @@ fn gen_side(
         }
         // The new trait extends the base, so Driver must satisfy the base too (via base defaults).
         #(if let Some(b) = base) {
-            impl< #(#g_params,)* __H: #hook_tr #g_use > #b::#visit_tr #g_use for #driver<__H> {}
+            impl< #(#g_params,)* #p_h: #hook_tr #g_use > #b::#visit_tr #g_use for #driver<#p_h> {}
         }
 
         #(for s in &sides) {
-            pub struct #{&s.hook_struct}<__F>(pub __F);
-            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ty} ) >
-                #hook_tr #g_use for #{&s.hook_struct}<__F>
+            pub struct #{&s.hook_struct}<#p_f>(pub #p_f);
+            impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
+                #hook_tr #g_use for #{&s.hook_struct}<#p_f>
             {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { (self.0)(i); }
             }
-            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ty} ) >
-                #into_hook_tr< #(#g_args,)* #{&s.ty} > for __F
+            impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
+                #into_hook_tr< #(#g_args,)* #{&s.ty} > for #p_f
             {
                 fn #into_hook_fn(self) -> impl #hook_tr #g_use { #{&s.hook_struct}(self) }
             }
-            impl< #(#g_params,)* __F: ::core::ops::FnMut( #amp #{&s.ty} ) >
-                #into_vis_tr< #(#g_args,)* #{&s.ty} > for __F
+            impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
+                #into_vis_tr< #(#g_args,)* #{&s.ty} > for #p_f
             {
                 fn #into_vis_fn(self) -> impl #visit_tr #g_use { #driver(#{&s.hook_struct}(self)) }
             }
         }
 
         // --- multiple closures: Chain combinator + tuple impls ---------------------------
-        pub struct #chain<__A, __B>(pub __A, pub __B);
-        impl< #(#g_params,)* __A: #hook_tr #g_use, __B: #hook_tr #g_use >
-            #hook_tr #g_use for #chain<__A, __B>
+        pub struct #chain<#p_a, #p_b>(pub #p_a, pub #p_b);
+        impl< #(#g_params,)* #p_a: #hook_tr #g_use, #p_b: #hook_tr #g_use >
+            #hook_tr #g_use for #chain<#p_a, #p_b>
         {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) {
