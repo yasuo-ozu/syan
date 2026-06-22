@@ -45,22 +45,30 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 
 ---
 
-# Drill-in implementation plan (resolves to: transitive auto-discovered visitor)
+# Drill-in implementation plan (selective `visit_*` + transitive drill-through)
 
 ## Context
 
-The original "drill-in" goal was to traverse *through* an Ast type the visitor has no `visit_*` for
-(the spec's `Expr::Cast(cast) => this.visit_type(&cast.0)`). The deep dive below resolves it into
-something simpler and stronger — **auto-discover the reachable AST closure and give every discovered
-type a `visit_*` method** (see *Model* and *Resolved decisions*), so there is no separate "drill"
-path. The enabling blocker was that "is this field-head an `Ast` type to follow?" can't be tested at
-macro-expansion time. The **`#[subast(...)]` allowlist** removes it: a `#[derive(Ast)]` struct/enum
-declares its sub-AST types (with resolvable paths) in a type-level `#[subast(...)]`; **a field is
-followed iff its (container-peeled) head is listed there** (or is the type's own type — self-recursion
-is implicit). **All other field types are ignored** (treated as leaves: tokens, primitives,
-`PhantomData`, spans, …). One attribute does both jobs: membership (listed ⇒ followed) *and* pathing
-(the entry supplies the resolvable path to that sub-AST's metadata macro). This also gives the
-`Repeater` impls (already emitted by `#[derive(Ast)]`) a fallback consumer: portable sub-AST refs.
+The drill-in goal is to traverse *through* an Ast type the visitor has no `visit_*` for (the spec's
+`Expr::Cast(cast) => this.visit_type(&cast.0)`). The model uses **two lists**:
+
+- **`#[subast(...)]`** (per `#[derive(Ast)]` type) — the type's Ast *children*: which fields are
+  *followed*. A field is followed iff its (container-peeled) head is listed there (or is the type's
+  own type — self-recursion is implicit); **all other field types are ignored** (leaves: tokens,
+  primitives, `PhantomData`, spans, …). The entry also supplies the resolvable path to that sub-AST's
+  metadata macro (membership + pathing in one attribute). No `#[no_ast]`.
+- **`visitor!(T, …)`** (per visitor) — the *visited set*: which followed types get a `visit_*`
+  **method**. A followed field whose head is **listed in `visitor!(...)`** lowers to
+  `this.visit_<head>(field)`; a followed field whose head is **not** listed (an *unlisted
+  intermediate*, e.g. `Cast`) is **drilled through inline** — its metadata macro is invoked to reach
+  the listed types nested inside it (`this.visit_type(&cast.0)`), and it gets **no** `visit_cast`.
+
+So `visit_*` is defined only on types named in `visitor!(...)`; every `#[derive(Ast)]` type still
+emits its metadata macro, but an unlisted type's macro is invoked only while processing a type whose
+`#[subast]` lists it (i.e. to drill through it). The enabling fact: "is this followed head an Ast
+type to invoke?" needs no macro-time existence test — `#[subast]` already declares it (and provides
+its path). The `Repeater` impls (emitted by `#[derive(Ast)]`) are a fallback consumer: portable
+sub-AST refs.
 
 ## `#[derive(Ast)]` (`macro/ast.rs`)
 
@@ -91,35 +99,46 @@ is implicit). **All other field types are ignored** (treated as leaves: tokens, 
 - Keep the `Leaker` + `Repeater<N>` impls as a last-resort type-namer / for external metadata
   consumers; the visitor path uses `#[subast]`-resolved paths.
 
-## Model — visit-all-reachable (this is what "drill-in" becomes)
+## Model — selective `visit_*`, drill through the rest
 
-`visitor!(Root, …)` lists **entry type(s)**; `__visitor_build` auto-discovers the closure reachable
-through `#[subast]` edges (plus implicit self-recursion) and generates a `visit_*` method for **every
-discovered type** (syn-style). Traversal is always `this.visit_<head>(field)` — a *method* call, so
-recursion runs through the trait and handles recursive/cyclic ASTs exactly like today's visited-type
-traversal. There is **no inline drilling and no cycle detection**: a wrapper like `Cast` (listed in
-its parent's `#[subast]`) is simply *also visited* (it gets `visit_cast`, whose body reaches `Type`).
-This is more uniform than the spec's invisible drill-through and matches "build a visitor without
-enumerating the whole dependency set." Prune a subtree by leaving its head out of `#[subast]`.
+`visitor!(T, …)` lists the **visited set**; `__visitor_build` generates `visit_*`/`visit_*_mut` for
+**those types only**. Generating a visited type's body walks its `#[subast]` fields:
+- head ∈ visited set ⇒ `this.visit_<head>(access)` — a method call; recursion runs through the trait,
+  handling recursive/cyclic *visited* types exactly like today's visited-type traversal.
+- head a followed **intermediate** (∈ `#[subast]`, ∉ visited) ⇒ **inline drill**: invoke the
+  intermediate's metadata macro, recurse into *its* `#[subast]` fields with the accessor extended
+  (`&cast.0`, `&cast.0.1`, …) under the same rules — so listed types nested arbitrarily deep inside
+  unlisted wrappers are reached (`Expr::Cast(c) => this.visit_type(&c.0)`), but the wrapper gets **no**
+  `visit_cast`.
+- head not followed (∉ `#[subast]`, not self) ⇒ leaf, bind `_`.
+
+**Cycle guard:** inline drilling keeps a stack of intermediates being expanded; a cycle of *unlisted*
+intermediates (`Cast`→`Cast`, or `A`→`B`→`A`, none visited) cannot be expanded inline ⇒ a
+`__visitor_build` **error** ("list one of them in `visitor!(...)`" so a method call breaks the
+recursion). Recursion through *visited* types is fine — it's a method call, not inline. A *finite*
+drill subtree that bottoms out at leaves without reaching any visited type is **not** an error — it
+just lowers to no `visit_*` calls; only an unlisted-intermediate *cycle* (infinite expansion) errors.
 
 ## `__visitor_build` (`macro/visitor.rs`)
 
-- **Auto-discovery + incremental emission** (see *Scale*): each ping-pong bounce fetches one type's
-  structure, emits *that type's* free `visit_*` / `visit_*_mut` fn immediately, records its
-  name/path/own-generics in a carried name-list, queues each followed field's **resolved path** —
-  **except `@SELF`** (that's the current type: already recorded, so self-recursion is a method call,
-  not a new fetch) — deduped on the path's last-segment **string** (a proc-macro string compare,
-  allowed), and drops the structure.
-- **Body lowering** per field (peel the container, then visit the inner head):
-  - an **ignored** field (`@leaf` — head not in `#[subast]`, not self) ⇒ bind `_`, skip.
-  - a **followed** field ⇒ `this.visit_<inner-head>(<access expr>)` — the method name is built in-proc
-    from the literal head ident (`to_snake`; never in `macro_rules!`), the access expr applies the
-    container lowering, and the enqueue path + enum match scrutinee use the record's **resolved path**
-    (the `#[subast]` entry's path, or `@SELF`; no `path_of` / no inference). Every followed head is a
-    discovered type with a method, so **no membership test is needed at lowering time**.
-- **One-shot items** (final bounce, from the name-list — signatures only, no structures): the
-  `Visit`/`VisitMut` traits (one method per discovered type), `Driver`/`Hook`/`Chain`, the
-  `IntoVisitor`/`IntoVisitorMut` closure & tuple impls, and the inherent `visit`/`visit_mut`.
+- **Emitted only for listed types.** `visit_*`/`visit_*_mut` free fns + trait methods are generated
+  for the `visitor!(...)`-listed types only; so are the one-shot items (`Visit`/`VisitMut` traits,
+  `Driver`/`Hook`/`Chain`, `IntoVisitor`/`IntoVisitorMut`, inherent `visit`/`visit_mut`), built at the
+  end from the listed-types **name-list** (ident + path + own-generics).
+- **Body lowering** per `#[subast]` field of the type being emitted (peel the container, then):
+  - head ∈ visited set ⇒ `this.visit_<head>(access)` — method name built in-proc from the literal head
+    ident (`to_snake`; never in `macro_rules!`); the type's own match scrutinee uses `@SELF` = the path
+    it was fetched by.
+  - head a followed intermediate (∈ `#[subast]`, ∉ visited) ⇒ **inline drill** (recurse into its
+    `#[subast]` fields with the accessor extended; its match scrutinee uses its `#[subast]`-resolved
+    path; cycle guard per *Model*).
+  - head ∉ `#[subast]` (`@leaf`) ⇒ bind `_`, skip.
+- **Discovery / ping-pong.** Membership (visited? followed?) is decided in the proc-macro — it holds
+  the visited set, and the `#[subast]` records carry followed/leaf + resolved paths. It fetches each
+  listed type and each unlisted intermediate reachable for drilling, by the record's **resolved path**
+  (`@SELF` is the current type — never fetched/enqueued). Fetch-dedup is on the **full resolved-path
+  string**, not the last segment, so distinct types sharing a last segment (`a::Cast` vs `b::Cast`)
+  are both fetched. No `path_of`, no inference.
 
 ## Resolved decisions (deep dive)
 
@@ -133,34 +152,37 @@ head. The inner head is followed iff its type is listed in `#[subast]` (a contai
 type, e.g. `Vec<Token>`, is ignored). Reduce/append is unchanged: override the parent's
 `visit_*_mut`, which owns the `&mut Vec` / `&mut Option`.
 
-### Decision 2 — Delegation & model: **proc-macro composes; visit-all-reachable.**
+### Decision 2 — Delegation & model: **proc-macro composes; selective drilling.**
 Two hard `macro_rules!` facts settle it: (1) it **cannot compare two idents** for equality (no
 `$a == $b`; reusing a metavar name in a matcher is an error) → it can't test visited-set membership;
 (2) it **cannot concat / snake-case idents** (no `format_ident!`) → it can't build `visit_stmt` from
 `Stmt`. So both membership *and* body generation (method names, match arms) must live in the
 proc-macro. "Delegate via `macro_rules!`" is therefore the metadata macros *supplying each type's
-structure* (the ping-pong fetch *is* the delegation); `__visitor_build` composes. Because the
-proc-macro composes, **visit-all-reachable** is chosen over selective drilling — it eliminates
-inline-drill recursion and cycle handling (recursion is via method calls). `#[subast]` is the single
-**allowlist**: it declares membership (listed ⇒ followed; everything else ignored) *and* supplies the
-resolvable path. "Reachable" means reachable through `#[subast]` edges (+ self); every such type gets
-a method. (Membership lives in `#[subast]`, not in a `macro_rules!` test — consistent with fact (1).)
+structure* (the ping-pong fetch *is* the delegation); `__visitor_build` composes, doing what
+`macro_rules!` can't: test visited-set membership, `to_snake` method names, and run the inline-drill
+recursion + cycle guard. **Selective drilling** is chosen (per directive): `visit_*` only for
+`visitor!(...)`-listed types, unlisted `#[subast]` types drilled through inline — a smaller,
+intentional interface than visit-all (`Cast` is not visitable; you expose exactly the nodes you mean
+to visit). The two lists stay distinct: `#[subast]` (per type) is the **follow-list** (+ pathing);
+`visitor!(...)` is the **method-list**.
 
-### Scale — incremental emission (avoids O(N²)).
-A full AST closure can be ~100 types; accumulating every fetched structure in the ping-pong state and
-re-emitting it each bounce is O(N²) tokens. Instead, structures are **used-and-dropped per bounce**
-and each type's `visit_*` fn is **emitted as it is fetched**; only a small **name-list**
-(ident + path + own-generics) accumulates (Rust allows items in any order, so a body may reference
-the trait that is emitted last). The traits / `Driver` / `IntoVisitor` / inherent items are emitted
-once at the end from that name-list. The trait's **union generics = the root type's generic params**
-(known from the first fetched type, before any body is emitted, so closures keep working); a sub-type
-that introduces a new generic param name is an error.
+### Scale.
+Only the `visitor!(...)`-listed types get methods, so the trait / `Driver` / `IntoVisitor` / inherent
+items are over that (small, explicit) set, emitted once at the end from the **name-list** of listed
+types (ident + path + own-generics; Rust allows items in any order, so a body may reference the trait
+emitted last). A listed type's `visit_*` body is emitted once its **drill closure** (the unlisted
+intermediates reachable from it until a visited type or leaf) is fetched; intermediate structures are
+**used for inline drilling and dropped** — never turned into methods, never grown into the trait. Do
+not re-emit all fetched structures each ping-pong bounce (that is O(N²)); carry only the name-list +
+the current drill closure. The trait's **union generics = the root type's generic params** (known
+early, so closures keep working); a sub-type introducing a new generic param name is an error.
 
 ### Pathing — `#[subast]` supplies every followed path.
-Every followed field's resolvable path is its matching `#[subast]` entry's path (or `@SELF` for
-self-recursion — substituted with the path the type was fetched by, used only for the match
-scrutinee, never enqueued as a discovery edge); unlisted field types are ignored, so there is no path
-to infer for them. The
+Every followed field's resolvable path is its matching `#[subast]` entry's path — used to **fetch**
+that sub-AST's metadata macro (whether it becomes a `visit_*` call or is drilled) and as the **match
+scrutinee** when it is drilled. Self-recursion uses `@SELF` (the path the current type was fetched by;
+match scrutinee only, never enqueued as a discovery edge). Unlisted field types are ignored, so there
+is no path to infer for them. The
 `#[subast]` paths are resolved at the *defining* module and republished portably — one `pub use`
 carries **both** the type and metadata-macro namespaces, and `$crate`-rooting the `#[macro_export]`
 half makes it resolve same-crate and downstream. No module-prefix inference, no sibling guessing: a
@@ -173,20 +195,22 @@ lets the `Leaker` be dropped, per the standing TODO).
 ## Tests (`core/tests`)
 
 - Spec graph: `Type`, `Cast(Type)`, `Expr { Cast(Cast) }` with `#[subast(super::Cast)]` on `Expr`
-  and `#[subast(super::Type)]` on `Cast`; `visitor!(super::Expr)` ⇒ traversal reaches `Type` through
-  `Cast` (auto-generated `visit_cast` → `visit_type`); a closure `|t: &Type<()>| …` fires once; `Cast`
-  is also visitable (`visit_cast` exists — the visit-all consequence).
-- Allowlist: a field whose head is listed (`#[subast(crate::ast::Stmt)]`, field `Box<Stmt<S>>`) is
-  followed (`visit_stmt`); an **unlisted** field type is silently ignored (bound `_`, not traversed);
-  an imported/aliased field (`use other::Stmt; … s: Stmt` with `#[subast(other::Stmt)]`) reaches
-  `visit_stmt` (the gap `core/tests/visitor_local_types.rs` documents); a same-last-segment collision
-  (`#[subast(a::Foo, b::Foo)]`) fails at the derive with a located error.
-- Self-recursion: `Expr { Bin(Box<Expr<…>>, …) }` with `Expr` *not* in its own `#[subast]` still
-  recurses via `@SELF`.
-- Containers: a type with `Vec<Stmt>` / `Option<Expr>` / `Box<Expr>` fields (with `Stmt`/`Expr`
-  listed) descends into each element; reduce/append via overriding the parent's `visit_*_mut`.
-- Auto-discovery scale: `visitor!(super::Root)` over a multi-type graph ⇒ every type reachable
-  through `#[subast]` edges gets a method and is traversed.
+  and `#[subast(super::Type)]` on `Cast`; `visitor!(super::Expr, super::Type)` (Type listed, **Cast
+  not**) ⇒ `visit_expr` drills through `Cast` to `this.visit_type(&cast.0)`; `Cast` is **not**
+  visitable (no `visit_cast`); a closure `|t: &Type<()>| …` fires once.
+- Follow-list vs method-list: a field followed and listed (`#[subast(crate::ast::Stmt)]` + `Stmt` in
+  `visitor!(...)`) lowers to `visit_stmt`; followed but unlisted ⇒ drilled; not in `#[subast]` ⇒
+  silently ignored (bound `_`); an imported/aliased field (`use other::Stmt; … s: Stmt` with
+  `#[subast(other::Stmt)]`) resolves (the gap `core/tests/visitor_local_types.rs` documents); a
+  same-last-segment `#[subast]` collision (`a::Foo`, `b::Foo`) fails at the derive.
+- Self-recursion: `Expr { Bin(Box<Expr<…>>, …) }`, `Expr` listed but *not* in its own `#[subast]`,
+  recurses via the `visit_expr` method (its own scrutinee via `@SELF`).
+- Cycle guard: a cycle of *unlisted* intermediates (`Cast → Cast`, none in `visitor!(...)`) ⇒
+  `__visitor_build` error; listing one of them fixes it. A finite unlisted intermediate reaching only
+  leaves (no visited type) ⇒ no `visit_*` calls, no error.
+- Containers: a type with `Vec<Stmt>` / `Option<Expr>` / `Box<Expr>` fields (heads in `#[subast]`)
+  descends into each element (visited ⇒ method, unlisted ⇒ drilled); reduce/append via overriding the
+  parent's `visit_*_mut`.
 
 # TODOs
 
