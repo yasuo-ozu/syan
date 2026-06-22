@@ -423,15 +423,23 @@ fn followed_intermediates(
     method_set: &HashSet<String>,
     self_ident: Option<&str>,
 ) -> Vec<Path> {
+    let mut user_types: HashSet<String> = subast.iter().map(|e| e.key.to_string()).collect();
+    if let Some(s) = self_ident {
+        user_types.insert(s.to_string());
+    }
     let mut out = Vec::new();
     for_each_field_type(def, &mut |ty| {
-        if let Some((_, head, _)) = peel(ty) {
-            let hs = head.to_string();
-            if Some(hs.as_str()) == self_ident || method_set.contains(&hs) {
-                return;
+        if let Some(p) = peel(ty, &user_types) {
+            let hs = p.head.to_string();
+            if Some(hs.as_str()) == self_ident {
+                return; // self -> already in `done`
             }
-            if let Some(e) = subast.iter().find(|e| e.key == head) {
-                out.push(e.path.clone());
+            if let Some(e) = subast.iter().find(|e| e.key == p.head) {
+                // Fetch only when the entry's *real* type isn't visited/inherited (else a method,
+                // already fetched under its `visitor!(..)` path — even when the head is aliased).
+                if !method_set.contains(&last_ident(&e.path).to_string()) {
+                    out.push(e.path.clone());
+                }
             }
         }
     });
@@ -461,12 +469,27 @@ fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
 // ---------------------------------------------------------------------------
 
 /// How a field type wraps its (visitable) head: a single value, a sequence (`Vec`/`VecDeque`/slice/
-/// array/`Punctuated`), or an `Option`. `Box` is transparent (folded into the head's box-depth).
+/// array/`Punctuated`), or an `Option`. `Box` is transparent (tracked as box-depth).
 #[derive(Clone, Copy, PartialEq)]
 enum Container {
     Direct,
     Seq,
     Opt,
+}
+
+/// The result of peeling a field type to its visitable head.
+struct Peeled {
+    container: Container,
+    head: Ident,
+    /// `Box` layers between the container (or the top, for `Direct`) and the head; a drill derefs
+    /// through these (`&**…`) to reach a `&head` scrutinee.
+    head_box: usize,
+    /// `Box` layers around the container itself; the `Opt` `if let` must deref through these (the
+    /// `Seq` `.iter()`/`.iter_mut()` already auto-derefs them).
+    cont_box: usize,
+    /// A second container layer was found nested inside the first (e.g. `Vec<Option<T>>`); such a
+    /// field is unsupported and the caller turns this into a clear error.
+    nested: bool,
 }
 
 fn first_ty_arg(seg: &PathSegment) -> Option<&Type> {
@@ -480,38 +503,66 @@ fn first_ty_arg(seg: &PathSegment) -> Option<&Type> {
     None
 }
 
-/// Peel a field type into `(container, head ident, box-depth-around-head)`. `Box` is transparent: a
-/// `Box` directly around the head adds to the box-depth (so a drill can `&**` through it), while a
-/// `Box` around a container is absorbed by the container's iteration/`if let` (auto-deref). `None`
-/// for a non-path leaf. The caller decides whether `head` is followed.
-fn peel(ty: &Type) -> Option<(Container, Ident, usize)> {
+/// Wrap a peeled element in an outer container, flagging nesting if the element already had one.
+fn container_of(c: Container, inner: Peeled) -> Peeled {
+    Peeled {
+        container: c,
+        head: inner.head,
+        head_box: inner.head_box,
+        cont_box: 0,
+        nested: inner.nested || inner.container != Container::Direct,
+    }
+}
+
+fn direct(head: Ident) -> Peeled {
+    Peeled {
+        container: Container::Direct,
+        head,
+        head_box: 0,
+        cont_box: 0,
+        nested: false,
+    }
+}
+
+/// Peel a field type to its visitable head. A path head listed in `user_types` (this type's
+/// `#[subast]` matchkeys plus its own ident) is always a `Direct` head, so a user AST type named
+/// like a container keyword (`Option`, `Vec`, …) wins over the built-in container handling. `None`
+/// for a non-path leaf. The caller decides whether `head` is actually followed.
+fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
     match ty {
-        Type::Reference(r) => peel(&r.elem),
-        Type::Group(g) => peel(&g.elem),
-        Type::Paren(p) => peel(&p.elem),
-        Type::Slice(s) => peel(&s.elem).map(|(_, h, b)| (Container::Seq, h, b)),
-        Type::Array(a) => peel(&a.elem).map(|(_, h, b)| (Container::Seq, h, b)),
+        Type::Reference(r) => peel(&r.elem, user_types),
+        Type::Group(g) => peel(&g.elem, user_types),
+        Type::Paren(p) => peel(&p.elem, user_types),
+        Type::Slice(s) => peel(&s.elem, user_types).map(|inner| container_of(Container::Seq, inner)),
+        Type::Array(a) => peel(&a.elem, user_types).map(|inner| container_of(Container::Seq, inner)),
         Type::Path(tp) => {
             let seg = tp.path.segments.last()?;
-            match seg.ident.to_string().as_str() {
+            let name = seg.ident.to_string();
+            // A user AST type wins over a same-named container keyword.
+            if user_types.contains(&name) {
+                return Some(direct(seg.ident.clone()));
+            }
+            match name.as_str() {
                 "Box" => {
-                    let (c, h, b) = peel(first_ty_arg(seg)?)?;
-                    match c {
+                    let inner = peel(first_ty_arg(seg)?, user_types)?;
+                    Some(match inner.container {
                         // Box directly around the head: deepen so a drill derefs through it.
-                        Container::Direct => Some((Container::Direct, h, b + 1)),
-                        // Box around a container: the container's iter()/if-let auto-derefs it.
-                        _ => Some((c, h, b)),
-                    }
+                        Container::Direct => Peeled {
+                            head_box: inner.head_box + 1,
+                            ..inner
+                        },
+                        // Box around a container: the Opt `if let` derefs through it (Seq auto-derefs).
+                        _ => Peeled {
+                            cont_box: inner.cont_box + 1,
+                            ..inner
+                        },
+                    })
                 }
                 "Vec" | "VecDeque" | "Punctuated" => {
-                    let (_, h, b) = peel(first_ty_arg(seg)?)?;
-                    Some((Container::Seq, h, b))
+                    Some(container_of(Container::Seq, peel(first_ty_arg(seg)?, user_types)?))
                 }
-                "Option" => {
-                    let (_, h, b) = peel(first_ty_arg(seg)?)?;
-                    Some((Container::Opt, h, b))
-                }
-                _ => Some((Container::Direct, seg.ident.clone(), 0)),
+                "Option" => Some(container_of(Container::Opt, peel(first_ty_arg(seg)?, user_types)?)),
+                _ => Some(direct(seg.ident.clone())),
             }
         }
         _ => None,
@@ -607,16 +658,24 @@ impl<'a> Lower<'a> {
         Ident::new(if self.mutable { "iter_mut" } else { "iter" }, Span::call_site())
     }
 
-    /// Visit a value `access` (an expression of reference type `&Box^box_depth<head>` /
-    /// `&mut ...`). A method head emits a call (deref-coercion handles any `Box`); an intermediate is
-    /// drilled inline (deref `box_depth+1` times to a `&head` scrutinee, then destructure). May be
-    /// empty (a finite drill that reaches no visited type).
+    fn amp(&self) -> TokenStream {
+        if self.mutable {
+            quote!(&mut)
+        } else {
+            quote!(&)
+        }
+    }
+
+    /// Visit a value `access` (an expression of reference type `&Box^head_box<head>` / `&mut ...`),
+    /// where `head` is the *effective* (real) head type. A method head emits a call (deref-coercion
+    /// handles any `Box`); an intermediate is drilled inline (deref `head_box+1` times to a `&head`
+    /// scrutinee, then destructure). May be empty (a finite drill that reaches no visited type).
     fn visit_value(
         &self,
         access: &TokenStream,
         head: &Ident,
         drill_path: &Path,
-        box_depth: usize,
+        head_box: usize,
         depth: usize,
         stack: &mut Vec<String>,
     ) -> TokenStream {
@@ -644,8 +703,8 @@ impl<'a> Lower<'a> {
             ),
         };
         stack.push(key);
-        let stars: TokenStream = (0..=box_depth).map(|_| quote!(*)).collect();
-        let amp = if self.mutable { quote!(&mut) } else { quote!(&) };
+        let stars: TokenStream = (0..=head_box).map(|_| quote!(*)).collect();
+        let amp = self.amp();
         let scrut = quote!( #amp #stars #access );
         let block = self.destructure(&dt.def, &dt.subast, &dt.path, &scrut, depth + 1, stack);
         stack.pop();
@@ -759,47 +818,63 @@ impl<'a> Lower<'a> {
         depth: usize,
         stack: &mut Vec<String>,
     ) -> Option<TokenStream> {
-        let (container, head, box_depth) = peel(ty)?;
-        // Followed iff the head is self (implicit) or listed in this type's `#[subast]`.
-        let drill_path: Path = if Some(&head) == self_ident {
-            path.clone()
-        } else if let Some(e) = subast.iter().find(|e| e.key == head) {
-            e.path.clone()
+        let user_types = self_and_subast_keys(self_ident, subast);
+        let p = peel(ty, &user_types)?;
+        if p.nested {
+            abort!(
+                Span::call_site(),
+                "field type `{}` uses nested containers (e.g. `Vec<Option<_>>`), which the visitor \
+                 does not support; flatten it or wrap the inner part in its own `#[derive(Ast)]` type",
+                quote!(#ty)
+            );
+        }
+        // Followed iff the head is self (implicit) or listed in this type's `#[subast]`. The
+        // *effective* head — the real type name + path — comes from the matched entry (so an
+        // aliased entry `Real as Aliased` dispatches to `visit_real`, not `visit_aliased`).
+        let (head, drill_path): (Ident, Path) = if Some(&p.head) == self_ident {
+            (p.head.clone(), path.clone())
+        } else if let Some(e) = subast.iter().find(|e| e.key == p.head) {
+            (last_ident(&e.path).clone(), e.path.clone())
         } else {
             return None; // leaf
         };
-        match container {
+        match p.container {
             Container::Direct => {
-                let s = self.visit_value(binding, &head, &drill_path, box_depth, depth, stack);
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s)
-                }
+                let s = self.visit_value(binding, &head, &drill_path, p.head_box, depth, stack);
+                (!s.is_empty()).then_some(s)
             }
             Container::Seq => {
                 let elem = Ident::new(&format!("__e{depth}_{idx}"), Span::call_site());
                 let inner =
-                    self.visit_value(&quote!(#elem), &head, &drill_path, box_depth, depth, stack);
-                if inner.is_empty() {
-                    None
-                } else {
+                    self.visit_value(&quote!(#elem), &head, &drill_path, p.head_box, depth, stack);
+                (!inner.is_empty()).then(|| {
                     let iter = self.iter_fn();
-                    Some(quote!( for #elem in #binding.#iter() { #inner } ))
-                }
+                    quote!( for #elem in #binding.#iter() { #inner } )
+                })
             }
             Container::Opt => {
                 let elem = Ident::new(&format!("__e{depth}_{idx}"), Span::call_site());
                 let inner =
-                    self.visit_value(&quote!(#elem), &head, &drill_path, box_depth, depth, stack);
-                if inner.is_empty() {
-                    None
-                } else {
-                    Some(quote!( if let Some(#elem) = #binding { #inner } ))
-                }
+                    self.visit_value(&quote!(#elem), &head, &drill_path, p.head_box, depth, stack);
+                (!inner.is_empty()).then(|| {
+                    // Deref through any `Box` around the Option, then match-ergonomics binds `&elem`.
+                    let amp = self.amp();
+                    let stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
+                    quote!( if let Some(#elem) = #amp #stars #binding { #inner } )
+                })
             }
         }
     }
+}
+
+/// The set of idents that count as user AST types when peeling a field of a type with the given
+/// `self_ident` and `#[subast]` entries: the type's own ident plus every `#[subast]` matchkey.
+fn self_and_subast_keys(self_ident: Option<&Ident>, subast: &[SubEntry]) -> HashSet<String> {
+    let mut s: HashSet<String> = subast.iter().map(|e| e.key.to_string()).collect();
+    if let Some(id) = self_ident {
+        s.insert(id.to_string());
+    }
+    s
 }
 
 fn item_ident(item: &Item) -> Option<&Ident> {
@@ -1084,6 +1159,27 @@ fn gen_side(
 }
 
 fn generate_module(st: &BuildInput) -> TokenStream {
+    // Every generated name (`visit_*`, `*Hook`, inherent methods) derives from a visited type's
+    // last-segment ident, so two visited types sharing a last segment would collide. Catch it here
+    // with a clear message instead of a downstream cascade of duplicate-definition errors.
+    let mut seg_seen: HashMap<String, String> = HashMap::new();
+    for p in &st.visited {
+        let seg = last_ident(p).to_string();
+        let np = norm_path(p);
+        if let Some(prev) = seg_seen.insert(seg.clone(), np.clone()) {
+            if prev != np {
+                abort!(
+                    Span::call_site(),
+                    "two visited types share the last segment `{}` (`{}` vs `{}`); their generated \
+                     `visit_*`/`*Hook` names would collide — give them distinct final idents",
+                    seg,
+                    prev,
+                    np
+                );
+            }
+        }
+    }
+
     // Map each visited type's last-segment ident -> the full path the user wrote, so the generated
     // module names the visited types by that path (portable: no import needed for absolute paths).
     let path_of: HashMap<String, &Path> = st

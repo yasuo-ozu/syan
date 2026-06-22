@@ -1,0 +1,7 @@
+error: field type `Vec < Option < Leaf < S > > >` uses nested containers (e.g. `Vec<Option<_>>`), which the visitor does not support; flatten it or wrap the inner part in its own `#[derive(Ast)]` type
+  --> tests/ui/nested_container.rs:19:5
+   |
+19 |     syan::visit::visitor!(crate::Bad, crate::Leaf);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
