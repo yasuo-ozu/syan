@@ -1,4 +1,4 @@
-use crate::util::{gargs, gparams, param_name, param_use, peel, to_snake, Container};
+use crate::util::{angle, gargs, gparams, param_name, param_use, peel, to_snake, Container};
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
 use std::collections::{HashMap, HashSet};
@@ -1000,12 +1000,7 @@ fn gen_side(
                 .iter()
                 .filter(|p| !own_names.contains(&param_name(p)))
                 .collect();
-            let own_params = &vt.own_params;
-            let own_def = if own_params.is_empty() {
-                quote!()
-            } else {
-                quote!( < #(#own_params),* > )
-            };
+            let own_def = angle(&vt.own_params);
             let path = &vt.path;
             let own_use = &vt.own_use;
             let method = method_ident_m(&vt.ident, mutable);
@@ -1203,11 +1198,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .iter()
         .map(|bp| by_name[&param_name(bp)].clone())
         .collect();
-    let base_g_use = if base_args.is_empty() {
-        quote!()
-    } else {
-        quote!( < #(#base_args),* > )
-    };
+    let base_g_use = angle(&base_args);
 
     // The full transitive ancestor chain (direct base first), so the new visitor's `Driver` can
     // satisfy *every* supertrait obligation — `mid::Visit: base::Visit` means a `mid => new` visitor
@@ -1239,11 +1230,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 .iter()
                 .filter_map(|n| by_name.get(&n.to_string()).cloned())
                 .collect();
-            let g_use = if args.is_empty() {
-                quote!()
-            } else {
-                quote!( < #(#args),* > )
-            };
+            let g_use = angle(&args);
             let path = &a.path;
             Ancestor {
                 path: quote!(#path),
@@ -1254,17 +1241,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .collect();
 
     let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
-    let has_g = !g_params.is_empty();
-    let g_def = if has_g {
-        quote!( < #(#g_params),* > )
-    } else {
-        quote!()
-    };
-    let g_use = if has_g {
-        quote!( < #(#g_args),* > )
-    } else {
-        quote!()
-    };
+    let g_def = angle(&g_params);
+    let g_use = angle(&g_args);
 
     let lower = Lower {
         method_set: &method_set,
@@ -1283,12 +1261,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             let def = &d.def;
             let ident = item_ident(def).unwrap().clone();
             let own_params = gparams(item_generics(def).unwrap());
-            let own = gargs(item_generics(def).unwrap());
-            let own_use = if own.is_empty() {
-                quote!()
-            } else {
-                quote!( < #(#own),* > )
-            };
+            let own_use = angle(&gargs(item_generics(def).unwrap()));
             // The path the visited type is named by (its `visitor!(..)` path), also the scrutinee
             // path for its own body; falls back to the fetched path if somehow unmapped.
             let scrut_path: &Path = path_of.get(&ident.to_string()).copied().unwrap_or(&d.path);

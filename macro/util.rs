@@ -77,6 +77,16 @@ pub(crate) fn gargs(g: &Generics) -> Vec<TokenStream> {
     g.params.iter().map(param_use).collect()
 }
 
+/// Wrap items in an angle-bracket clause `< a, b, c >`, or nothing when empty — for the optional
+/// generic clauses that pepper the generators.
+pub(crate) fn angle<T: quote::ToTokens>(items: &[T]) -> TokenStream {
+    if items.is_empty() {
+        quote!()
+    } else {
+        quote!( < #(#items),* > )
+    }
+}
+
 /// First type argument of a path segment's `<...>` (e.g. the `T` of `Vec<T>`).
 pub(crate) fn first_ty_arg(seg: &PathSegment) -> Option<&Type> {
     if let PathArguments::AngleBracketed(ab) = &seg.arguments {

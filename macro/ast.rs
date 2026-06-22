@@ -1,4 +1,4 @@
-use crate::util::{gargs, gparams, to_snake};
+use crate::util::{angle, gargs, gparams, to_snake};
 use proc_macro2::{Literal, Span, TokenStream};
 use proc_macro_error::{abort, emit_warning};
 use std::collections::HashMap;
@@ -318,18 +318,8 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     // marker — the type is its own host (same generics + where-clause).
     let referrer = build_referrer(input);
     let repeater_items: TokenStream = if let Some(referrer) = &referrer {
-        let g_params = gparams(&input.generics);
-        let g_args = gargs(&input.generics);
-        let g_def = if g_params.is_empty() {
-            quote!()
-        } else {
-            quote!( < #(#g_params),* > )
-        };
-        let g_use = if g_args.is_empty() {
-            quote!()
-        } else {
-            quote!( < #(#g_args),* > )
-        };
+        let g_def = angle(&gparams(&input.generics));
+        let g_use = angle(&gargs(&input.generics));
         let leak_tys: Vec<&Type> = referrer.iter().collect();
         quote! {
             #(for (n, ty) in leak_tys.iter().enumerate()) {
