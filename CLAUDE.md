@@ -41,9 +41,11 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **`visit_mut`** full mirror (in-place mutation). **Reduce/append**: override the *parent* node's
   `visit_*_mut` (it owns the `&mut Vec`/`&mut Option`), then descend — see `visitor_reduce.rs`.
 - **Inheritance** `visitor!(base => New)` for new→base reference DAGs (base exports a
-  `__syan_visited` list macro carrying its visited idents **and its generic-param union `@bg`**; the
-  new trait extends it via supertrait, referencing `base::Visit<…>` with the base's own arity — so a
-  wider new union works (`visitor_inherit_arity.rs`)).
+  `__syan_visited` list macro carrying its visited idents, its generic-param union `@bg`, and its
+  full ancestor chain `@an`; the new trait extends it via supertrait, referencing `base::Visit<…>`
+  with the base's own arity — so a wider new union works (`visitor_inherit_arity.rs`), and
+  **multi-level chains** `base => mid => New` work: `New`'s `Driver` satisfies every transitive
+  supertrait (`visitor_inherit_multilevel.rs`)).
 - **Generics**: the trait is parameterized by the **union** of visited types' generic params
   (`Visit<S, Tokens>`); each type uses its own subset, so mixed arities work (`visitor_generics.rs`).
   Caveat: `.visit()` on a root that doesn't use every union param may need a turbofish. Generated

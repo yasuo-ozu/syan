@@ -43,9 +43,10 @@ AST 型定義から `syn` スタイルのビジターを生成する。
   `visit_*_mut` をオーバーライドし（親が `&mut Vec`/`&mut Option` を所有）、その後 descend する —
   `visitor_reduce.rs` 参照。
 - **継承** `visitor!(base => New)`: new→base の参照 DAG 向け（base が `__syan_visited` リストマクロで
-  visited ident **と自身のジェネリック和集合 `@bg`** をエクスポートし、new トレイトがスーパートレイトで
-  拡張する。`base::Visit<…>` は base 自身のアリティで参照するので、より広い new 和集合でも動く
-  （`visitor_inherit_arity.rs`））。
+  visited ident、自身のジェネリック和集合 `@bg`、そして全祖先チェーン `@an` をエクスポートし、new
+  トレイトがスーパートレイトで拡張する。`base::Visit<…>` は base 自身のアリティで参照するので、より広い
+  new 和集合でも動き（`visitor_inherit_arity.rs`）、**多段** `base => mid => New` も動く（New の `Driver`
+  が全ての推移的スーパートレイトを満たす；`visitor_inherit_multilevel.rs`））。
 - **ジェネリクス**: トレイトは visit 対象型のジェネリックパラメータの**和集合**でパラメータ化される
   （`Visit<S, Tokens>`）；各型は自分の部分集合を使うので、アリティ混在も動く（`visitor_generics.rs`）。
   注意: 和集合の全パラメータを使わないルート型で `.visit()` を呼ぶと turbofish が要ることがある。生成
