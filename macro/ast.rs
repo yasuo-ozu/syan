@@ -268,6 +268,46 @@ fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
     out
 }
 
+/// Peel a field type (containers + refs) to its innermost head ident — the same heads the visitor's
+/// `peel` follows. `None` for a non-path leaf. Used only by the "follows nothing" lint.
+fn peel_head(ty: &Type) -> Option<Ident> {
+    match ty {
+        Type::Reference(r) => peel_head(&r.elem),
+        Type::Group(g) => peel_head(&g.elem),
+        Type::Paren(p) => peel_head(&p.elem),
+        Type::Slice(s) => peel_head(&s.elem),
+        Type::Array(a) => peel_head(&a.elem),
+        Type::Path(tp) => {
+            let seg = tp.path.segments.last()?;
+            match seg.ident.to_string().as_str() {
+                "Box" | "Vec" | "VecDeque" | "Option" | "Punctuated" => {
+                    if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+                        for arg in &ab.args {
+                            if let GenericArgument::Type(t) = arg {
+                                return peel_head(t);
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => Some(seg.ident.clone()),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn for_each_field(data: &Data, mut f: impl FnMut(&Type)) {
+    match data {
+        Data::Struct(s) => s.fields.iter().for_each(|fld| f(&fld.ty)),
+        Data::Enum(e) => e
+            .variants
+            .iter()
+            .for_each(|v| v.fields.iter().for_each(|fld| f(&fld.ty))),
+        Data::Union(u) => u.fields.named.iter().for_each(|fld| f(&fld.ty)),
+    }
+}
+
 /// `#[derive(Ast)]` expansion.
 ///
 /// Emits:
@@ -286,6 +326,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     // `#[subast(..)]` allowlist of this type's sub-AST children (+ their resolvable paths). Carried
     // verbatim in the metadata macro; the visitor matches field heads against it.
     let subast = parse_subast(&input.attrs);
+    let has_subast_attr = input.attrs.iter().any(|a| a.path().is_ident("subast"));
     let field_heads = field_head_idents(input);
     for e in &subast {
         let key = e.matchkey();
@@ -295,6 +336,50 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
                 "`#[subast]` entry `{}` matches no field of `{}`",
                 key,
                 ident
+            );
+        }
+    }
+
+    // "Follows nothing" lint: with no `#[subast]` at all, a field whose (peeled) head looks like an
+    // AST node — UpperCamelCase, not this type itself (self-recursion is implicit), not a generic
+    // param, not `PhantomData`/`String` — will be silently treated as a leaf by every visitor. Warn
+    // so the omission is intentional; silence by adding `#[subast(..)]` (or `#[subast()]` to confirm
+    // there are none). Heuristic — it can flag a genuine leaf node type (e.g. one with only a `Span`
+    // field); `#[subast()]` documents that case.
+    if !has_subast_attr {
+        let self_name = ident.to_string();
+        let param_names: std::collections::HashSet<String> = input
+            .generics
+            .params
+            .iter()
+            .map(|p| match p {
+                GenericParam::Type(t) => t.ident.to_string(),
+                GenericParam::Const(c) => c.ident.to_string(),
+                GenericParam::Lifetime(l) => l.lifetime.ident.to_string(),
+            })
+            .collect();
+        let mut suspects: Vec<String> = Vec::new();
+        for_each_field(&input.data, |ty| {
+            if let Some(head) = peel_head(ty) {
+                let h = head.to_string();
+                let looks_ast = h != self_name
+                    && h != "PhantomData"
+                    && h != "String"
+                    && !param_names.contains(&h)
+                    && h.chars().next().is_some_and(|c| c.is_uppercase());
+                if looks_ast && !suspects.contains(&h) {
+                    suspects.push(h);
+                }
+            }
+        });
+        if !suspects.is_empty() {
+            emit_warning!(
+                ident,
+                "`{}` has field type(s) ({}) that look like AST children but no `#[subast]` is \
+                 declared, so a visitor will not traverse them; add `#[subast(..)]` to follow them \
+                 (or `#[subast()]` to confirm there are none)",
+                ident,
+                suspects.join(", ")
             );
         }
     }

@@ -14,13 +14,17 @@ mod ast {
     use core::marker::PhantomData;
     use syan::visit::Ast;
 
+    // `#[subast()]` confirms "no declared children here" (no visitor traverses these; `#[recurse]`
+    // renames them, which would make a real `#[subast]` entry match nothing).
     #[derive(Ast)]
+    #[subast()]
     pub enum Expr<S> {
         Stmt(Box<Stmt<S>>),
         Lit(PhantomData<S>),
     }
 
     #[derive(Ast)]
+    #[subast()]
     pub enum Stmt<S> {
         Expr(Box<Expr<S>>),
         Nop(PhantomData<S>),

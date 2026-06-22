@@ -17,7 +17,10 @@ mod ast {
     use core::marker::PhantomData;
     use syan::visit::Ast;
 
+    // `#[subast()]`: `Local` is intentionally a leaf and `Rec` is followed via implicit
+    // self-recursion, so there are no declared children to traverse.
     #[derive(Debug, Ast)]
+    #[subast()]
     pub enum Expr<S> {
         Lit(Local, PhantomData<S>), // field type valid only here
         Rec(Box<Expr<S>>),

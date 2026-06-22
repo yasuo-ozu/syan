@@ -5,18 +5,21 @@ use core::marker::PhantomData;
 use syan::visit::Ast;
 
 #[derive(Ast)]
+#[subast(crate::Stmt)]
 pub enum Expr<S> {
     Stmt(Box<Stmt<S>>),
     Other(PhantomData<S>),
 }
 
 #[derive(Ast)]
+#[subast(crate::Expr)]
 pub enum Stmt<S> {
     Expr(Box<Expr<S>>),
     Other(PhantomData<S>),
 }
 
 #[derive(Ast)]
+#[subast(crate::Expr)]
 pub struct Wrap<S> {
     pub inner: Expr<S>,
 }
