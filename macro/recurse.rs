@@ -1,4 +1,4 @@
-use crate::ast::to_snake;
+use crate::util::{peel, to_snake, Container};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::emit_warning;
@@ -435,59 +435,6 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
 // into trait dispatch. Single-root cycles only.
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
-enum RCont {
-    Direct,
-    Seq,
-    Opt,
-}
-
-fn r_first_ty_arg(seg: &PathSegment) -> Option<&Type> {
-    if let PathArguments::AngleBracketed(ab) = &seg.arguments {
-        ab.args.iter().find_map(|a| match a {
-            GenericArgument::Type(t) => Some(t),
-            _ => None,
-        })
-    } else {
-        None
-    }
-}
-
-/// Peel a field type to `(container, head ident, box-depth-around-head)` (mirrors the visitor's
-/// peel): `Box` transparent (counted), `Vec`/`VecDeque`/slice/array/`Punctuated` -> `Seq`,
-/// `Option` -> `Opt`.
-fn rpeel(ty: &Type) -> Option<(RCont, Ident, usize)> {
-    match ty {
-        Type::Reference(r) => rpeel(&r.elem),
-        Type::Paren(p) => rpeel(&p.elem),
-        Type::Group(g) => rpeel(&g.elem),
-        Type::Slice(s) => rpeel(&s.elem).map(|(_, h, b)| (RCont::Seq, h, b)),
-        Type::Array(a) => rpeel(&a.elem).map(|(_, h, b)| (RCont::Seq, h, b)),
-        Type::Path(tp) => {
-            let seg = tp.path.segments.last()?;
-            match seg.ident.to_string().as_str() {
-                "Box" => {
-                    let (c, h, b) = rpeel(r_first_ty_arg(seg)?)?;
-                    Some(match c {
-                        RCont::Direct => (RCont::Direct, h, b + 1),
-                        _ => (c, h, b),
-                    })
-                }
-                "Vec" | "VecDeque" | "Punctuated" => {
-                    let (_, h, b) = rpeel(r_first_ty_arg(seg)?)?;
-                    Some((RCont::Seq, h, b))
-                }
-                "Option" => {
-                    let (_, h, b) = rpeel(r_first_ty_arg(seg)?)?;
-                    Some((RCont::Opt, h, b))
-                }
-                _ => Some((RCont::Direct, seg.ident.clone(), 0)),
-            }
-        }
-        _ => None,
-    }
-}
-
 /// Dispatch one field of a cycle type: a back-edge to the root drives via `__R` (the depth param);
 /// a cross-edge to another cycle type calls that type's visit method; anything else is a leaf
 /// (`None`, caller binds `_`). `binding` is the destructured field (a `&Field`).
@@ -497,21 +444,21 @@ fn recurse_dispatch_field(
     cycle_types: &std::collections::HashSet<String>,
     root_name: &str,
 ) -> Option<TokenStream> {
-    let (cont, head, box_depth) = rpeel(ty)?;
-    let hs = head.to_string();
+    let p = peel(ty, &std::collections::HashSet::new())?;
+    let hs = p.head.to_string();
     let is_root = hs == root_name;
     if !is_root && !cycle_types.contains(&hs) {
         return None; // leaf
     }
-    let stars: TokenStream = (0..=box_depth).map(|_| quote!(*)).collect();
-    Some(match cont {
-        RCont::Direct => recurse_visit_one(is_root, &head, &stars, binding),
-        RCont::Seq => {
-            let inner = recurse_visit_one(is_root, &head, &stars, &quote!(__x));
+    let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
+    Some(match p.container {
+        Container::Direct => recurse_visit_one(is_root, &p.head, &stars, binding),
+        Container::Seq => {
+            let inner = recurse_visit_one(is_root, &p.head, &stars, &quote!(__x));
             quote!( for __x in #binding.iter() { #inner } )
         }
-        RCont::Opt => {
-            let inner = recurse_visit_one(is_root, &head, &stars, &quote!(__x));
+        Container::Opt => {
+            let inner = recurse_visit_one(is_root, &p.head, &stars, &quote!(__x));
             quote!( if let ::core::option::Option::Some(__x) = #binding { #inner } )
         }
     })

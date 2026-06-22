@@ -1,3 +1,4 @@
+use crate::util::{gargs, gparams, to_snake};
 use proc_macro2::{Literal, Span, TokenStream};
 use proc_macro_error::{abort, emit_warning};
 use std::collections::HashMap;
@@ -87,23 +88,6 @@ fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
     entries
 }
 
-/// Convert a CamelCase / PascalCase identifier to snake_case (for the hidden macro name).
-pub(crate) fn to_snake(ident: &Ident) -> String {
-    let s = ident.to_string();
-    let mut out = String::with_capacity(s.len() + 4);
-    for (i, ch) in s.chars().enumerate() {
-        if ch.is_uppercase() {
-            if i != 0 {
-                out.push('_');
-            }
-            out.extend(ch.to_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 /// Produce a cleaned copy of the input definition (all attributes stripped) so it can be embedded
 /// verbatim inside the metadata `macro_rules!` and re-parsed as a `syn::Item` by `__visitor_build`.
 fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
@@ -134,49 +118,6 @@ fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
         }
     }
     di
-}
-
-/// Generic params with defaults stripped (for `impl<...>` / `struct <...>` headers).
-fn gparams(g: &Generics) -> Vec<GenericParam> {
-    g.params
-        .iter()
-        .cloned()
-        .map(|mut p| {
-            match &mut p {
-                GenericParam::Type(t) => {
-                    t.eq_token = None;
-                    t.default = None;
-                }
-                GenericParam::Const(c) => {
-                    c.eq_token = None;
-                    c.default = None;
-                }
-                _ => {}
-            }
-            p
-        })
-        .collect()
-}
-
-/// Use-side generic args (idents / lifetimes).
-fn gargs(g: &Generics) -> Vec<TokenStream> {
-    g.params
-        .iter()
-        .map(|p| match p {
-            GenericParam::Lifetime(l) => {
-                let lt = &l.lifetime;
-                quote!(#lt)
-            }
-            GenericParam::Type(t) => {
-                let i = &t.ident;
-                quote!(#i)
-            }
-            GenericParam::Const(c) => {
-                let i = &c.ident;
-                quote!(#i)
-            }
-        })
-        .collect()
 }
 
 /// Build a `type_leak::Referrer` for the definition (the ordered list of field types that depend on
@@ -268,33 +209,10 @@ fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
     out
 }
 
-/// Peel a field type (containers + refs) to its innermost head ident — the same heads the visitor's
-/// `peel` follows. `None` for a non-path leaf. Used only by the "follows nothing" lint.
+/// Peel a field type (containers + refs) to its innermost head ident — the same heads the visitor
+/// follows. `None` for a non-path leaf. Used only by the "follows nothing" lint.
 fn peel_head(ty: &Type) -> Option<Ident> {
-    match ty {
-        Type::Reference(r) => peel_head(&r.elem),
-        Type::Group(g) => peel_head(&g.elem),
-        Type::Paren(p) => peel_head(&p.elem),
-        Type::Slice(s) => peel_head(&s.elem),
-        Type::Array(a) => peel_head(&a.elem),
-        Type::Path(tp) => {
-            let seg = tp.path.segments.last()?;
-            match seg.ident.to_string().as_str() {
-                "Box" | "Vec" | "VecDeque" | "Option" | "Punctuated" => {
-                    if let PathArguments::AngleBracketed(ab) = &seg.arguments {
-                        for arg in &ab.args {
-                            if let GenericArgument::Type(t) = arg {
-                                return peel_head(t);
-                            }
-                        }
-                    }
-                    None
-                }
-                _ => Some(seg.ident.clone()),
-            }
-        }
-        _ => None,
-    }
+    crate::util::peel(ty, &std::collections::HashSet::new()).map(|p| p.head)
 }
 
 fn for_each_field(data: &Data, mut f: impl FnMut(&Type)) {

@@ -6,6 +6,7 @@ mod ast;
 mod attribute;
 mod recurse;
 mod symbol;
+mod util;
 mod visitor;
 
 use crate::attribute::FindAttribute;
