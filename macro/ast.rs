@@ -37,6 +37,25 @@ impl SubastEntry {
     }
 }
 
+/// Re-root a `crate::…` path at `$crate::…` for emission inside the `#[macro_export]` metadata
+/// macro, so the path resolves to *this* (the defining) crate even when the metadata macro is
+/// expanded in a downstream crate building a visitor that drills through these types. Non-`crate`
+/// paths (`::abs`, `super`, `self`, bare) are emitted verbatim (only `crate`-rooted paths are
+/// downstream-portable — the recommended canonical form).
+fn crate_rooted_tokens(path: &Path) -> TokenStream {
+    let rooted = path.leading_colon.is_none()
+        && path
+            .segments
+            .first()
+            .is_some_and(|s| s.ident == "crate" && matches!(s.arguments, PathArguments::None));
+    if rooted {
+        let rest: Vec<&PathSegment> = path.segments.iter().skip(1).collect();
+        quote!( $crate #(:: #rest)* )
+    } else {
+        quote!( #path )
+    }
+}
+
 /// Collect the `#[subast(..)]` allowlist from the type's attributes. Two entries resolving to the
 /// same `matchkey` is an error (a bare field head can't disambiguate them — alias one).
 fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
@@ -282,7 +301,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     let subast_tokens: Vec<TokenStream> = subast
         .iter()
         .map(|e| {
-            let path = &e.path;
+            let path = crate_rooted_tokens(&e.path);
             let key = e.matchkey();
             quote!( #path as #key )
         })

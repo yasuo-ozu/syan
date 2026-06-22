@@ -28,3 +28,18 @@ pub mod ast {
 pub mod visit {
     syan::visit::visitor!(crate::ast::Expr, crate::ast::Stmt);
 }
+
+/// Acyclic types whose `#[subast]` paths are `crate::`-rooted, so a *downstream* crate can build a
+/// visitor that drills through `Wrap` and resolves its `#[subast]` child in *this* crate (the
+/// metadata macro `$crate`-roots them). Exercised by `tests/cross_crate_drill.rs`.
+pub mod drillable {
+    use core::marker::PhantomData;
+    use syan::visit::Ast;
+
+    #[derive(Debug, Ast)]
+    pub struct Inner<S>(pub PhantomData<S>);
+
+    #[derive(Debug, Ast)]
+    #[subast(crate::drillable::Inner)]
+    pub struct Wrap<S>(pub Inner<S>);
+}
