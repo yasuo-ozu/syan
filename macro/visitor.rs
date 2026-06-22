@@ -179,6 +179,8 @@ impl Parse for BuildInput {
                     rest = paths.into_iter().collect();
                 }
                 "ast" => just = Some(syn::parse2(content)?),
+                // Carried in the metadata ping-pong; consumed by drilling in a later stage.
+                "subast" | "fetching" | "subdone" => {}
                 other => {
                     return Err(Error::new(name.span(), format!("unknown section @{other}")))
                 }

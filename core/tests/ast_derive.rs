@@ -21,6 +21,16 @@ pub struct Wrap<S> {
     pub inner: Expr<S>,
 }
 
+#[derive(Ast)]
+pub struct Inner<S>(pub PhantomData<S>);
+
+// `#[subast(..)]` records this type's sub-AST children + their resolvable paths.
+#[derive(Ast)]
+#[subast(self::Inner)]
+pub struct Outer<S> {
+    pub child: Inner<S>,
+}
+
 /// `Ast` (the marker trait) is implemented.
 fn assert_is_ast<T: Ast>() {}
 
@@ -37,7 +47,7 @@ fn metadata_macro_round_trips_definition() {
     // definition into a real (renamed) type, proving the metadata macro carries a syn-parseable
     // copy of the original definition and that the path-callback invocation works.
     macro_rules! rebuild {
-        (@ast { $item:item }) => {
+        (@ast { $item:item } @subast { $($subast:tt)* }) => {
             // The forwarded tokens parse as a single item; re-emit it in a fresh module so it does
             // not clash with the original `Expr`.
             #[allow(dead_code)]
@@ -52,4 +62,20 @@ fn metadata_macro_round_trips_definition() {
     // `Expr` enum (type namespace).
     Expr! { @ast rebuild {} }
     let _ = rebuilt::Expr::Other(PhantomData::<()>);
+}
+
+#[test]
+fn subast_allowlist_round_trips() {
+    // The metadata macro carries the `#[subast]` allowlist as `<path> as <matchkey>` entries. The
+    // callback matches a single `$path:path as $key:ident`, proving both the format and that the
+    // path resolves to a real type.
+    macro_rules! check {
+        (@ast { $item:item } @subast { $path:path as $key:ident }) => {
+            use $path as SubastAlias;
+            const SUBAST_KEY: &str = stringify!($key);
+        };
+    }
+    Outer! { @ast check {} }
+    let _: Option<SubastAlias<()>> = None;
+    assert_eq!(SUBAST_KEY, "Inner");
 }
