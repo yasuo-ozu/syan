@@ -1,0 +1,7 @@
+error: `#[subast]` cycle through unlisted intermediate `A`: it cannot be drilled inline. List one of the cycle's types in `visitor!(..)` so a method call breaks the recursion
+  --> tests/ui/drill_cycle.rs:24:5
+   |
+24 |     syan::visit::visitor!(super::Expr);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
