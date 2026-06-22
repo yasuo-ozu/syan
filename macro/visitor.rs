@@ -187,6 +187,10 @@ struct BuildInput {
     nonce: TokenStream,
     visited: Vec<Path>,
     inherited: Vec<Ident>,
+    /// The base visitor's generic-param union (when inheriting), supplied by the base's
+    /// `__syan_visited` macro, so the new trait can reference `base::Visit<..>` with the *base's*
+    /// arity instead of the new union's.
+    base_generics: Vec<GenericParam>,
     /// Path of the type whose `@ast`/`@subast` trail in this bounce (so the fetched def is recorded
     /// under the path it was fetched by). Empty before any type is fetched.
     fetching: Option<Path>,
@@ -253,6 +257,7 @@ impl Parse for BuildInput {
         let mut nonce = TokenStream::new();
         let mut visited = Vec::new();
         let mut inherited = Vec::new();
+        let mut base_generics = Vec::new();
         let mut fetching = None;
         let mut done = Vec::new();
         let mut rest = Vec::new();
@@ -277,6 +282,15 @@ impl Parse for BuildInput {
                 }
                 // `@inherited` is the carried set; `@inh` is appended by a base's visited-list macro.
                 "inherited" | "inh" => inherited.extend(parse_idents(content)?),
+                // `@baseg` is the carried base generics; `@bg` is appended by a base's macro.
+                "baseg" | "bg" => {
+                    if !content.is_empty() {
+                        base_generics = Punctuated::<GenericParam, Token![,]>::parse_terminated
+                            .parse2(content)?
+                            .into_iter()
+                            .collect();
+                    }
+                }
                 "fetching" => {
                     if !content.is_empty() {
                         fetching = Some(syn::parse2(content)?);
@@ -302,6 +316,7 @@ impl Parse for BuildInput {
             nonce,
             visited,
             inherited,
+            base_generics,
             fetching,
             done,
             rest,
@@ -372,6 +387,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             nonce,
             visited,
             inherited,
+            base_generics,
             done,
             rest,
             ..
@@ -389,6 +405,7 @@ pub fn build(input: TokenStream) -> TokenStream {
                     @nonce { #nonce }
                     @visited { #(#visited),* }
                     @inherited { #(#inherited)* }
+                    @baseg { #(#base_generics),* }
                     @fetching { #next }
                     @done { #done_tokens }
                     @rest { #(#rest),* }
@@ -1003,6 +1020,7 @@ struct VType {
 }
 
 /// Generate every item for one mutability "side" (`Visit`/`VisitMut`, etc.).
+#[allow(clippy::too_many_arguments)]
 fn gen_side(
     mutable: bool,
     vtypes: &[VType],
@@ -1010,6 +1028,8 @@ fn gen_side(
     g_args: &[TokenStream],
     g_def: &TokenStream,
     g_use: &TokenStream,
+    base_g_use: &TokenStream,
+    base_g_params: &[GenericParam],
     base: &Option<Path>,
 ) -> TokenStream {
     let suffix = if mutable { "Mut" } else { "" };
@@ -1103,7 +1123,7 @@ fn gen_side(
         .collect();
 
     quote! {
-        pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #g_use } {
+        pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #base_g_use } {
             #(for s in &sides) {
                 fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                     #{&s.method}(self, i)
@@ -1155,8 +1175,10 @@ fn gen_side(
             }
         }
         // The new trait extends the base, so Driver must satisfy the base too (via base defaults).
+        // Quantified over only the base's params (+ the wrapped hook) so a wider new-union param
+        // does not become an unconstrained impl param.
         #(if let Some(b) = base) {
-            impl< #(#g_params,)* #p_h: #hook_tr #g_use > #b::#visit_tr #g_use for #driver<#p_h> {}
+            impl< #(#base_g_params,)* #p_h > #b::#visit_tr #base_g_use for #driver<#p_h> {}
         }
 
         #(for s in &sides) {
@@ -1260,6 +1282,37 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             }
         }
     }
+    // When inheriting, the union must also contain the base's generic params (so the new trait can
+    // declare them and reference `base::Visit<base params>`). `base_g_use` is the base's args named
+    // by the union's idents — used for every `base::Visit<..>` reference (its own arity, which may
+    // differ from the new union's).
+    for bp in &st.base_generics {
+        if seen.insert(param_name(bp)) {
+            g_params.push(bp.clone());
+        }
+    }
+    let by_name: HashMap<String, TokenStream> =
+        g_params.iter().map(|p| (param_name(p), param_use(p))).collect();
+    let base_args: Vec<TokenStream> = st
+        .base_generics
+        .iter()
+        .map(|bp| by_name[&param_name(bp)].clone())
+        .collect();
+    let base_g_use = if base_args.is_empty() {
+        quote!()
+    } else {
+        quote!( < #(#base_args),* > )
+    };
+    // The base's own params (a subset of the union) — used to quantify the empty `base::Visit` impl
+    // for `Driver` over exactly the base's params, so a wider new-union param stays out of it (it
+    // would otherwise be an unconstrained impl param: E0207).
+    let base_names: HashSet<String> = st.base_generics.iter().map(param_name).collect();
+    let base_g_params: Vec<GenericParam> = g_params
+        .iter()
+        .filter(|p| base_names.contains(&param_name(p)))
+        .cloned()
+        .collect();
+
     let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
     let has_g = !g_params.is_empty();
     let g_def = if has_g {
@@ -1316,8 +1369,12 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         })
         .collect();
 
-    let shared = gen_side(false, &vtypes, &g_params, &g_args, &g_def, &g_use, &st.base);
-    let mutable = gen_side(true, &vtypes, &g_params, &g_args, &g_def, &g_use, &st.base);
+    let shared = gen_side(
+        false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &base_g_params, &st.base,
+    );
+    let mutable = gen_side(
+        true, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &base_g_params, &st.base,
+    );
 
     let base = &st.base;
 
@@ -1337,7 +1394,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         #[doc(hidden)]
         macro_rules! #vmacro {
             (@visited $cb:path { $($pre:tt)* }) => {
-                $cb ! { $($pre)* @inh { #(#all_visible)* } }
+                $cb ! { $($pre)* @inh { #(#all_visible)* } @bg { #(#g_params),* } }
             };
         }
         #[doc(hidden)]
