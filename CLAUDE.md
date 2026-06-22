@@ -58,21 +58,25 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **Cross-crate** validated: visited types are named by the full path given to `visitor!(...)`, so a
   downstream crate needs no import (`rust/tests/cross_crate.rs`); a downstream-built visitor can also
   drill through an upstream crate's types (`$crate`-rooted `#[subast]`; `rust/tests/cross_crate_drill.rs`).
+- **`#[recurse(visit)]`** (shipped): a **depth-generic** visitor over a `#[recurse]` *cycle*.
+  `#[recurse]` rewrites the cycle's back-edges to the root into the generic `__Rec` param and each
+  nesting level into a distinct type, so the visitor is parameterized by the remaining depth: a
+  `Visit<S…>` trait with `visit_*<R>` methods (+ free `visit_*` drive fns), and a `VisitRec<S…, V>`
+  dispatch trait implemented by the root's depth chain (drives the root visit) and by the terminator
+  (no-op) — turning the depth recursion into trait dispatch on the back-edge. `XxxNode` aliases name
+  the depth-generic node types. Trait-based only (a closure can't be generic over the depth);
+  single-root cycles only. Tests: `visitor_recurse_cycle.rs` (root / cross-edge / back-edge /
+  self-recursive root).
 
 ## Known gaps / limitations
 
-- **Visitor over a `#[recurse]` *cycle*** (open — large co-design, not a quick bridge): two
-  compounding blockers. (1) `#[derive(Ast)]` inside `#[recurse]` applies to the *renamed* internal
-  type (`__ExprRec`), so its metadata macro is reachable only under that name, not the public alias
-  (`crate::ast::Expr!` finds no macro — `visitor_recurse_gap.rs` pins this). (2) Even with an
-  alias-reachable metadata macro, `#[recurse]` rewrites the cycle's fields: self/root references
-  become the generic `__Rec` param and cross-references become `__StmtRec<…, __Rec>`. So the field
-  *heads* no longer match the user's `#[subast]` matchkeys (`Stmt` vs `__StmtRec`) — every field is a
-  leaf — and each nesting level is a *different* concrete type (different depth arg), so a single
-  `visit_stmt(&Stmt<S>)` can't type-check against `&__StmtRec<S, __Rec>`. Visiting through the cycle
-  needs `#[recurse]` to co-transform the `#[subast]` matchkeys/paths **and** a depth-generic visitor
-  (`visit_*<R>(… __Rec = R …)`). **Drill-in over *acyclic* types in a `#[recurse]` module works
-  today** (recurse leaves them untouched) — `visitor_recurse_drill.rs`.
+- **`visitor!(…)` over a `#[recurse]` cycle is still rejected** — use `#[recurse(visit)]` (above)
+  instead. The `visitor!()` path can't bridge to a recurse'd cycle: `#[derive(Ast)]` applies to the
+  renamed internal type so `crate::ast::Expr!` finds no macro (`visitor_recurse_gap.rs`), and the
+  rewritten fields (`__Rec`/`__StmtRec<…,__Rec>`) don't match `#[subast]` matchkeys. **Drill-in over
+  *acyclic* types in a `#[recurse]` module works** (`visitor_recurse_drill.rs`). Multi-root cycles
+  (several self-referential types) get no `#[recurse(visit)]` visitor (back-edges collapse to one
+  ambiguous `__Rec`).
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.
@@ -281,7 +285,7 @@ lets the `Leaker` be dropped, per the standing TODO).
       Done (`visitor_inherit_multilevel.rs`).
 - [x] ~~"Follows nothing" lint.~~ Done — a heuristic warning (nightly-visible) when a type with no
       `#[subast]` has an AST-looking field; `#[subast()]` opts out.
-- [ ] Visitor over a `#[recurse]` cycle — large co-design (see "Known gaps"): `#[recurse]` must
-      co-transform `#[subast]` matchkeys/paths to the renamed internal types, expose an
-      alias-reachable metadata macro, and the visitor must become depth-generic over `__Rec`. This is
-      a from-scratch depth-generic visitor subsystem, not a bounded fix.
+- [x] ~~Visitor over a `#[recurse]` cycle.~~ Done — `#[recurse(visit)]` emits a depth-generic
+      visitor (`Visit`/`VisitRec`/`visit_*`/`XxxNode`); single-root cycles, trait-based
+      (`visitor_recurse_cycle.rs`). The `visitor!()` path over a recurse cycle remains unsupported
+      (see "Known gaps").

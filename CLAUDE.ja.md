@@ -58,20 +58,22 @@ AST 型定義から `syn` スタイルのビジターを生成する。
 - **クレート跨ぎ**を検証済み: visit 対象型は `visitor!(...)` に渡したフルパスで名指しされるので、下流
   クレートで import 不要（`rust/tests/cross_crate.rs`）。下流で構築したビジターが上流クレートの型を
   ドリルスルーすることも可能（`$crate` 根付けの `#[subast]`；`rust/tests/cross_crate_drill.rs`）。
+- **`#[recurse(visit)]`**（実装済み）: `#[recurse]` の*循環*に対する**深さジェネリック**ビジター。
+  `#[recurse]` は循環のルートへの後退辺をジェネリック `__Rec` に、各入れ子レベルを別の型に書き換えるので、
+  ビジターは残りの深さでパラメータ化される: `visit_*<R>` メソッドを持つ `Visit<S…>` トレイト（＋下降用の
+  フリー関数 `visit_*`）と、ルートの深さチェーン（ルート visit を駆動）と終端（no-op）が実装する
+  `VisitRec<S…, V>` ディスパッチトレイトにより、深さ再帰を後退辺でのトレイトディスパッチに変える。
+  `XxxNode` エイリアスが深さジェネリックなノード型を名指す。トレイトベースのみ（クロージャは深さに対して
+  ジェネリックになれない）；単一ルートの循環のみ。テスト: `visitor_recurse_cycle.rs`。
 
 ## 既知のギャップ / 制限
 
-- **`#[recurse]` の*循環*上のビジター**（未対応 — 橋渡しでは済まない大規模な協調設計）: 2 つの障害が
-  重なる。(1) `#[recurse]` 内の `#[derive(Ast)]` は*リネーム後*の内部型（`__ExprRec`）に適用されるため、
-  メタデータマクロはその名前でしか到達できず公開エイリアスでは到達できない（`crate::ast::Expr!` は
-  マクロを見つけられない — `visitor_recurse_gap.rs` が固定）。(2) エイリアスで到達可能にしても、`#[recurse]`
-  は循環のフィールドを書き換える: 自己/ルート参照はジェネリック `__Rec` パラメータに、相互参照は
-  `__StmtRec<…, __Rec>` になる。よってフィールドの*ヘッド*がユーザの `#[subast]` matchkey と一致しなくなり
-  （`Stmt` 対 `__StmtRec`）すべてリーフになる上、入れ子の各レベルが*別の*具体型（別の深さ引数）なので、
-  単一の `visit_stmt(&Stmt<S>)` は `&__StmtRec<S, __Rec>` に型が合わない。循環を通り抜けて visit するには、
-  `#[recurse]` が `#[subast]` の matchkey/パスを co-transform し、ビジターが深さジェネリック
-  （`visit_*<R>(… __Rec = R …)`）になる必要がある。**`#[recurse]` モジュール内の*非循環*型に対する drill-in
-  は現状で動く**（recurse はそれらに触れない）— `visitor_recurse_drill.rs`。
+- **`#[recurse]` 循環に対する `visitor!(…)` は依然非対応** — 代わりに `#[recurse(visit)]`（上記）を使う。
+  `visitor!()` 経路は recurse 循環に橋渡しできない: `#[derive(Ast)]` がリネーム後の内部型に適用されるため
+  `crate::ast::Expr!` はマクロを見つけられず（`visitor_recurse_gap.rs`）、書き換え後のフィールド
+  （`__Rec`/`__StmtRec<…,__Rec>`）が `#[subast]` matchkey と一致しない。**`#[recurse]` モジュール内の*非循環*
+  型に対する drill-in は動く**（`visitor_recurse_drill.rs`）。多ルート循環（複数の自己参照型）には
+  `#[recurse(visit)]` ビジターは出ない（後退辺が 1 つの曖昧な `__Rec` に潰れる）。
 - **末尾セグメントが同じ 2 つの visited 型**（`visitor!(a::Foo, b::Foo)`）: 生成名はすべて末尾セグメントを
   鍵にするので衝突する。現在は明確なビルドエラー（`visitor_diagnostics.rs`）；真の共存にはフルパスで
   曖昧性解消した名前付けが要る。
@@ -272,7 +274,6 @@ name-list ＋ 現在のドリル閉包だけ。トレイトの**和集合ジェ�
       完了（`visitor_inherit_multilevel.rs`）。
 - [x] ~~「何も辿らない」リント。~~ 完了 — `#[subast]` の無い型に AST らしきフィールドがあると警告する
       ヒューリスティック（nightly で表示）；`#[subast()]` でオプトアウト。
-- [ ] `#[recurse]` の循環上のビジター — 大規模な協調設計（「既知のギャップ」参照）: `#[recurse]` が
-      `#[subast]` の matchkey/パスをリネーム後の内部型へ co-transform し、エイリアスで到達可能な
-      メタデータマクロを出し、ビジターが `__Rec` に対して深さジェネリックになる必要がある。ボトムアップの
-      バウンドされた修正ではなく、ゼロからの深さジェネリックなビジターサブシステム。
+- [x] ~~`#[recurse]` の循環上のビジター。~~ 完了 — `#[recurse(visit)]` が深さジェネリックなビジター
+      （`Visit`/`VisitRec`/`visit_*`/`XxxNode`）を出す；単一ルート循環、トレイトベース
+      （`visitor_recurse_cycle.rs`）。recurse 循環に対する `visitor!()` 経路は依然非対応（「既知のギャップ」）。
