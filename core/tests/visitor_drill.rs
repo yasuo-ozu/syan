@@ -63,3 +63,19 @@ fn struct_visitor_has_expr_and_type_methods_only() {
     assert_eq!(c.exprs, 1);
     assert_eq!(c.types, 1, "reached via drilling, not a visit_cast hop");
 }
+
+#[test]
+fn mut_visitor_reaches_type_through_cast() {
+    // The mut side mirrors drilling: `visit_expr_mut` drills through `Cast` to `visit_type_mut`.
+    struct C(usize);
+    impl<S> visit::VisitMut<S> for C {
+        fn visit_type_mut(&mut self, i: &mut Type<S>) {
+            self.0 += 1;
+            visit::visit_type_mut(self, i);
+        }
+    }
+    let mut ast = sample();
+    let mut c = C(0);
+    ast.visit_mut(&mut c);
+    assert_eq!(c.0, 1, "mut drilling reached Type through Cast");
+}
