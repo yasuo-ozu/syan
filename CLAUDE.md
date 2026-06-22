@@ -20,8 +20,20 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   type: a `Visit`/`VisitMut` trait method, a free `visit_*`/`visit_*_mut` traversal fn, and
   **inherent** `visit`/`visit_mut` methods on the type (no trait import at the call site; the
   visitor must be generated in the types' crate). Type args are paths resolvable from inside the
-  visitor module (`super::Expr`, `crate::ast::Expr`). Direct and `Box`-wrapped AST fields are
-  traversed; other heads (incl. `Vec`/`Option`) are currently leaves — see the drill-in plan.
+  visitor module (`super::Expr`, `crate::ast::Expr`).
+- **`#[subast(<path> [as Alias])]` + drill-in** (shipped): `#[derive(Ast)]` takes a type-level
+  `#[subast]` allowlist of the type's Ast children (+ resolvable paths), carried in the metadata as
+  `@subast { path as matchkey, … }`. A field is *followed* iff its container-peeled head is a
+  `#[subast]` matchkey or the type's own ident (self-recursion implicit); everything else is a leaf.
+  `visit_*` is generated **only** for `visitor!(…)`-listed types; a followed field whose head is
+  listed lowers to `this.visit_<head>(…)`, a followed **unlisted intermediate** is **drilled through
+  inline** (its def destructured, recursing into *its* `#[subast]` fields) and gets no `visit_*`. A
+  cycle of unlisted intermediates is a build error; a finite dead-end is a no-op. Tests:
+  `visitor_drill*.rs`. (See "Drill-in — as implemented" below.)
+- **Containers** (shipped): `Box` (transparent; tracked as box-depth for `&**` drill deref), `Vec` /
+  `VecDeque` / slice / array / `Punctuated` (`for x in …iter()/iter_mut()`), `Option`
+  (`if let Some(x) = …`, dereffing through any wrapping `Box`). Nested containers (`Vec<Option<T>>`)
+  are unsupported and rejected with a clear error.
 - **Inputs** (`IntoVisitor`/`IntoVisitorMut` selector design): struct visitors (via `&mut`), single
   closures, and **tuples of closures** (arity 2..=8) running in **one** traversal via a shallow
   `Hook` + single-pass `Driver` + `Chain`.
@@ -35,17 +47,52 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **Cross-crate** validated: visited types are named by the full path given to `visitor!(...)`, so a
   downstream crate needs no import (`rust/tests/cross_crate.rs`).
 
-## Known gaps
+## Known gaps / limitations
 
-- **Containers + drill-in** are the open feature — the next plan below.
-- **Visitor over `#[recurse]` aliases**: `#[derive(Ast)]` inside `#[recurse]` applies to the
-  *renamed* internal type, so its metadata macro is under that name, not the public alias. The `Ast`
-  marker still holds for the alias (`ast_recurse.rs`); building a visitor over the alias needs the
-  metadata macro reachable via the alias name — future.
+- **Visitor over a `#[recurse]` *cycle*** (open): `#[derive(Ast)]` inside `#[recurse]` applies to the
+  *renamed* internal type, so its metadata macro is reachable only under that name, not the public
+  alias (`crate::ast::Expr!` finds no macro — `visitor_recurse_gap.rs` pins this). Even if bridged,
+  `#[recurse]` rewrites the cycle's back-edges to a generic `__Rec` param, so they are not
+  name-resolvable traversal edges — visiting *through* the cycle needs recurse-aware co-design.
+  **Drill-in over *acyclic* types in a `#[recurse]` module works today** (recurse leaves them
+  untouched) — `visitor_recurse_drill.rs`.
+- **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
+  off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
+  coexistence would need full-path-disambiguated names.
+- **Inheritance with differing generic arity**: `visitor!(base => New)` where `New`'s union
+  introduces a generic param the base lacks emits the base supertrait with the wrong arity (opaque
+  `E0107`). The base's generic union is not communicated through `__syan_visited` — future.
+- **Reserved generated idents**: a visited type whose generic param is literally named
+  `__V`/`__T`/`__H`/`__F`/`__A`/`__B` (or `__F0`…) collides with generated helpers (call-site
+  hygiene). Avoid those names; a mixed-site-hygiene fix is future.
+- **Nested containers** (`Vec<Option<T>>`) are unsupported (clear build error); wrap the inner part
+  in its own `#[derive(Ast)]` type.
+- The `Leaker` + `Repeater<N>` impls from `#[derive(Ast)]` are now only an external-metadata
+  fallback; the visitor/drill path uses `#[subast]`-resolved paths (see TODO).
 
 ---
 
-# Drill-in implementation plan (selective `visit_*` + transitive drill-through)
+# Drill-in — as implemented (selective `visit_*` + transitive drill-through)
+
+> **Implemented.** The design below is the rationale; it is shipped in `macro/ast.rs` +
+> `macro/visitor.rs` and tested in `core/tests/visitor_drill*.rs` + `visitor_diagnostics.rs`. A few
+> deltas from the plan text, chosen during implementation:
+>
+> - **Metadata shape (vs. "per-field records").** The metadata macro carries the *cleaned definition*
+>   plus `@subast { path as matchkey, … }` — **not** per-field `@SELF`/`@leaf`/container/accessor
+>   records. `__visitor_build` re-derives container/accessor/self/leaf from the def itself (`peel`)
+>   and matches field heads against the `#[subast]` entries. So there is **no `@SELF` token**: a
+>   visited type's own path is known from `visitor!(…)` (`path_of`), a self-referential field is a
+>   plain method call, and a drilled intermediate's scrutinee is its `#[subast]`-resolved path.
+> - **Effective head.** A followed field's method/drill decision uses the matched `#[subast]` entry's
+>   path **last segment** (the real type name), not the field's possibly-aliased head — so
+>   `#[subast(crate::Real as Aliased)]` on a *visited* `Real` dispatches to `visit_real`.
+> - **Pathing.** `#[subast]` paths are emitted verbatim; canonical `crate::`-rooted paths are
+>   recommended (they resolve from the visitor module same-crate). `$crate`-rooting for a visitor
+>   built **downstream** over an upstream crate's `#[subast]` types is **not yet** done (the cross-crate
+>   test builds the visitor in the defining crate).
+> - **Lints.** The `unused entry` warning is implemented; the optional "this type follows nothing"
+>   lint is **not**.
 
 ## Context
 
@@ -215,3 +262,11 @@ lets the `Leaker` be dropped, per the standing TODO).
 # TODOs
 
 - [ ] Do not define leaker type in output of `#[derive(Ast)]`, instead implement Repeater directly for macro target.
+- [ ] Inheritance: communicate the base's generic-param union through `__syan_visited` so a `base => New`
+      visitor can emit the base supertrait with the base's arity (fixes the opaque `E0107`).
+- [ ] Hygiene: mint generated helper params (`__V`/`__T`/`__H`/`__F`/`__A`/`__B`/`__F0…`) with
+      `Span::mixed_site()` so a visited type may use those names.
+- [ ] Pathing: `$crate`-root `#[subast]` paths in the metadata macro so a **downstream** crate can
+      build a visitor that drills through an upstream crate's types.
+- [ ] Visitor over a `#[recurse]` cycle (alias-reachable metadata macro + `__Rec` back-edge handling).
+- [ ] Optional "this `#[derive(Ast)]` type follows nothing" lint.
