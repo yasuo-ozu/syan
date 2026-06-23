@@ -5,8 +5,8 @@ use proc_macro_error::{abort, emit_warning};
 use std::collections::{HashMap, HashSet};
 use syn::{
     punctuated::Punctuated, AngleBracketedGenericArguments, Fields, FieldsNamed, FieldsUnnamed,
-    FnArg, GenericArgument, GenericParam, Generics, ImplItem, Item, ItemMod, Path, PathArguments,
-    PathSegment, ReturnType, Token, Type, TypePath, Visibility,
+    FnArg, GenericArgument, GenericParam, Generics, ImplItem, Item, ItemMod, PathArguments,
+    ReturnType, Token, Type, TypePath, Visibility,
 };
 use template_quote::quote;
 
@@ -191,30 +191,7 @@ fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
                             vec![]
                         };
                     let rec = &ctx.rec_param;
-                    let mut args: Punctuated<GenericArgument, Token![,]> =
-                        existing.into_iter().collect();
-                    args.push(syn::parse_quote!(#rec));
-                    return Type::Path(TypePath {
-                        qself: None,
-                        path: Path {
-                            leading_colon: None,
-                            segments: {
-                                let mut s = Punctuated::new();
-                                s.push(PathSegment {
-                                    ident: internal.clone(),
-                                    arguments: PathArguments::AngleBracketed(
-                                        AngleBracketedGenericArguments {
-                                            colon2_token: None,
-                                            lt_token: Default::default(),
-                                            args,
-                                            gt_token: Default::default(),
-                                        },
-                                    ),
-                                });
-                                s
-                            },
-                        },
-                    });
+                    return syn::parse_quote!( #internal < #(#existing,)* #rec > );
                 }
             }
             // Non-cycle path: recurse into generic args
@@ -638,57 +615,41 @@ fn generate_recurse_visitor(
         Span::call_site(),
     );
 
-    // Cycle types in declaration order, paired with their internal (renamed) idents.
-    let cyc: Vec<(&Ident, &Ident, &Item)> = items
+    // Per cycle type, the data the generated items need — computed here in Rust, emitted by the
+    // `#(for …)` templates below. `own_use` spells the type's `__*Rec` node; `extra_decl` are its
+    // params beyond the root's (made generic on its `visit_*`); `body` drives its followed fields.
+    struct CycInfo {
+        vm: Ident,
+        node: Ident,
+        internal: Ident,
+        own_use: Vec<TokenStream>,
+        extra_decl: Vec<TokenStream>,
+        body: TokenStream,
+    }
+    let infos: Vec<CycInfo> = items
         .iter()
         .filter_map(|it| {
-            let id = match it {
+            let orig = match it {
                 Item::Enum(e) => &e.ident,
                 Item::Struct(s) => &s.ident,
                 _ => return None,
             };
-            if !cycle_types.contains(&id.to_string()) {
+            if !cycle_types.contains(&orig.to_string()) {
                 return None;
             }
-            Some((id, &internal_names[&id.to_string()], it))
+            let internal = internal_names[&orig.to_string()].clone();
+            let (own_use, extra_decl) =
+                type_param_tokens(item_generics(it).expect("cycle item"), root_keys);
+            Some(CycInfo {
+                vm: Ident::new(&format!("visit_{}", to_snake(orig)), Span::call_site()),
+                node: Ident::new(&format!("{orig}Node"), Span::call_site()),
+                body: recurse_visit_body(it, &internal, cycle_types, root_name),
+                internal,
+                own_use,
+                extra_decl,
+            })
         })
         .collect();
-
-    // Per cycle type: public node alias, the trait method, and the free drive fn.
-    let node_aliases = cyc.iter().map(|(orig, internal, _)| {
-        let node = Ident::new(&format!("{orig}Node"), Span::call_site());
-        quote!(
-            #[doc = "Depth-generic node type for the visitor (an alias of the internal recurse type)."]
-            pub use #internal as #node;
-        )
-    });
-    let methods = cyc.iter().map(|(orig, internal, it)| {
-        let vm = Ident::new(&format!("visit_{}", to_snake(orig)), Span::call_site());
-        let generics = item_generics(it).expect("cycle item is an enum or struct");
-        let (own_use, extra_decl) = type_param_tokens(generics, root_keys);
-        quote! {
-            fn #vm< #(#extra_decl,)* __R: VisitRec< #(#gen_use,)* Self > >(
-                &mut self,
-                i: & #internal < #(#own_use,)* __R >,
-            ) where Self: ::core::marker::Sized {
-                #vm(self, i)
-            }
-        }
-    });
-    let drives = cyc.iter().map(|(orig, internal, it)| {
-        let vm = Ident::new(&format!("visit_{}", to_snake(orig)), Span::call_site());
-        let generics = item_generics(it).expect("cycle item is an enum or struct");
-        let (own_use, extra_decl) = type_param_tokens(generics, root_keys);
-        let body = recurse_visit_body(it, internal, cycle_types, root_name);
-        quote! {
-            pub fn #vm< #(#gen_decl,)* #(#extra_decl,)* __V: Visit< #(#gen_use),* >, __R: VisitRec< #(#gen_use,)* __V > >(
-                v: &mut __V,
-                i: & #internal < #(#own_use,)* __R >,
-            ) {
-                #body
-            }
-        }
-    });
 
     quote! {
         /// Dispatch trait turning the cycle's depth recursion into trait calls: implemented by the
@@ -700,12 +661,29 @@ fn generate_recurse_visitor(
         /// Depth-generic visitor over the `#[recurse]` cycle. Implement the `visit_*` methods
         /// (each generic over the remaining depth `__R`); call the free `visit_*` to descend.
         pub trait Visit< #(#gen_decl),* > {
-            #(#methods)*
+            #(for info in &infos) {
+                fn #{&info.vm}< #(for e in &info.extra_decl) { #e, } __R: VisitRec< #(#gen_use,)* Self > >(
+                    &mut self,
+                    i: & #{&info.internal} < #(for u in &info.own_use) { #u, } __R >,
+                ) where Self: ::core::marker::Sized {
+                    #{&info.vm}(self, i)
+                }
+            }
         }
 
-        #(#drives)*
+        #(for info in &infos) {
+            pub fn #{&info.vm}< #(#gen_decl,)* #(for e in &info.extra_decl) { #e, } __V: Visit< #(#gen_use),* >, __R: VisitRec< #(#gen_use,)* __V > >(
+                v: &mut __V,
+                i: & #{&info.internal} < #(for u in &info.own_use) { #u, } __R >,
+            ) {
+                #{&info.body}
+            }
+        }
 
-        #(#node_aliases)*
+        #(for info in &infos) {
+            #[doc = "Depth-generic node type for the visitor (an alias of the internal recurse type)."]
+            pub use #{&info.internal} as #{&info.node};
+        }
 
         impl< #(#gen_decl,)* __V: Visit< #(#gen_use),* >, __R: VisitRec< #(#gen_use,)* __V > >
             VisitRec< #(#gen_use,)* __V > for #root_internal < #(#gen_use,)* __R >
