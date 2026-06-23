@@ -1,7 +1,0 @@
-error: proc-macro derive panicked
-  --> tests/ui/audit_parse_where_clause_panic.rs:13:10
-   |
-13 | #[derive(Parse)]
-   |          ^^^^^
-   |
-   = help: message: assertion failed: generics.where_clause.is_none()

@@ -1,4 +1,5 @@
 use proc_macro2::{Span, TokenStream, TokenTree};
+use proc_macro_error::abort;
 use syn::parse::{Parse, ParseStream};
 use syn::*;
 use template_quote::quote;
@@ -70,9 +71,11 @@ impl Parse for SymbolArgs {
     }
 }
 
-fn char_to_type_path(c: char, syan_path: &Ident, span: proc_macro2::Span) -> TokenStream {
+/// Maps one character to its `chars::*` type path, or `None` for any character the symbol table does
+/// not cover — so the caller can emit a clean spanned error instead of panicking the proc-macro.
+fn char_to_type_path(c: char, syan_path: &Ident, span: proc_macro2::Span) -> Option<TokenStream> {
     let chars_path = quote! { #syan_path::symbol::chars };
-    match c {
+    Some(match c {
         'a'..='z' | 'A'..='Z' | '0'..='9' => {
             let type_name = format!("_{}", c);
             let type_ident = Ident::new(&type_name, span);
@@ -116,8 +119,8 @@ fn char_to_type_path(c: char, syan_path: &Ident, span: proc_macro2::Span) -> Tok
             let space_ident = Ident::new("Space", span);
             quote! { #chars_path::#space_ident }
         }
-        _ => panic!("Unsupported character: {} (code: {})", c, c as u32),
-    }
+        _ => return None,
+    })
 }
 
 /// Creates a Joint type that can handle arbitrarily long character sequences.
@@ -153,7 +156,15 @@ pub fn symbol(args: SymbolArgs) -> TokenStream {
     let mut char_types = Vec::new();
     for token in &args.tokens {
         for c in token.slot.chars() {
-            char_types.push(char_to_type_path(c, syan_path, token.span));
+            match char_to_type_path(c, syan_path, token.span) {
+                Some(ty) => char_types.push(ty),
+                None => abort!(
+                    token.span,
+                    "symbol! does not support the character {:?} (U+{:04X})",
+                    c,
+                    c as u32
+                ),
+            }
         }
     }
 

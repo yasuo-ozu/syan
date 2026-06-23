@@ -1,8 +1,8 @@
-// AUDIT (panic): symbol! panics (a raw proc-macro panic, not a spanned error) on any character it
-// has no mapping for. macro/symbol.rs char_to_type_path ends in
-// `_ => panic!("Unsupported character: {} (code: {})", c, c as u32)`, reached from valid user input
-// such as a non-ASCII XID identifier (`Symbol![café]`) or a char literal with a control char
-// (`Symbol!['\n']`). The SymbolToken already carries a span, so the fix is abort!(span, ...).
+// AUDIT #2 (now a CLEAN error): symbol! used to *panic* (a raw proc-macro panic) on any character it
+// has no mapping for — a non-ASCII XID identifier (`Symbol![café]`) or a char literal with a control
+// char (`Symbol!['\n']`). char_to_type_path now returns `Option` and symbol() emits a clean spanned
+// `abort!(token.span, "symbol! does not support the character …")`. It is still (correctly) a compile
+// error — an unsupported character should be rejected — just no longer a panic.
 use syan::symbol::Symbol;
 
 fn main() {

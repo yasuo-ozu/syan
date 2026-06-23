@@ -511,21 +511,41 @@ fn followed_intermediates(
     }
     let mut out = Vec::new();
     for_each_field_type(def, &mut |ty| {
-        if let Some(p) = peel(ty, &user_types) {
-            let hs = p.head.to_string();
-            if Some(hs.as_str()) == self_ident {
-                return; // self -> already in `done`
-            }
-            if let Some(e) = subast.iter().find(|e| e.key == p.head) {
-                // Fetch only when the entry's *real* type isn't visited/inherited (else a method,
-                // already fetched under its `visitor!(..)` path — even when the head is aliased).
-                if !method_set.contains(&last_ident(&e.path).to_string()) {
-                    out.push(e.path.clone());
-                }
-            }
-        }
+        discover_followed(ty, subast, method_set, self_ident, &user_types, &mut out)
     });
     out
+}
+
+/// Recurse a field type (descending into tuple elements) collecting followed-but-unlisted
+/// intermediate paths to fetch for inline drilling.
+fn discover_followed(
+    ty: &Type,
+    subast: &[SubEntry],
+    method_set: &HashSet<String>,
+    self_ident: Option<&str>,
+    user_types: &HashSet<String>,
+    out: &mut Vec<Path>,
+) {
+    // Tuple element types must be inspected too (a followed type may be nested in a tuple field).
+    if let Some(elems) = as_tuple(ty) {
+        for elem in elems {
+            discover_followed(elem, subast, method_set, self_ident, user_types, out);
+        }
+        return;
+    }
+    if let Some(p) = peel(ty, user_types) {
+        let hs = p.head.to_string();
+        if Some(hs.as_str()) == self_ident {
+            return; // self -> already in `done`
+        }
+        if let Some(e) = subast.iter().find(|e| e.key == p.head) {
+            // Fetch only when the entry's *real* type isn't visited/inherited (else a method,
+            // already fetched under its `visitor!(..)` path — even when the head is aliased).
+            if !method_set.contains(&last_ident(&e.path).to_string()) {
+                out.push(e.path.clone());
+            }
+        }
+    }
 }
 
 fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
@@ -543,6 +563,17 @@ fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
             }
         }
         _ => {}
+    }
+}
+
+/// See through transparent wrappers (`Group`/`Paren`) to a tuple type's element list. `None` if `ty`
+/// is not a tuple. Mirrors `recurse::as_tuple` so the `visitor!()` path traverses tuple fields too.
+fn as_tuple(ty: &Type) -> Option<&Punctuated<Type, Token![,]>> {
+    match ty {
+        Type::Tuple(t) => Some(&t.elems),
+        Type::Group(g) => as_tuple(&g.elem),
+        Type::Paren(p) => as_tuple(&p.elem),
+        _ => None,
     }
 }
 
@@ -600,13 +631,16 @@ fn build_chain(members: &[Index], chain: &Ident, into_hook: &Ident) -> TokenStre
     }
 }
 
-/// `IntoVisitor[Mut]` impls for tuples of closures, arity 2..=`max_arity`.
+/// `IntoVisitor[Mut]` impls for tuples of closures, arity 2..=`max_arity`. `union_where` are the
+/// visited types' `where`-predicates, appended to each impl (it names the visited types via the
+/// `IntoHook<.., T>` bounds, so they must stay well-formed).
 fn tuple_impls(
     max_arity: usize,
     g_params: &[GenericParam],
     g_args: &[TokenStream],
     g_use: &TokenStream,
     mutable: bool,
+    union_where: &[WherePredicate],
 ) -> Vec<TokenStream> {
     let suffix = if mutable { "Mut" } else { "" };
     let into_vis_tr = Ident::new(&format!("IntoVisitor{suffix}"), Span::call_site());
@@ -639,7 +673,7 @@ fn tuple_impls(
             quote! {
                 impl< #(#g_params,)* #(#fs,)* #(#ts,)* >
                     #into_vis_tr< #(#g_args,)* ( #(#ts,)* ) > for ( #(#fs,)* )
-                where #(#wheres,)*
+                where #(#wheres,)* #(#union_where,)*
                 {
                     fn #into_vis_fn(self) -> impl #visit_tr #g_use {
                         #driver( #chain )
@@ -827,6 +861,37 @@ impl<'a> Lower<'a> {
         depth: usize,
         stack: &mut Vec<String>,
     ) -> Option<TokenStream> {
+        // A tuple field: destructure it and lower each element (an element may itself be a followed
+        // type, a container of one, or a nested tuple). Leaf elements bind `_`; if no element is
+        // followed the whole tuple is a leaf (`None`, caller binds `_`). Mirrors the `#[recurse]`
+        // path's tuple handling.
+        if let Some(elems) = as_tuple(ty) {
+            let mut pats = Vec::new();
+            let mut stmts = Vec::new();
+            for (i, elem) in elems.iter().enumerate() {
+                let ebind = Ident::new(&format!("__t{depth}_{idx}_{i}"), Span::call_site());
+                if let Some(stmt) = self.lower_field(
+                    elem,
+                    &quote!(#ebind),
+                    idx,
+                    subast,
+                    self_ident,
+                    path,
+                    depth + 1,
+                    stack,
+                ) {
+                    pats.push(quote!(#ebind));
+                    stmts.push(stmt);
+                } else {
+                    pats.push(quote!(_));
+                }
+            }
+            if stmts.is_empty() {
+                return None; // tuple of only leaves -> leaf
+            }
+            return Some(quote!( { let ( #(#pats,)* ) = #binding; #(#stmts)* } ));
+        }
+
         let user_types = self_and_subast_keys(self_ident, subast);
         let p = peel(ty, &user_types)?;
         if p.nested {
@@ -902,13 +967,33 @@ fn item_generics(item: &Item) -> Option<&Generics> {
     }
 }
 
+/// A visited type's `where`-clause predicates (e.g. `S: Bound`), or empty when it has none. These
+/// must be repeated on every generated item that names the type so the type is well-formed there.
+fn item_where_preds(item: &Item) -> Vec<WherePredicate> {
+    item_generics(item)
+        .and_then(|g| g.where_clause.as_ref())
+        .map(|w| w.predicates.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Render `where p0, p1, …` (or nothing when empty) for the given predicates.
+fn where_clause(preds: &[WherePredicate]) -> TokenStream {
+    if preds.is_empty() {
+        quote!()
+    } else {
+        quote!( where #(#preds),* )
+    }
+}
+
 /// One visited type's identifier (for method/struct names), the full path it is referenced by, its
-/// own generic params (def-side) and use-side args, and its shared-ref and `&mut` bodies.
+/// own generic params (def-side) and use-side args, its `where`-clause predicates (repeated on the
+/// inherent impl that names it), and its shared-ref and `&mut` bodies.
 struct VType {
     ident: Ident,
     path: TokenStream,
     own_params: Vec<GenericParam>,
     own_use: TokenStream,
+    own_where: Vec<WherePredicate>,
     body: TokenStream,
     body_mut: TokenStream,
 }
@@ -933,6 +1018,7 @@ fn gen_side(
     base_g_use: &TokenStream,
     ancestors: &[Ancestor],
     base: &Option<Path>,
+    union_where: &[WherePredicate],
 ) -> TokenStream {
     let suffix = if mutable { "Mut" } else { "" };
     let id = |s: &str| Ident::new(s, Span::call_site());
@@ -987,11 +1073,16 @@ fn gen_side(
         })
         .collect();
 
-    let tup = tuple_impls(8, g_params, g_args, g_use, mutable);
+    let tup = tuple_impls(8, g_params, g_args, g_use, mutable, union_where);
+    // The union of every visited type's `where`-predicates, repeated on each generated item that is
+    // quantified over the full param union (the trait, free fns, the `&mut V` / Driver / closure /
+    // Chain impls) so a visited type like `enum Expr<S> where S: Bound { .. }` stays well-formed.
+    let uw = where_clause(union_where);
 
     // Inherent `visit` / `visit_mut` per type (replaces the Visitable trait). Each type's own
     // params go on the impl; any extra union params go on the method (so a type that doesn't use
-    // every union param doesn't leave the impl param unconstrained).
+    // every union param doesn't leave the impl param unconstrained). The type's own `where`-clause
+    // (referencing only its own params) goes on the impl so naming `Expr<S>` stays well-formed.
     let inherent: Vec<TokenStream> = vtypes
         .iter()
         .map(|vt| {
@@ -1001,11 +1092,12 @@ fn gen_side(
                 .filter(|p| !own_names.contains(&param_name(p)))
                 .collect();
             let own_def = angle(&vt.own_params);
+            let own_w = where_clause(&vt.own_where);
             let path = &vt.path;
             let own_use = &vt.own_use;
             let method = method_ident_m(&vt.ident, mutable);
             quote! {
-                impl #own_def #path #own_use {
+                impl #own_def #path #own_use #own_w {
                     pub fn #visit_method< #(#extra,)* #p_t >(
                         #recv,
                         visitor: impl #into_vis_tr< #(#g_args,)* #p_t >,
@@ -1020,7 +1112,7 @@ fn gen_side(
         .collect();
 
     quote! {
-        pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #base_g_use } {
+        pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #base_g_use } #uw {
             #(for s in &sides) {
                 fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                     #{&s.method}(self, i)
@@ -1028,7 +1120,7 @@ fn gen_side(
             }
         }
 
-        impl< #(#g_params,)* #p_v: #visit_tr #g_use > #visit_tr #g_use for &mut #p_v {
+        impl< #(#g_params,)* #p_v: #visit_tr #g_use > #visit_tr #g_use for &mut #p_v #uw {
             #(for s in &sides) {
                 fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                     <#p_v as #visit_tr #g_use>::#{&s.method}(self, i)
@@ -1040,30 +1132,30 @@ fn gen_side(
             pub fn #{&s.method}< #(#g_params,)* #p_v: #visit_tr #g_use + ?Sized >(
                 this: &mut #p_v,
                 i: #amp #{&s.ty},
-            ) {
+            ) #uw {
                 #{&s.body}
             }
         }
 
-        pub trait #into_vis_tr< #(#g_params,)* #p_t > {
+        pub trait #into_vis_tr< #(#g_params,)* #p_t > #uw {
             fn #into_vis_fn(self) -> impl #visit_tr #g_use;
         }
-        impl< #(#g_params,)* #p_v: #visit_tr #g_use > #into_vis_tr< #(#g_args,)* () > for #p_v {
+        impl< #(#g_params,)* #p_v: #visit_tr #g_use > #into_vis_tr< #(#g_args,)* () > for #p_v #uw {
             fn #into_vis_fn(self) -> impl #visit_tr #g_use { self }
         }
 
         // --- closures: shallow Hook + single-pass Driver ---------------------------------
-        pub trait #hook_tr #g_def {
+        pub trait #hook_tr #g_def #uw {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { let _ = i; }
             }
         }
-        pub trait #into_hook_tr< #(#g_params,)* #p_t > {
+        pub trait #into_hook_tr< #(#g_params,)* #p_t > #uw {
             fn #into_hook_fn(self) -> impl #hook_tr #g_use;
         }
 
         pub struct #driver<#p_h>(pub #p_h);
-        impl< #(#g_params,)* #p_h: #hook_tr #g_use > #visit_tr #g_use for #driver<#p_h> {
+        impl< #(#g_params,)* #p_h: #hook_tr #g_use > #visit_tr #g_use for #driver<#p_h> #uw {
             #(for s in &sides) {
                 fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                     self.0.#{&s.hook}(i);
@@ -1082,17 +1174,17 @@ fn gen_side(
         #(for s in &sides) {
             pub struct #{&s.hook_struct}<#p_f>(pub #p_f);
             impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
-                #hook_tr #g_use for #{&s.hook_struct}<#p_f>
+                #hook_tr #g_use for #{&s.hook_struct}<#p_f> #uw
             {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { (self.0)(i); }
             }
             impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
-                #into_hook_tr< #(#g_args,)* #{&s.ty} > for #p_f
+                #into_hook_tr< #(#g_args,)* #{&s.ty} > for #p_f #uw
             {
                 fn #into_hook_fn(self) -> impl #hook_tr #g_use { #{&s.hook_struct}(self) }
             }
             impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
-                #into_vis_tr< #(#g_args,)* #{&s.ty} > for #p_f
+                #into_vis_tr< #(#g_args,)* #{&s.ty} > for #p_f #uw
             {
                 fn #into_vis_fn(self) -> impl #visit_tr #g_use { #driver(#{&s.hook_struct}(self)) }
             }
@@ -1101,7 +1193,7 @@ fn gen_side(
         // --- multiple closures: Chain combinator + tuple impls ---------------------------
         pub struct #chain<#p_a, #p_b>(pub #p_a, pub #p_b);
         impl< #(#g_params,)* #p_a: #hook_tr #g_use, #p_b: #hook_tr #g_use >
-            #hook_tr #g_use for #chain<#p_a, #p_b>
+            #hook_tr #g_use for #chain<#p_a, #p_b> #uw
         {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) {
@@ -1262,6 +1354,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             let ident = item_ident(def).unwrap().clone();
             let own_params = gparams(item_generics(def).unwrap());
             let own_use = angle(&gargs(item_generics(def).unwrap()));
+            let own_where = item_where_preds(def);
             // The path the visited type is named by (its `visitor!(..)` path), also the scrutinee
             // path for its own body; falls back to the fetched path if somehow unmapped.
             let scrut_path: &Path = path_of.get(&ident.to_string()).copied().unwrap_or(&d.path);
@@ -1276,17 +1369,30 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 path: path_tokens,
                 own_params,
                 own_use,
+                own_where,
                 body,
                 body_mut,
             }
         })
         .collect();
 
+    // The union of every visited type's `where`-predicates (deduped by rendered text — identical
+    // predicates from two types are harmless but noisy), repeated on each generated item quantified
+    // over the full param union so a `enum Expr<S> where S: Bound { .. }` stays well-formed there.
+    let mut seen_pred: HashSet<String> = HashSet::new();
+    let union_where: Vec<WherePredicate> = vtypes
+        .iter()
+        .flat_map(|vt| vt.own_where.iter().cloned())
+        .filter(|p| seen_pred.insert(quote!(#p).to_string()))
+        .collect();
+
     let shared = gen_side(
         false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
+        &union_where,
     );
     let mutable = gen_side(
         true, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
+        &union_where,
     );
 
     // Every visitor module exports its full visited-type set (idents), its generic-param union
