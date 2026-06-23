@@ -65,8 +65,13 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   dispatch trait implemented by the root's depth chain (drives the root visit) and by the terminator
   (no-op) — turning the depth recursion into trait dispatch on the back-edge. `XxxNode` aliases name
   the depth-generic node types. Trait-based only (a closure can't be generic over the depth);
-  single-root cycles only. Tests: `visitor_recurse_cycle.rs` (root / cross-edge / back-edge /
-  self-recursive root).
+  single-root cycles only. Followed fields traverse through `Vec`/`Option`/`Box` (incl. a `Box`
+  *around* an `Option`, via `cont_box`) and **tuples** (each element dispatched). Unsupported shapes
+  are rejected with a clear `abort!` (not cryptic generated-code errors): a nested container
+  (`Vec<Option<_>>`), a lifetime/const param on a cycle type, a non-root type whose type params
+  aren't a prefix of the root's, and a multi-root cycle. Tests: `visitor_recurse_cycle.rs` (root /
+  cross-edge / back-edge / self-recursive root), `visitor_recurse_containers.rs` (container + tuple
+  traversal), `recurse_audit_test.rs` + `ui/recurse_*.rs` (the rejections; `limit = 0` still panics).
 
 ## Known gaps / limitations
 
@@ -75,13 +80,14 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   renamed internal type so `crate::ast::Expr!` finds no macro (`visitor_recurse_gap.rs`), and the
   rewritten fields (`__Rec`/`__StmtRec<…,__Rec>`) don't match `#[subast]` matchkeys. **Drill-in over
   *acyclic* types in a `#[recurse]` module works** (`visitor_recurse_drill.rs`). Multi-root cycles
-  (several self-referential types) get no `#[recurse(visit)]` visitor (back-edges collapse to one
-  ambiguous `__Rec`).
+  (several self-referential types) get no `#[recurse(visit)]` visitor — back-edges collapse to one
+  ambiguous `__Rec`, now a **clear `abort!`** (`ui/recurse_visit_multi_root.rs`) rather than a silent
+  no-op.
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.
-- **Nested containers** (`Vec<Option<T>>`) are unsupported (clear build error); wrap the inner part
-  in its own `#[derive(Ast)]` type.
+- **Nested containers** (`Vec<Option<T>>`) are unsupported on both the `visitor!()` and
+  `#[recurse(visit)]` paths (clear build error); wrap the inner part in its own `#[derive(Ast)]` type.
 
 ---
 

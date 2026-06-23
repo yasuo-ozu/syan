@@ -1,7 +1,7 @@
 use crate::util::{peel, to_snake, Container};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
-use proc_macro_error::emit_warning;
+use proc_macro_error::{abort, emit_warning};
 use std::collections::{HashMap, HashSet};
 use syn::{
     punctuated::Punctuated, AngleBracketedGenericArguments, Fields, FieldsNamed, FieldsUnnamed,
@@ -435,6 +435,17 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
 // into trait dispatch. Single-root cycles only.
 // ---------------------------------------------------------------------------
 
+/// See through transparent wrappers to a tuple type's element list (a bare tuple, or one behind
+/// `Type::Group`/`Type::Paren`). `None` if `ty` is not a tuple.
+fn as_tuple(ty: &Type) -> Option<&Punctuated<Type, Token![,]>> {
+    match ty {
+        Type::Tuple(t) => Some(&t.elems),
+        Type::Group(g) => as_tuple(&g.elem),
+        Type::Paren(p) => as_tuple(&p.elem),
+        _ => None,
+    }
+}
+
 /// Dispatch one field of a cycle type: a back-edge to the root drives via `__R` (the depth param);
 /// a cross-edge to another cycle type calls that type's visit method; anything else is a leaf
 /// (`None`, caller binds `_`). `binding` is the destructured field (a `&Field`).
@@ -444,22 +455,56 @@ fn recurse_dispatch_field(
     cycle_types: &std::collections::HashSet<String>,
     root_name: &str,
 ) -> Option<TokenStream> {
+    // A tuple field: destructure it and dispatch each element (an element may itself be a cycle
+    // ref, a container of one, or a nested tuple). Leaf elements bind `_`; if no element is
+    // followed the whole tuple is a leaf.
+    if let Some(elems) = as_tuple(ty) {
+        let mut pats = Vec::new();
+        let mut stmts = Vec::new();
+        for (i, elem) in elems.iter().enumerate() {
+            let bi = Ident::new(&format!("__t{i}"), Span::call_site());
+            if let Some(stmt) = recurse_dispatch_field(elem, &quote!(#bi), cycle_types, root_name) {
+                pats.push(quote!(#bi));
+                stmts.push(stmt);
+            } else {
+                pats.push(quote!(_));
+            }
+        }
+        if stmts.is_empty() {
+            return None; // tuple of only leaves → leaf
+        }
+        return Some(quote!( { let ( #(#pats,)* ) = #binding; #(#stmts)* } ));
+    }
+
     let p = peel(ty, &std::collections::HashSet::new())?;
     let hs = p.head.to_string();
     let is_root = hs == root_name;
     if !is_root && !cycle_types.contains(&hs) {
         return None; // leaf
     }
+    // Nested containers (e.g. `Vec<Option<_>>`) cannot be traversed — reject cleanly, matching the
+    // `visitor!()` builder, rather than emitting mistyped traversal code.
+    if p.nested {
+        abort!(
+            ty,
+            "#[recurse(visit)] cannot traverse a nested container (e.g. `Vec<Option<_>>`); wrap the \
+             inner part in its own #[derive(Ast)] type"
+        );
+    }
     let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
     Some(match p.container {
         Container::Direct => recurse_visit_one(is_root, &p.head, &stars, binding),
         Container::Seq => {
+            // `.iter()` auto-derefs through any `Box` around the sequence (`cont_box`).
             let inner = recurse_visit_one(is_root, &p.head, &stars, &quote!(__x));
             quote!( for __x in #binding.iter() { #inner } )
         }
         Container::Opt => {
+            // Patterns do not auto-deref `Box`, so deref through any `Box` around the `Option`
+            // (`cont_box`) before matching; the leading `*` also derefs the `&Field` binding.
+            let cont_stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
             let inner = recurse_visit_one(is_root, &p.head, &stars, &quote!(__x));
-            quote!( if let ::core::option::Option::Some(__x) = #binding { #inner } )
+            quote!( if let ::core::option::Option::Some(__x) = & #cont_stars #binding { #inner } )
         }
     })
 }
@@ -558,6 +603,34 @@ fn generate_recurse_visitor(
     term_ident: &Ident,
     root_params: &[Ident],
 ) -> TokenStream {
+    // Guard: the visitor names every `__*Rec` node type with the ROOT's params (plus the depth
+    // `__R`), so each cycle type's own type parameters must be a prefix of the root's. A non-root
+    // type with an extra (or reordered) param would otherwise get a wrong-arity signature.
+    let root_param_names: Vec<String> = root_params.iter().map(|i| i.to_string()).collect();
+    for it in items {
+        let (id, generics): (&Ident, &Generics) = match it {
+            Item::Enum(e) if cycle_types.contains(&e.ident.to_string()) => (&e.ident, &e.generics),
+            Item::Struct(s) if cycle_types.contains(&s.ident.to_string()) => {
+                (&s.ident, &s.generics)
+            }
+            _ => continue,
+        };
+        for (idx, tp) in all_type_params(generics).iter().enumerate() {
+            if root_param_names.get(idx).map(String::as_str) != Some(tp.to_string().as_str()) {
+                abort!(
+                    tp,
+                    "#[recurse(visit)]: cycle type `{}` has a type parameter `{}` that the recursion \
+                     root `{}` does not share in the same position; the visitor derives every \
+                     signature from the root's parameters, so each cycle type's type parameters must \
+                     be a prefix of the root's",
+                    id,
+                    tp,
+                    root_name
+                );
+            }
+        }
+    }
+
     let root_internal = &internal_names[root_name];
     let visit_root = Ident::new(
         &format!("visit_{}", to_snake(&Ident::new(root_name, Span::call_site()))),
@@ -800,6 +873,26 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
             }
             _ => continue,
         };
+        // Depth threading runs through *type* parameters (each cycle type gains the root's type
+        // params + `__Rec`); lifetimes and const generics are not threaded and would be dropped from
+        // the regenerated aliases (a confusing E0106/E0107 later). Reject them with a clear message.
+        for param in &generics.params {
+            match param {
+                GenericParam::Lifetime(lt) => abort!(
+                    lt,
+                    "#[recurse] does not support lifetime parameters on cycle type `{}` (only type \
+                     parameters are threaded through the recursion depth)",
+                    type_ident
+                ),
+                GenericParam::Const(c) => abort!(
+                    c,
+                    "#[recurse] does not support const generic parameters on cycle type `{}` (only \
+                     type parameters are threaded through the recursion depth)",
+                    type_ident
+                ),
+                GenericParam::Type(_) => {}
+            }
+        }
         let first_ty_param = generics.params.iter().find_map(|p| {
             if let GenericParam::Type(tp) = p {
                 Some(&tp.ident)
@@ -889,9 +982,21 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         depth_ty = quote!(#root_internal<#(#root_params,)* #depth_ty>);
     }
 
-    // `#[recurse(visit)]`: a depth-generic visitor over the cycle (single-root cycles only — with
-    // multiple effective roots every back-edge collapses to one `__Rec`, which is ambiguous).
-    let visitor_ts = if args.visit && single_root {
+    // `#[recurse(visit)]`: a depth-generic visitor over the cycle. Single-root cycles only — with
+    // multiple effective roots every back-edge collapses to one ambiguous `__Rec`. If the user asked
+    // for `visit` on such a cycle, say so clearly instead of silently emitting no visitor.
+    let visitor_ts = if args.visit {
+        if !single_root {
+            let mut roots: Vec<String> = root_types.iter().cloned().collect();
+            roots.sort();
+            abort!(
+                mod_ident,
+                "#[recurse(visit)] does not support multi-root cycles (found {} self-referential \
+                 cycle types: {}); it generates a depth-generic visitor for a single recursion root",
+                roots.len(),
+                roots.join(", ")
+            );
+        }
         generate_recurse_visitor(
             &items,
             &cycle_types,

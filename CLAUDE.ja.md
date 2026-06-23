@@ -64,7 +64,12 @@ AST 型定義から `syn` スタイルのビジターを生成する。
   フリー関数 `visit_*`）と、ルートの深さチェーン（ルート visit を駆動）と終端（no-op）が実装する
   `VisitRec<S…, V>` ディスパッチトレイトにより、深さ再帰を後退辺でのトレイトディスパッチに変える。
   `XxxNode` エイリアスが深さジェネリックなノード型を名指す。トレイトベースのみ（クロージャは深さに対して
-  ジェネリックになれない）；単一ルートの循環のみ。テスト: `visitor_recurse_cycle.rs`。
+  ジェネリックになれない）；単一ルートの循環のみ。追従フィールドは `Vec`/`Option`/`Box`（`Option` を包む
+  `Box` も含む、`cont_box` 経由）と**タプル**（各要素をディスパッチ）を辿る。非対応の形は明確な `abort!`
+  で却下する（分かりにくい生成コードエラーではなく）: 入れ子コンテナ（`Vec<Option<_>>`）、循環型のライフ
+  タイム/const パラメータ、ルートの型パラメータの接頭辞でない非ルート型、多ルート循環。テスト:
+  `visitor_recurse_cycle.rs`（ルート / 横断辺 / 後退辺 / 自己再帰ルート）、`visitor_recurse_containers.rs`
+  （コンテナ＋タプルの走査）、`recurse_audit_test.rs` ＋ `ui/recurse_*.rs`（却下；`limit = 0` は今もパニック）。
 
 ## 既知のギャップ / 制限
 
@@ -73,12 +78,13 @@ AST 型定義から `syn` スタイルのビジターを生成する。
   `crate::ast::Expr!` はマクロを見つけられず（`visitor_recurse_gap.rs`）、書き換え後のフィールド
   （`__Rec`/`__StmtRec<…,__Rec>`）が `#[subast]` matchkey と一致しない。**`#[recurse]` モジュール内の*非循環*
   型に対する drill-in は動く**（`visitor_recurse_drill.rs`）。多ルート循環（複数の自己参照型）には
-  `#[recurse(visit)]` ビジターは出ない（後退辺が 1 つの曖昧な `__Rec` に潰れる）。
+  `#[recurse(visit)]` ビジターは出ない（後退辺が 1 つの曖昧な `__Rec` に潰れる）— 現在は黙って no-op に
+  するのではなく**明確な `abort!`**（`ui/recurse_visit_multi_root.rs`）。
 - **末尾セグメントが同じ 2 つの visited 型**（`visitor!(a::Foo, b::Foo)`）: 生成名はすべて末尾セグメントを
   鍵にするので衝突する。現在は明確なビルドエラー（`visitor_diagnostics.rs`）；真の共存にはフルパスで
   曖昧性解消した名前付けが要る。
-- **入れ子コンテナ**（`Vec<Option<T>>`）は非対応（明確なビルドエラー）；内側を独自の `#[derive(Ast)]` 型に
-  包むこと。
+- **入れ子コンテナ**（`Vec<Option<T>>`）は `visitor!()` と `#[recurse(visit)]` の両経路で非対応（明確な
+  ビルドエラー）；内側を独自の `#[derive(Ast)]` 型に包むこと。
 
 ---
 

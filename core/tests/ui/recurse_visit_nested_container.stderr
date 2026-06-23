@@ -1,0 +1,5 @@
+error: #[recurse(visit)] cannot traverse a nested container (e.g. `Vec<Option<_>>`); wrap the inner part in its own #[derive(Ast)] type
+  --> tests/ui/recurse_visit_nested_container.rs:20:14
+   |
+20 |         Many(Vec<Option<Expr<S>>>),
+   |              ^^^^^^^^^^^^^^^^^^^^
