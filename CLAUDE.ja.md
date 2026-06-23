@@ -58,6 +58,23 @@ AST 型定義から `syn` スタイルのビジターを生成する。
 - **クレート跨ぎ**を検証済み: visit 対象型は `visitor!(...)` に渡したフルパスで名指しされるので、下流
   クレートで import 不要（`rust/tests/cross_crate.rs`）。下流で構築したビジターが上流クレートの型を
   ドリルスルーすることも可能（`$crate` 根付けの `#[subast]`；`rust/tests/cross_crate_drill.rs`）。
+  **クレート跨ぎの継承**も動く: 下流の `visitor!(upstream::base => New)` が上流のベースビジターを継承する。
+  すべてはベースの**パス**で鍵付けされる（スーパートレイト `New: base::Visit`、継承した `base::visit_*`
+  関数、ベースの `#[macro_export]`+`pub use` な `__syan_visited` マクロ）ので、新ビジターは継承した
+  （上流の）型へ下降する。単一レベルと、より広いアリティ `Visit<S>`→`Visit<S, T>` の例:
+  `rust/tests/cross_crate_inherit.rs`。多段 `base => mid => New` は**中間が上流の場合も含めて**動く
+  （base + mid が共にライブラリ、New が下流）: `rust/tests/cross_crate_inherit_multilevel.rs`。ここでの
+  機微は、`mid` が先祖 `base` を*`mid` 自身のクレート相対*の `crate::inherit::base` として記録すること。
+  `$crate` では直せない（proc-macro が生成した `macro_rules` 中の `$crate` は、`#[subast]` ドリルのような
+  フェッチ／マクロ呼び出しパスでのみ解決され、New の `Driver` スーパートレイト impl に再出力される
+  `base::Visit` のトレイトパスでは解決されない）。代わりに `__visitor_build` は、`crate::` 相対の `@an`
+  先祖を直接ベースのホストクレート（New に渡された具体パス `syan_rust::inherit::mid` から得る）で
+  **再修飾**して具体化し下流で解決可能にする（`macro/visitor.rs` の `base_host_crate` + `requalify_ancestor`）。
+  同クレートや既に具体的な先祖チェーン（例えば下流の中間が `base` をフルのクレート跨ぎパスで名指す場合）は不変。
+  カバレッジ: 4段の全上流チェーン `base => mid => upper => New`（再修飾ループが**両方**の推移先祖で回る）は
+  `rust/tests/cross_crate_inherit_4level.rs`；対となる*下流*中間の形（先祖が既に具体的＝再修飾の no-op 分岐）は
+  `rust/tests/cross_crate_inherit_downstream_mid.rs`；多段＋葉でのアリティ拡張は `cross_crate_inherit_multilevel.rs`
+  の 2 つ目のテスト。残る穴: *上流*中間が記録した `super::`/`self::` 相対の先祖は再修飾されない（`crate::` 根のエントリパスを使う）。
 - **`#[recurse(visit)]`**（実装済み）: `#[recurse]` の*循環*に対する**深さジェネリック**ビジター。
   `#[recurse]` は循環のルートへの後退辺をジェネリック `__Rec` に、各入れ子レベルを別の型に書き換えるので、
   ビジターは残りの深さでパラメータ化される: `visit_*<R>` メソッドを持つ `Visit<S…>` トレイト（＋下降用の

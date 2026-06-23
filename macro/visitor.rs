@@ -267,6 +267,52 @@ fn emit_ancestors(anc: &[AncIn]) -> TokenStream {
     quote!( #(#blocks)* )
 }
 
+/// The host crate of a direct-base path: `Some(ident)` when it is rooted at an *external* crate
+/// (e.g. `syan_rust::inherit::mid`), `None` for same-crate roots (`crate`/`super`/`self`) or a
+/// leading-`::` absolute path. Used to requalify a transitive ancestor that an *upstream*
+/// intermediate recorded `crate::`-relative (its own crate) into a path the *downstream* extender
+/// can resolve. (A `$crate` cannot do this: emitted by a proc-macro into a generated `macro_rules`
+/// body it resolves only for fetch/macro-invocation paths, **not** for the trait path re-emitted
+/// into the new `Driver`'s supertrait impl — so multi-level cross-crate `base => mid => new` with an
+/// *upstream* `mid` needs this concrete requalification instead.)
+fn base_host_crate(base: &Path) -> Option<Ident> {
+    if base.leading_colon.is_some() {
+        return None;
+    }
+    let first = base.segments.first()?;
+    if !matches!(first.arguments, PathArguments::None) {
+        return None;
+    }
+    let s = first.ident.to_string();
+    if s == "crate" || s == "super" || s == "self" {
+        None
+    } else {
+        Some(first.ident.clone())
+    }
+}
+
+/// Replace a leading bare `crate` segment of an ancestor path with `host` (the direct base's crate),
+/// so a `crate::…`-relative ancestor recorded by an upstream intermediate resolves downstream. Only a
+/// leading bare `crate` is requalified: a path already concrete (rooted at a crate name / `::`) is
+/// left alone (it points where it should), and a `super::`/`self::`-relative ancestor recorded by an
+/// upstream intermediate is *also* left alone — and so remains unresolvable downstream (the same
+/// residual hole as `ast.rs`'s `crate_rooted_tokens`; canonical `crate::`-rooted `visitor!` entry
+/// paths, which the docs already recommend, avoid it).
+fn requalify_ancestor(anc: &Path, host: &Ident) -> Path {
+    if anc.leading_colon.is_none()
+        && anc
+            .segments
+            .first()
+            .is_some_and(|s| s.ident == "crate" && matches!(s.arguments, PathArguments::None))
+    {
+        let mut out = anc.clone();
+        out.segments[0].ident = host.clone();
+        out
+    } else {
+        anc.clone()
+    }
+}
+
 /// Parse `@done { @t { @path {..} @def {..} @subast {..} } .. }`.
 fn parse_done(ts: TokenStream) -> Result<Vec<DoneType>> {
     let parser = |input: ParseStream| {
@@ -1307,7 +1353,21 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 .map(|p| Ident::new(&param_name(p), Span::call_site()))
                 .collect(),
         });
-        chain.extend(st.base_ancestors.iter().cloned());
+        // Requalify transitive ancestors a `crate::`-relative *upstream* intermediate recorded
+        // against the direct base's host crate (no-op for same-crate / already-concrete chains).
+        // This also re-exports them concrete (the chain feeds `anc_export`), so a further extender
+        // inherits resolvable ancestor paths too.
+        let host = base_host_crate(b);
+        for a in &st.base_ancestors {
+            let path = match &host {
+                Some(h) => requalify_ancestor(&a.path, h),
+                None => a.path.clone(),
+            };
+            chain.push(AncIn {
+                path,
+                names: a.names.clone(),
+            });
+        }
     }
     let ancestors: Vec<Ancestor> = chain
         .iter()

@@ -58,6 +58,27 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **Cross-crate** validated: visited types are named by the full path given to `visitor!(...)`, so a
   downstream crate needs no import (`rust/tests/cross_crate.rs`); a downstream-built visitor can also
   drill through an upstream crate's types (`$crate`-rooted `#[subast]`; `rust/tests/cross_crate_drill.rs`).
+  **Cross-crate inheritance** also works: a downstream `visitor!(upstream::base => New)` inherits an
+  upstream base visitor — everything is keyed on the base **path** (supertrait `New: base::Visit`, the
+  inherited `base::visit_*` fns, and the base's `#[macro_export]`+`pub use`'d `__syan_visited` macro),
+  so the new visitor descends into the inherited (upstream) types. Single-level and a wider-arity
+  `Visit<S>`→`Visit<S, T>` case: `rust/tests/cross_crate_inherit.rs`. Multi-level `base => mid => New`
+  works **including with an upstream intermediate** (base + mid both in the library, New downstream):
+  `rust/tests/cross_crate_inherit_multilevel.rs`. The subtlety there is that `mid` records its
+  ancestor `base` as the `crate::inherit::base` path *relative to `mid`'s own crate*; `$crate` can't
+  fix this (emitted by a proc-macro into a generated `macro_rules`, `$crate` resolves only for
+  fetch/macro-invocation paths — like the `#[subast]` drill — **not** for the `base::Visit` trait path
+  re-emitted into New's `Driver` supertrait impl). Instead `__visitor_build` **requalifies** a
+  `crate::`-relative `@an` ancestor against the direct base's host crate — taken from the concrete
+  `syan_rust::inherit::mid` path New was given (`base_host_crate` + `requalify_ancestor` in
+  `macro/visitor.rs`) — making it concrete and downstream-resolvable. Same-crate and already-concrete
+  ancestor chains (e.g. a downstream intermediate naming `base` by its full cross-crate path) are
+  untouched. Coverage: a 4-level all-upstream chain `base => mid => upper => New` (requalify loop runs
+  for **both** transitive ancestors) is `rust/tests/cross_crate_inherit_4level.rs`; the complementary
+  *downstream*-intermediate shape (the requalify no-op branch — ancestor already concrete) is
+  `rust/tests/cross_crate_inherit_downstream_mid.rs`; multi-level **+ arity widening** at the leaf is a
+  second test in `cross_crate_inherit_multilevel.rs`. Residual hole: a `super::`/`self::`-relative
+  ancestor recorded by an *upstream* intermediate is not requalified (use `crate::`-rooted entry paths).
 - **`#[recurse(visit)]`** (shipped): a **depth-generic** visitor over a `#[recurse]` *cycle*.
   `#[recurse]` rewrites the cycle's back-edges to the root into the generic `__Rec` param and each
   nesting level into a distinct type, so the visitor is parameterized by the remaining depth: a
