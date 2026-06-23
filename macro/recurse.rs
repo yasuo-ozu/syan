@@ -477,7 +477,12 @@ fn recurse_dispatch_field(
     }
 
     let p = peel(ty, &std::collections::HashSet::new())?;
-    let hs = p.head.to_string();
+    // Cycle membership keys on the FIRST path segment: a same-module cycle reference is always a
+    // bare single-segment ident, so a foreign multi-segment path (`super::other::Stmt`) whose LAST
+    // segment merely equals a cycle type name is correctly a leaf (transform_type, keyed on the
+    // first segment, would not rename it). For a real bare cycle ref `head_lead == head`, so the
+    // visit method (`visit_<snake(head)>`) is unchanged.
+    let hs = p.head_lead.to_string();
     let is_root = hs == root_name;
     if !is_root && !cycle_types.contains(&hs) {
         return None; // leaf
@@ -491,19 +496,21 @@ fn recurse_dispatch_field(
              inner part in its own #[derive(Ast)] type"
         );
     }
+    // A followed field's head is a bare single-segment cycle ref, so `head_lead == head` here; key
+    // the visit-method name on `head_lead` for consistency with the membership decision above.
     let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
     Some(match p.container {
-        Container::Direct => recurse_visit_one(is_root, &p.head, &stars, binding),
+        Container::Direct => recurse_visit_one(is_root, &p.head_lead, &stars, binding),
         Container::Seq => {
             // `.iter()` auto-derefs through any `Box` around the sequence (`cont_box`).
-            let inner = recurse_visit_one(is_root, &p.head, &stars, &quote!(__x));
+            let inner = recurse_visit_one(is_root, &p.head_lead, &stars, &quote!(__x));
             quote!( for __x in #binding.iter() { #inner } )
         }
         Container::Opt => {
             // Patterns do not auto-deref `Box`, so deref through any `Box` around the `Option`
             // (`cont_box`) before matching; the leading `*` also derefs the `&Field` binding.
             let cont_stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
-            let inner = recurse_visit_one(is_root, &p.head, &stars, &quote!(__x));
+            let inner = recurse_visit_one(is_root, &p.head_lead, &stars, &quote!(__x));
             quote!( if let ::core::option::Option::Some(__x) = & #cont_stars #binding { #inner } )
         }
     })
@@ -605,6 +612,7 @@ fn generate_recurse_visitor(
     root_name: &str,
     internal_names: &HashMap<String, Ident>,
     term_ident: &Ident,
+    term_args: &TokenStream,
     gen_decl: &[TokenStream],
     gen_use: &[TokenStream],
     root_keys: &HashSet<String>,
@@ -693,7 +701,7 @@ fn generate_recurse_visitor(
             }
         }
         impl< #(#gen_decl,)* __V: Visit< #(#gen_use),* > >
-            VisitRec< #(#gen_use,)* __V > for #term_ident
+            VisitRec< #(#gen_use,)* __V > for #term_ident #term_args
         {
             fn visit_rec(&self, _v: &mut __V) {}
         }
@@ -905,6 +913,44 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     let gen_decl = &gen_decl;
     let gen_use = &gen_use;
     let root_keys: HashSet<String> = root_generics.params.iter().map(param_key).collect();
+
+    // The terminator struct must be generic over the root's params when the cycle is generic, so the
+    // depth-default alias `type __RootDefault<S> = …Term<S>` actually *uses* every param (otherwise an
+    // unused-param E0091 fires on the user's own definition — notably at `limit = 1`, where the depth
+    // chain bottoms out directly at the terminator). When the cycle has no params the terminator stays
+    // the byte-identical unit struct `pub struct RootTerm;`.
+    let has_gen = !gen_decl.is_empty();
+    // Self-type arguments for the terminator (`RootTerm<S, …>`), empty when non-generic.
+    let term_args: TokenStream = if has_gen {
+        quote!( < #(#gen_use),* > )
+    } else {
+        quote!()
+    };
+    // One PhantomData element per root param: lifetime `'a` -> `&'a ()`; type `T` -> `T`;
+    // const `N` -> `[(); N]`.
+    let phantom_elems: Vec<TokenStream> = root_generics
+        .params
+        .iter()
+        .map(|p| match p {
+            GenericParam::Lifetime(l) => {
+                let lt = &l.lifetime;
+                quote!(& #lt ())
+            }
+            GenericParam::Type(t) => {
+                let i = &t.ident;
+                quote!(#i)
+            }
+            GenericParam::Const(c) => {
+                let i = &c.ident;
+                quote!([(); #i])
+            }
+        })
+        .collect();
+    let term_decl: TokenStream = if has_gen {
+        quote!( pub struct #term_ident < #(#gen_decl),* > ( ::core::marker::PhantomData<( #(#phantom_elems,)* )> ); )
+    } else {
+        quote!( pub struct #term_ident; )
+    };
     for item in &items {
         let (id, generics): (&Ident, &Generics) = match item {
             Item::Enum(e)
@@ -956,7 +1002,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     // The public Expr<…> alias adds one more layer so that matching Expr::Block { stmts }
     // leaves stmts: Vec<__StmtRec<…, __ExprDefault<…>>> which equals Vec<Stmt<…>>.
     let root_internal = &internal_names[&root_name];
-    let mut depth_ty: TokenStream = quote!(#term_ident);
+    let mut depth_ty: TokenStream = quote!(#term_ident #term_args);
     for _ in 0..(recursion_depth - 1) {
         depth_ty = quote!(#root_internal<#(#gen_use,)* #depth_ty>);
     }
@@ -982,6 +1028,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
             root_name.as_str(),
             &internal_names,
             &term_ident,
+            &term_args,
             gen_decl,
             gen_use,
             &root_keys,
@@ -1025,9 +1072,9 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         #(#mod_attrs)* #mod_vis mod #mod_ident {
             #(for item in items.into_iter().map(|item| transform_item(item, &ctx))) { #item }
 
-            pub struct #term_ident;
+            #term_decl
 
-            impl<__Atom: ::syan::span::Spanned> ::syan::parse::Parse<__Atom> for #term_ident {
+            impl< #(#gen_decl,)* __Atom: ::syan::span::Spanned > ::syan::parse::Parse<__Atom> for #term_ident #term_args {
                 type Error = ::syan::error::ParseError;
                 fn parse(
                     _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
@@ -1036,7 +1083,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
                 }
             }
 
-            impl<__Atom> ::syan::parse::Unparse<__Atom> for #term_ident {
+            impl< #(#gen_decl,)* __Atom > ::syan::parse::Unparse<__Atom> for #term_ident #term_args {
                 fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
                     &self,
                     _sink: &mut __E,

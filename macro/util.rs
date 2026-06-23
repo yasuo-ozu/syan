@@ -112,6 +112,11 @@ pub(crate) enum Container {
 pub(crate) struct Peeled {
     pub container: Container,
     pub head: Ident,
+    /// The FIRST path segment ident of the innermost peeled path (for a single-segment path
+    /// `head_lead == head`). A same-module cycle reference is always a bare single-segment ident, so
+    /// a caller deciding cycle membership (e.g. `recurse`) keys on this to reject a foreign
+    /// multi-segment path whose last segment merely happens to equal a cycle type name.
+    pub head_lead: Ident,
     /// `Box` layers between the container (or the top, for `Direct`) and the head; a drill derefs
     /// through these (`&**…`) to reach a `&head` scrutinee.
     pub head_box: usize,
@@ -128,16 +133,18 @@ fn container_of(c: Container, inner: Peeled) -> Peeled {
     Peeled {
         container: c,
         head: inner.head,
+        head_lead: inner.head_lead,
         head_box: inner.head_box,
         cont_box: 0,
         nested: inner.nested || inner.container != Container::Direct,
     }
 }
 
-fn direct(head: Ident) -> Peeled {
+fn direct(head: Ident, head_lead: Ident) -> Peeled {
     Peeled {
         container: Container::Direct,
         head,
+        head_lead,
         head_box: 0,
         cont_box: 0,
         nested: false,
@@ -157,10 +164,11 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
         Type::Array(a) => peel(&a.elem, user_types).map(|inner| container_of(Container::Seq, inner)),
         Type::Path(tp) => {
             let seg = tp.path.segments.last()?;
+            let lead = tp.path.segments.first()?.ident.clone();
             let name = seg.ident.to_string();
             // A user AST type wins over a same-named container keyword.
             if user_types.contains(&name) {
-                return Some(direct(seg.ident.clone()));
+                return Some(direct(seg.ident.clone(), lead));
             }
             match name.as_str() {
                 "Box" => {
@@ -182,7 +190,7 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
                     Some(container_of(Container::Seq, peel(first_ty_arg(seg)?, user_types)?))
                 }
                 "Option" => Some(container_of(Container::Opt, peel(first_ty_arg(seg)?, user_types)?)),
-                _ => Some(direct(seg.ident.clone())),
+                _ => Some(direct(seg.ident.clone(), lead)),
             }
         }
         _ => None,

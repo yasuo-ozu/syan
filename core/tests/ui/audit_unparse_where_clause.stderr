@@ -1,0 +1,45 @@
+error[E0277]: the trait bound `T: Clone` is not satisfied
+  --> tests/ui/audit_unparse_where_clause.rs:10:10
+   |
+10 | #[derive(Unparse)]
+   |          ^^^^^^^ the trait `Clone` is not implemented for `T`
+   |
+note: required by a bound in `UnparseWhere`
+  --> tests/ui/audit_unparse_where_clause.rs:13:8
+   |
+11 | pub struct UnparseWhere<S, T>
+   |            ------------ required by a bound in this struct
+12 | where
+13 |     T: Clone,
+   |        ^^^^^ required by this bound in `UnparseWhere`
+   = note: this error originates in the derive macro `Unparse` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `T: Clone` is not satisfied
+  --> tests/ui/audit_unparse_where_clause.rs:11:12
+   |
+11 | pub struct UnparseWhere<S, T>
+   |            ^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `T`
+   |
+note: required by a bound in `UnparseWhere`
+  --> tests/ui/audit_unparse_where_clause.rs:13:8
+   |
+11 | pub struct UnparseWhere<S, T>
+   |            ------------ required by a bound in this struct
+12 | where
+13 |     T: Clone,
+   |        ^^^^^ required by this bound in `UnparseWhere`
+
+error[E0277]: the trait bound `T: Clone` is not satisfied
+  --> tests/ui/audit_unparse_where_clause.rs:11:12
+   |
+11 | pub struct UnparseWhere<S, T>
+   |            ^^^^^^^^^^^^ the trait `Clone` is not implemented for `T`
+   |
+note: required by a bound in `UnparseWhere`
+  --> tests/ui/audit_unparse_where_clause.rs:13:8
+   |
+11 | pub struct UnparseWhere<S, T>
+   |            ------------ required by a bound in this struct
+12 | where
+13 |     T: Clone,
+   |        ^^^^^ required by this bound in `UnparseWhere`

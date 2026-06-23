@@ -1,0 +1,39 @@
+error[E0277]: the trait bound `S: Clone` is not satisfied
+  --> tests/ui/audit_recurse_where_clause.rs:9:1
+   |
+ 9 | #[recurse(visit)]
+   | ^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `S`
+   |
+note: required by a bound in `__ExprRec`
+  --> tests/ui/audit_recurse_where_clause.rs:18:12
+   |
+ 9 | #[recurse(visit)]
+   | ----------------- required by a bound in this enum
+...
+18 |         S: Clone,
+   |            ^^^^^ required by this bound in `__ExprRec`
+   = note: this error originates in the attribute macro `recurse` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider restricting type parameter `S` with trait `Clone`
+   |
+16 |     pub enum Expr<S: std::clone::Clone>
+   |                    +++++++++++++++++++
+
+error[E0277]: the trait bound `S: Clone` is not satisfied
+  --> tests/ui/audit_recurse_where_clause.rs:9:1
+   |
+ 9 | #[recurse(visit)]
+   | ^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `S`
+   |
+note: required by a bound in `__ExprRec::Nest`
+  --> tests/ui/audit_recurse_where_clause.rs:18:12
+   |
+18 |         S: Clone,
+   |            ^^^^^ required by this bound in `__ExprRec::Nest`
+19 |     {
+20 |         Nest(Box<Expr<S>>),
+   |         ---- required by a bound in this tuple variant
+   = note: this error originates in the attribute macro `recurse` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider restricting type parameter `S` with trait `Clone`
+   |
+16 |     pub enum Expr<S: std::clone::Clone>
+   |                    +++++++++++++++++++

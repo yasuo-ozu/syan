@@ -1,0 +1,8 @@
+error: proc macro panicked
+ --> tests/ui/audit_symbol_unsupported_char.rs:9:14
+  |
+9 |     let _ = <Symbol![café]>::default();
+  |              ^^^^^^^^^^^^^
+  |
+  = help: message: Unsupported character: é (code: 233)
+  = note: this error originates in the macro `Symbol` (in Nightly builds, run with -Z macro-backtrace for more info)

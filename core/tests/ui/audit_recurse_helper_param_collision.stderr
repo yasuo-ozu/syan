@@ -1,0 +1,10 @@
+error[E0403]: the name `__V` is already used for a generic parameter in this item's generic parameters
+  --> tests/ui/audit_recurse_helper_param_collision.rs:9:1
+   |
+ 9 | #[recurse(visit)]
+   | ^^^^^^^^^^^^^^^^^ already used
+...
+16 |     pub enum Expr<S, __V> {
+   |                      --- first use of `__V`
+   |
+   = note: this error originates in the attribute macro `recurse` (in Nightly builds, run with -Z macro-backtrace for more info)
