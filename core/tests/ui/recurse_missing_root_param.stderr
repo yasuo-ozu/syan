@@ -1,0 +1,5 @@
+error: #[recurse]: cycle type `Stmt` is missing the recursion root `Expr`'s generic parameter (type T); every cycle type must declare all of the root's parameters (it may add its own extras) so the depth machinery can thread them through
+  --> tests/ui/recurse_missing_root_param.rs:26:14
+   |
+26 |     pub enum Stmt<S> {
+   |              ^^^^

@@ -66,12 +66,18 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   (no-op) — turning the depth recursion into trait dispatch on the back-edge. `XxxNode` aliases name
   the depth-generic node types. Trait-based only (a closure can't be generic over the depth);
   single-root cycles only. Followed fields traverse through `Vec`/`Option`/`Box` (incl. a `Box`
-  *around* an `Option`, via `cont_box`) and **tuples** (each element dispatched). Unsupported shapes
-  are rejected with a clear `abort!` (not cryptic generated-code errors): a nested container
-  (`Vec<Option<_>>`), a lifetime/const param on a cycle type, a non-root type whose type params
-  aren't a prefix of the root's, and a multi-root cycle. Tests: `visitor_recurse_cycle.rs` (root /
-  cross-edge / back-edge / self-recursive root), `visitor_recurse_containers.rs` (container + tuple
-  traversal), `recurse_audit_test.rs` + `ui/recurse_*.rs` (the rejections; `limit = 0` still panics).
+  *around* an `Option`, via `cont_box`) and **tuples** (each element dispatched). Cycle types may
+  carry **lifetime / type / const generic params**, and the types in a cycle may have *different*
+  params (heterogeneous): each keeps its own params (threaded into its `__*Rec` node + public alias),
+  the `Visit`/`VisitRec` traits are keyed on the root's params, and a type's extra params become
+  generics on its `visit_*` method. The one requirement is that every cycle type declare all of the
+  **root's** params (so the `__Rec` default `__RootDefault<root params>` is spellable). Unsupported
+  shapes are rejected with a clear `abort!` (not cryptic generated-code errors): a nested container
+  (`Vec<Option<_>>`), a cycle type missing a root param, and a multi-root cycle. Tests:
+  `visitor_recurse_cycle.rs` (root / cross-edge / back-edge /
+  self-recursive root), `visitor_recurse_containers.rs` (container + tuple traversal),
+  `recurse_generics.rs` (lifetime / type / const / heterogeneous params), `recurse_audit_test.rs` +
+  `ui/recurse_*.rs` (the rejections; `limit = 0` still panics).
 
 ## Known gaps / limitations
 

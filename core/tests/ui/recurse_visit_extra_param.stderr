@@ -1,5 +1,0 @@
-error: #[recurse(visit)]: cycle type `Stmt` has a type parameter `T` that the recursion root `Expr` does not share in the same position; the visitor derives every signature from the root's parameters, so each cycle type's type parameters must be a prefix of the root's
-  --> tests/ui/recurse_visit_extra_param.rs:30:22
-   |
-30 |     pub enum Stmt<S, T> {
-   |                      ^

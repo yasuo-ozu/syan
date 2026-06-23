@@ -1,5 +1,0 @@
-error: #[recurse] does not support lifetime parameters on cycle type `Expr` (only type parameters are threaded through the recursion depth)
-  --> tests/ui/recurse_lifetime_param.rs:18:19
-   |
-18 |     pub enum Expr<'a, S> {
-   |                   ^^

@@ -3,8 +3,8 @@
 //! misbehaving or emitting cryptic generated-code errors.
 //!
 //! Companion to `recurse_problems_test.rs` (the original `#[derive(Parse, Unparse)]` recurse
-//! limitations). The *supported* container/tuple traversals fixed alongside these live in
-//! `visitor_recurse_containers.rs`.
+//! limitations). The *supported* container/tuple traversals live in `visitor_recurse_containers.rs`;
+//! support for lifetime / type / const generic params on cycle types lives in `recurse_generics.rs`.
 //!
 //! Each `tests/ui/recurse_*.rs` file carries a header explaining the case. With one exception
 //! (`limit = 0`, still a raw panic) these are deliberate `abort!`s with actionable messages.
@@ -21,12 +21,10 @@ fn recurse_audit_compile_fail() {
     //    clear message (matching the `visitor!()` builder).
     t.compile_fail("tests/ui/recurse_visit_nested_container.rs");
 
-    // 4. A non-root cycle type with its own extra generic param is not a prefix of the
-    //    root's params → rejected, naming the offending type and parameter.
-    t.compile_fail("tests/ui/recurse_visit_extra_param.rs");
-
-    // 5. A lifetime (or const) parameter on a cycle type is not threaded → rejected.
-    t.compile_fail("tests/ui/recurse_lifetime_param.rs");
+    // 4. A cycle type may carry *extra* generic params, but must declare all of the ROOT's params
+    //    (so the depth default is spellable). One that's missing a root param is rejected, naming it.
+    //    (Lifetime / type / const params and per-type extras ARE supported — see recurse_generics.rs.)
+    t.compile_fail("tests/ui/recurse_missing_root_param.rs");
 
     // 6. A multi-root cycle + `visit` cannot yield a single depth-generic visitor →
     //    rejected with a clear message (was: silently no visitor).
