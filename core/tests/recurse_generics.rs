@@ -69,6 +69,39 @@ fn const_param_visitor() {
     assert_eq!(c.0, 2, "const param N threads through the depth-generic visitor");
 }
 
+// ── non-`usize` const generic parameter ─────────────────────────────────────────
+// The terminator used to encode each const param as `PhantomData<[(); N]>`, which only works for
+// `const N: usize`. Const params are now simply omitted from the terminator's `PhantomData` (unused
+// const params don't trigger E0392), so any const type — e.g. `const C: char` — is supported.
+#[recurse(visit)]
+mod ct_char {
+    use core::marker::PhantomData;
+    use syan::visit::Ast;
+
+    #[derive(Ast)]
+    #[subast()]
+    pub enum Expr<S, const C: char> {
+        Nest(Box<Expr<S, C>>),
+        Lit(PhantomData<S>),
+    }
+}
+
+impl<S, const C: char> ct_char::Visit<S, C> for Counter {
+    fn visit_expr<R: ct_char::VisitRec<S, C, Self>>(&mut self, i: &ct_char::ExprNode<S, C, R>) {
+        self.0 += 1;
+        ct_char::visit_expr(self, i);
+    }
+}
+
+#[test]
+fn non_usize_const_param_visitor() {
+    let e: ct_char::Expr<(), 'x'> =
+        ct_char::Expr::Nest(Box::new(ct_char::ExprNode::Lit(PhantomData)));
+    let mut c = Counter::default();
+    ct_char::Visit::visit_expr(&mut c, &e);
+    assert_eq!(c.0, 2, "const C: char threads through; terminator no longer needs `[(); N]`");
+}
+
 // ── two type params + a cross-edge cycle ─────────────────────────────────────────
 #[recurse(visit)]
 mod multi {

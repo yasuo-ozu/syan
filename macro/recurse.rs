@@ -1,7 +1,7 @@
 use crate::util::{peel, to_snake, Container};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
-use proc_macro_error::{abort, emit_warning};
+use proc_macro_error::{abort, set_dummy};
 use std::collections::{HashMap, HashSet};
 use syn::{
     punctuated::Punctuated, AngleBracketedGenericArguments, Fields, FieldsNamed, FieldsUnnamed,
@@ -766,7 +766,6 @@ fn generate_recurse_visitor(
 }
 
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
-    // TODO: use proc_macro_error::dummy::set_dummy()
     let args: RecurseArgs = match syn::parse(attr) {
         Ok(a) => a,
         Err(e) => return e.to_compile_error().into(),
@@ -777,6 +776,12 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         Ok(m) => m,
         Err(e) => return e.to_compile_error().into(),
     };
+
+    // On any later `abort!` (missing root param, non-identity root arg, multi-root + visit, …) emit
+    // the *original* module unchanged instead of nothing. The user's definitions are valid Rust on
+    // their own, so downstream `mod::Type` references still resolve — the diagnostic stands alone
+    // rather than triggering a cascade of "cannot find type/module" errors.
+    set_dummy(quote!(#module));
 
     let Some((_, items)) = module.content else {
         return quote!(#module).into();
@@ -796,22 +801,27 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         })
         .collect();
 
-    // Build reference graph
-    // TODO: change the type from HashMap to HashGraph
-    let type_refs: HashMap<String, HashSet<String>> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => {
-                Some((e.ident.to_string(), collect_refs_item(item, &pub_types)))
-            }
-            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => {
-                Some((s.ident.to_string(), collect_refs_item(item, &pub_types)))
-            }
-            _ => None,
-        })
-        .collect();
+    // Build both reference maps in a single pass over the items:
+    //   * `type_refs`        — *all* references (nested too, via `collect_refs_item`); this is the
+    //                          adjacency that drives cycle detection.
+    //   * `direct_type_refs` — only outermost-constructor references (`collect_direct_refs_item`);
+    //                          the primary signal for root selection (a bare field, not `Vec`/`Box`).
+    // `type_refs` is kept a plain adjacency `HashMap` rather than a `safegraph` graph: it is built
+    // straight from the AST and is also queried as a map for self-reference and degree counting;
+    // `find_cycle_types` lifts it into a `safegraph` graph for the one operation that needs graph
+    // algorithms (Tarjan SCC). A `Copy`-keyed graph here would just push name<->id bookkeeping outward.
+    let mut type_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut direct_type_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    for item in &items {
+        let name = match item {
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => e.ident.to_string(),
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => s.ident.to_string(),
+            _ => continue,
+        };
+        type_refs.insert(name.clone(), collect_refs_item(item, &pub_types));
+        direct_type_refs.insert(name, collect_direct_refs_item(item, &pub_types));
+    }
 
-    // Find all types in cycles using DFS back-edge detection
     let cycle_types = find_cycle_types(&type_refs);
 
     if cycle_types.is_empty() {
@@ -832,24 +842,8 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         .cloned()
         .collect();
 
-    // Build direct-reference counts: how many cycle types reference each type as a bare field
-    // (not wrapped in Vec, Box, etc.). This is the primary criterion for root selection.
-    // TODO: unify this with `type_refs` defined above
-    let direct_type_refs: HashMap<String, HashSet<String>> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => Some((
-                e.ident.to_string(),
-                collect_direct_refs_item(item, &pub_types),
-            )),
-            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => Some((
-                s.ident.to_string(),
-                collect_direct_refs_item(item, &pub_types),
-            )),
-            _ => None,
-        })
-        .collect();
-
+    // Direct-reference counts: how many cycle types reference each type as a bare field — the
+    // primary criterion for root selection.
     let mut direct_ref_counts: HashMap<&str, usize> = HashMap::new();
     for refs in direct_type_refs.values() {
         for r in refs {
@@ -905,47 +899,10 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         })
         .collect();
 
-    // Warn if the first type parameter of a cycle type is not named `S` or `Span`.
-    // The macro unconditionally uses the first param as the span type in depth aliases;
-    // any other name likely means the assumption is wrong.
-    for item in &items {
-        let (type_ident, generics): (&Ident, &Generics) = match item {
-            Item::Enum(e)
-                if matches!(e.vis, Visibility::Public(_))
-                    && cycle_types.contains(&e.ident.to_string()) =>
-            {
-                (&e.ident, &e.generics)
-            }
-            Item::Struct(s)
-                if matches!(s.vis, Visibility::Public(_))
-                    && cycle_types.contains(&s.ident.to_string()) =>
-            {
-                (&s.ident, &s.generics)
-            }
-            _ => continue,
-        };
-        let first_ty_param = generics.params.iter().find_map(|p| {
-            if let GenericParam::Type(tp) = p {
-                Some(&tp.ident)
-            } else {
-                None
-            }
-        });
-        if let Some(param_ident) = first_ty_param {
-            let name = param_ident.to_string();
-            // TODO: write that whjy this limitation is required
-            if name != "S" && name != "Span" {
-                emit_warning!(
-                    param_ident.span(),
-                    "`#[recurse]` uses the first type parameter `{}` of `{}` as the span type \
-                     for depth-alias generation; rename it to `S` or `Span` to make this \
-                     explicit, or reorder generics so the span type comes first",
-                    name,
-                    type_ident
-                );
-            }
-        }
-    }
+    // (There is no "first type parameter must be named `S`/`Span`" restriction: the depth machinery
+    // threads *all* of the root's generic params uniformly through the regenerated aliases, and the
+    // terminator's `Parse` impl carries its own `__Atom: Spanned` span type independent of them, so
+    // the param names and order are immaterial.)
 
     // The root's full generics drive the depth aliases. (The root is always one of the cycle types,
     // so the fallback is unreachable.)
@@ -987,25 +944,24 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     } else {
         quote!()
     };
-    // One PhantomData element per root param: lifetime `'a` -> `&'a ()`; type `T` -> `T`;
-    // const `N` -> `[(); N]`.
+    // One PhantomData element per lifetime / type root param: lifetime `'a` -> `&'a ()`; type
+    // `T` -> `T`. Const params are *omitted*: only lifetime and type params trigger the unused-
+    // parameter error (E0392), so a const param can stay unused in `PhantomData` — which also frees
+    // us from the `[(); N]` encoding that only works for `const N: usize` (now any const type, e.g.
+    // `const C: char`, is supported).
     let phantom_elems: Vec<TokenStream> = root_generics
         .params
         .iter()
-        .map(|p| match p {
+        .filter_map(|p| match p {
             GenericParam::Lifetime(l) => {
                 let lt = &l.lifetime;
-                quote!(& #lt ())
+                Some(quote!(& #lt ()))
             }
             GenericParam::Type(t) => {
                 let i = &t.ident;
-                quote!(#i)
+                Some(quote!(#i))
             }
-            GenericParam::Const(c) => {
-                // TODO: support const generics that is not `usize`
-                let i = &c.ident;
-                quote!([(); #i])
-            }
+            GenericParam::Const(_) => None,
         })
         .collect();
     let term_decl: TokenStream = if has_gen {
@@ -1029,8 +985,10 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
             }
             _ => continue,
         };
+        // `param_key` encodes the *kind* alongside the name (`"type S"` / `"lifetime a"` /
+        // `"const N: usize"`), so the kinds must match too: a root `type S` is not satisfied by a
+        // child's `const S: usize` — they yield different keys and the root's key is reported missing.
         let have: HashSet<String> = generics.params.iter().map(param_key).collect();
-        // TODO: also check the parameter kind is the same
         if let Some(missing) = root_keys.iter().find(|k| !have.contains(*k)) {
             abort!(
                 id,
