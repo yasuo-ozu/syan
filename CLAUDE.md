@@ -104,6 +104,17 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `recurse_generics.rs` (lifetime / type / const / heterogeneous params), `recurse_audit_test.rs` +
   `ui/recurse_*.rs` (the rejections; `ui/recurse_complex_root_param.rs` is the non-identity-arg case;
   `limit = 0` still panics).
+- **Multiple independent cycles in one `#[recurse]` module** (shipped): the cycle types are
+  partitioned into strongly-connected components (`find_cycle_sccs`, via `safegraph`'s Tarjan SCC);
+  each *independent* cycle (a non-trivial SCC, or a singleton with a self-loop) is processed on its own
+  by `build_scc` — its own root, depth chain, `XxxTerm`, public aliases, and (under `visit`) its own
+  visitor. A field referencing another cycle's type is left as that cycle's public alias (cross-cycle
+  fields are *leaves* in the visitor). When the module holds **several** cycles the visitor trait names
+  are root-prefixed (`ExprVisit`/`ExprVisitRec`, `TypeVisit`/`TypeVisitRec`; the `visit_*` fns and
+  `XxxNode` aliases are already per-type-unique); a **lone** cycle keeps the legacy unprefixed
+  `Visit`/`VisitRec` (byte-compatible). This also fixed a latent miscompile where plain `#[recurse]`
+  collapsed independent cycles into one `__Rec`. Tests: `recurse_multi_cycle.rs`. (Multiple
+  self-referential roots *within one* SCC is still rejected — see "Known gaps".)
 
 ## Known gaps / limitations
 
@@ -111,10 +122,12 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   instead. The `visitor!()` path can't bridge to a recurse'd cycle: `#[derive(Ast)]` applies to the
   renamed internal type so `crate::ast::Expr!` finds no macro (`visitor_recurse_gap.rs`), and the
   rewritten fields (`__Rec`/`__StmtRec<…,__Rec>`) don't match `#[subast]` matchkeys. **Drill-in over
-  *acyclic* types in a `#[recurse]` module works** (`visitor_recurse_drill.rs`). Multi-root cycles
-  (several self-referential types) get no `#[recurse(visit)]` visitor — back-edges collapse to one
-  ambiguous `__Rec`, now a **clear `abort!`** (`ui/recurse_visit_multi_root.rs`) rather than a silent
-  no-op.
+  *acyclic* types in a `#[recurse]` module works** (`visitor_recurse_drill.rs`). A cycle with
+  **several self-referential roots *within one* SCC** (mutually recursive `A`/`B` that *both* self-ref)
+  gets no `#[recurse(visit)]` visitor — those back-edges collapse to one ambiguous `__Rec`, still a
+  **clear `abort!`** (`ui/recurse_visit_multi_root.rs`). (Several *independent* cycles in one module
+  are now fully supported — see "Multiple independent cycles" above; this gap is only the
+  multiple-roots-in-a-single-SCC case.)
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.

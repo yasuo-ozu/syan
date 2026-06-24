@@ -142,11 +142,13 @@ fn collect_direct_refs_item(item: &Item, known: &HashSet<String>) -> HashSet<Str
     out
 }
 
-/// Every type that lies on a directed cycle in the reference `graph`, found via Tarjan's strongly
-/// connected components (`safegraph`). A type is on a cycle iff it sits in a non-trivial SCC (mutual
-/// recursion, including longer cycles), or it is a singleton SCC carrying a self-loop (a directly
-/// self-referential type) — exactly the "can reach itself" set the old hand-rolled DFS computed.
-fn find_cycle_types(graph: &HashMap<String, HashSet<String>>) -> HashSet<String> {
+/// The *recursive* strongly-connected components of the reference `graph`, via Tarjan's algorithm
+/// (`safegraph`). Each returned set is one **independent cycle**: a non-trivial SCC (mutual recursion
+/// of size > 1, including longer cycles) or a singleton SCC carrying a self-loop (a directly self-
+/// referential type). Non-recursive singletons are omitted. Two types share a set iff they are
+/// mutually reachable, so independent cycles in one module come back as *separate* sets — each gets
+/// its own recurse machinery. The Vec is sorted by each SCC's least type name for deterministic codegen.
+fn find_cycle_sccs(graph: &HashMap<String, HashSet<String>>) -> Vec<HashSet<String>> {
     use safegraph::algo::connectivity::tarjan_scc;
     use safegraph::graph::Graph;
     use safegraph::BTreeGraph;
@@ -176,18 +178,19 @@ fn find_cycle_types(graph: &HashMap<String, HashSet<String>>) -> HashSet<String>
         }
     }
 
-    let mut cycle = HashSet::new();
+    let mut sccs: Vec<HashSet<String>> = Vec::new();
     for scc in tarjan_scc(&g) {
         if scc.len() > 1 {
-            cycle.extend(scc.iter().map(|&n| names[*g.node(n) as usize].clone()));
+            sccs.push(scc.iter().map(|&n| names[*g.node(n) as usize].clone()).collect());
         } else {
             let name = names[*g.node(scc[0]) as usize];
             if graph.get(name).map_or(false, |refs| refs.contains(name)) {
-                cycle.insert(name.clone());
+                sccs.push(std::iter::once(name.clone()).collect());
             }
         }
     }
-    cycle
+    sccs.sort_by(|a, b| a.iter().min().cmp(&b.iter().min()));
+    sccs
 }
 
 fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
@@ -660,6 +663,7 @@ fn recurse_visit_body(
 /// `VisitRec` traits are keyed on them. A cycle type may carry params beyond the root's: those become
 /// generics on its `visit_*` method (`extra_decl`), and its node type is spelled with its *own* full
 /// params (`own_use`). `root_keys` identifies which of a type's params are the root's (shared).
+#[allow(clippy::too_many_arguments)]
 fn generate_recurse_visitor(
     items: &[Item],
     cycle_types: &std::collections::HashSet<String>,
@@ -670,8 +674,21 @@ fn generate_recurse_visitor(
     gen_decl: &[TokenStream],
     gen_use: &[TokenStream],
     root_keys: &HashSet<String>,
+    // `None` for a lone cycle → the legacy trait names `Visit` / `VisitRec`. `Some(root)` when the
+    // module holds several independent cycles → per-root names `<Root>Visit` / `<Root>VisitRec`, so
+    // the cycles' visitors don't collide. The free `visit_*` fns and `XxxNode` aliases are already
+    // per-type-unique, so only the two trait names need disambiguating.
+    trait_prefix: Option<&str>,
 ) -> TokenStream {
     let root_internal = &internal_names[root_name];
+    let visit_t = Ident::new(
+        &format!("{}Visit", trait_prefix.unwrap_or("")),
+        Span::call_site(),
+    );
+    let visit_rec_t = Ident::new(
+        &format!("{}VisitRec", trait_prefix.unwrap_or("")),
+        Span::call_site(),
+    );
     let visit_root = Ident::new(
         &format!(
             "visit_{}",
@@ -719,15 +736,15 @@ fn generate_recurse_visitor(
     quote! {
         /// Dispatch trait turning the cycle's depth recursion into trait calls: implemented by the
         /// root's depth chain (drives the root visit) and by the terminator (no-op).
-        pub trait VisitRec< #(#gen_decl,)* __V > {
+        pub trait #visit_rec_t < #(#gen_decl,)* __V > {
             fn visit_rec(&self, v: &mut __V);
         }
 
         /// Depth-generic visitor over the `#[recurse]` cycle. Implement the `visit_*` methods
         /// (each generic over the remaining depth `__R`); call the free `visit_*` to descend.
-        pub trait Visit< #(#gen_decl),* > {
+        pub trait #visit_t < #(#gen_decl),* > {
             #(for info in &infos) {
-                fn #{&info.vm}< #(for e in &info.extra_decl) { #e, } __R: VisitRec< #(#gen_use,)* Self > >(
+                fn #{&info.vm}< #(for e in &info.extra_decl) { #e, } __R: #visit_rec_t < #(#gen_use,)* Self > >(
                     &mut self,
                     i: & #{&info.internal} < #(for u in &info.own_use) { #u, } __R >,
                 ) where Self: ::core::marker::Sized {
@@ -737,7 +754,7 @@ fn generate_recurse_visitor(
         }
 
         #(for info in &infos) {
-            pub fn #{&info.vm}< #(#gen_decl,)* #(for e in &info.extra_decl) { #e, } __V: Visit< #(#gen_use),* >, __R: VisitRec< #(#gen_use,)* __V > >(
+            pub fn #{&info.vm}< #(#gen_decl,)* #(for e in &info.extra_decl) { #e, } __V: #visit_t < #(#gen_use),* >, __R: #visit_rec_t < #(#gen_use,)* __V > >(
                 v: &mut __V,
                 i: & #{&info.internal} < #(for u in &info.own_use) { #u, } __R >,
             ) {
@@ -750,89 +767,40 @@ fn generate_recurse_visitor(
             pub use #{&info.internal} as #{&info.node};
         }
 
-        impl< #(#gen_decl,)* __V: Visit< #(#gen_use),* >, __R: VisitRec< #(#gen_use,)* __V > >
-            VisitRec< #(#gen_use,)* __V > for #root_internal < #(#gen_use,)* __R >
+        impl< #(#gen_decl,)* __V: #visit_t < #(#gen_use),* >, __R: #visit_rec_t < #(#gen_use,)* __V > >
+            #visit_rec_t < #(#gen_use,)* __V > for #root_internal < #(#gen_use,)* __R >
         {
             fn visit_rec(&self, v: &mut __V) {
-                <__V as Visit< #(#gen_use),* >>::#visit_root(v, self);
+                <__V as #visit_t < #(#gen_use),* >>::#visit_root(v, self);
             }
         }
-        impl< #(#gen_decl,)* __V: Visit< #(#gen_use),* > >
-            VisitRec< #(#gen_use,)* __V > for #term_ident #term_args
+        impl< #(#gen_decl,)* __V: #visit_t < #(#gen_use),* > >
+            #visit_rec_t < #(#gen_use,)* __V > for #term_ident #term_args
         {
             fn visit_rec(&self, _v: &mut __V) {}
         }
     }
 }
 
-pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
-    let args: RecurseArgs = match syn::parse(attr) {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error().into(),
-    };
-    let recursion_depth = args.limit;
-
-    let module: ItemMod = match syn::parse(input) {
-        Ok(m) => m,
-        Err(e) => return e.to_compile_error().into(),
-    };
-
-    // On any later `abort!` (missing root param, non-identity root arg, multi-root + visit, …) emit
-    // the *original* module unchanged instead of nothing. The user's definitions are valid Rust on
-    // their own, so downstream `mod::Type` references still resolve — the diagnostic stands alone
-    // rather than triggering a cascade of "cannot find type/module" errors.
-    set_dummy(quote!(#module));
-
-    let Some((_, items)) = module.content else {
-        return quote!(#module).into();
-    };
-
-    let mod_attrs = &module.attrs;
-    let mod_vis = &module.vis;
-    let mod_ident = &module.ident;
-
-    // Collect all pub type names
-    let pub_types: HashSet<String> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => Some(e.ident.to_string()),
-            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => Some(s.ident.to_string()),
-            _ => None,
-        })
-        .collect();
-
-    // Build both reference maps in a single pass over the items:
-    //   * `type_refs`        — *all* references (nested too, via `collect_refs_item`); this is the
-    //                          adjacency that drives cycle detection.
-    //   * `direct_type_refs` — only outermost-constructor references (`collect_direct_refs_item`);
-    //                          the primary signal for root selection (a bare field, not `Vec`/`Box`).
-    // `type_refs` is kept a plain adjacency `HashMap` rather than a `safegraph` graph: it is built
-    // straight from the AST and is also queried as a map for self-reference and degree counting;
-    // `find_cycle_types` lifts it into a `safegraph` graph for the one operation that needs graph
-    // algorithms (Tarjan SCC). A `Copy`-keyed graph here would just push name<->id bookkeeping outward.
-    let mut type_refs: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut direct_type_refs: HashMap<String, HashSet<String>> = HashMap::new();
-    for item in &items {
-        let name = match item {
-            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => e.ident.to_string(),
-            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => s.ident.to_string(),
-            _ => continue,
-        };
-        type_refs.insert(name.clone(), collect_refs_item(item, &pub_types));
-        direct_type_refs.insert(name, collect_direct_refs_item(item, &pub_types));
-    }
-
-    let cycle_types = find_cycle_types(&type_refs);
-
-    if cycle_types.is_empty() {
-        return quote!(
-            #(#mod_attrs)* #mod_vis mod #mod_ident { #(#items)* }
-        )
-        .into();
-    }
-
-    // Root types: those that directly reference themselves
-    let root_types: HashSet<String> = cycle_types
+/// Build the recurse machinery for ONE independent cycle (`scc`): pick its root, rename its types,
+/// and produce (a) the `TransformCtx` that rewrites the cycle's items and (b) the *tail* tokens
+/// appended to the module (terminator + its `Parse`/`Unparse` impls, the depth-default alias, the
+/// public type aliases, and — under `want_visit` — the depth-generic visitor). Each cycle is handled
+/// independently, so a module may hold several (see `find_cycle_sccs`); `multi_scc` only controls
+/// whether the visitor's trait names are root-prefixed to avoid collisions between cycles.
+#[allow(clippy::too_many_arguments)]
+fn build_scc(
+    scc: &HashSet<String>,
+    items: &[Item],
+    type_refs: &HashMap<String, HashSet<String>>,
+    direct_type_refs: &HashMap<String, HashSet<String>>,
+    recursion_depth: usize,
+    want_visit: bool,
+    multi_scc: bool,
+    mod_ident: &Ident,
+) -> (TransformCtx, TokenStream) {
+    // Root types: this cycle's types that directly reference themselves.
+    let root_types: HashSet<String> = scc
         .iter()
         .filter(|name| {
             type_refs
@@ -842,12 +810,14 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         .cloned()
         .collect();
 
-    // Direct-reference counts: how many cycle types reference each type as a bare field — the
-    // primary criterion for root selection.
+    // Direct-reference counts within this cycle: how many of its types reference each as a bare field.
     let mut direct_ref_counts: HashMap<&str, usize> = HashMap::new();
-    for refs in direct_type_refs.values() {
+    for (from, refs) in direct_type_refs {
+        if !scc.contains(from) {
+            continue;
+        }
         for r in refs {
-            if cycle_types.contains(r) {
+            if scc.contains(r) {
                 *direct_ref_counts.entry(r.as_str()).or_insert(0) += 1;
             }
         }
@@ -861,14 +831,17 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         root_types.iter().min().cloned().unwrap()
     } else {
         let mut ref_counts: HashMap<&str, usize> = HashMap::new();
-        for refs in type_refs.values() {
+        for (from, refs) in type_refs {
+            if !scc.contains(from) {
+                continue;
+            }
             for r in refs {
-                if cycle_types.contains(r) {
+                if scc.contains(r) {
                     *ref_counts.entry(r.as_str()).or_insert(0) += 1;
                 }
             }
         }
-        let mut candidates: Vec<&String> = cycle_types.iter().collect();
+        let mut candidates: Vec<&String> = scc.iter().collect();
         candidates.sort_by(|a, b| {
             let da = direct_ref_counts.get(a.as_str()).copied().unwrap_or(0);
             let db = direct_ref_counts.get(b.as_str()).copied().unwrap_or(0);
@@ -889,7 +862,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     let rec_param = Ident::new("__Rec", Span::call_site());
 
     // Internal (renamed) idents: "Expr" → "__ExprRec"
-    let internal_names: HashMap<String, Ident> = cycle_types
+    let internal_names: HashMap<String, Ident> = scc
         .iter()
         .map(|n| {
             (
@@ -898,11 +871,6 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
             )
         })
         .collect();
-
-    // (There is no "first type parameter must be named `S`/`Span`" restriction: the depth machinery
-    // threads *all* of the root's generic params uniformly through the regenerated aliases, and the
-    // terminator's `Parse` impl carries its own `__Atom: Spanned` span type independent of them, so
-    // the param names and order are immaterial.)
 
     // The root's full generics drive the depth aliases. (The root is always one of the cycle types,
     // so the fallback is unreachable.)
@@ -969,17 +937,15 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     } else {
         quote!( pub struct #term_ident; )
     };
-    for item in &items {
+    for item in items {
         let (id, generics): (&Ident, &Generics) = match item {
             Item::Enum(e)
-                if matches!(e.vis, Visibility::Public(_))
-                    && cycle_types.contains(&e.ident.to_string()) =>
+                if matches!(e.vis, Visibility::Public(_)) && scc.contains(&e.ident.to_string()) =>
             {
                 (&e.ident, &e.generics)
             }
             Item::Struct(s)
-                if matches!(s.vis, Visibility::Public(_))
-                    && cycle_types.contains(&s.ident.to_string()) =>
+                if matches!(s.vis, Visibility::Public(_)) && scc.contains(&s.ident.to_string()) =>
             {
                 (&s.ident, &s.generics)
             }
@@ -1036,7 +1002,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         .collect();
 
     let ctx = TransformCtx {
-        cycle_types: cycle_types.clone(),
+        cycle_types: scc.clone(),
         root_types: effective_roots,
         internal_names: internal_names.clone(),
         rec_param: rec_param.clone(),
@@ -1057,7 +1023,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     // `#[recurse(visit)]`: a depth-generic visitor over the cycle. Single-root cycles only — with
     // multiple effective roots every back-edge collapses to one ambiguous `__Rec`. If the user asked
     // for `visit` on such a cycle, say so clearly instead of silently emitting no visitor.
-    let visitor_ts = if args.visit {
+    let visitor_ts = if want_visit {
         if !single_root {
             let mut roots: Vec<String> = root_types.iter().cloned().collect();
             roots.sort();
@@ -1069,9 +1035,10 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
                 roots.join(", ")
             );
         }
+        let prefix = if multi_scc { Some(root_name.as_str()) } else { None };
         generate_recurse_visitor(
-            &items,
-            &cycle_types,
+            items,
+            scc,
             root_name.as_str(),
             &internal_names,
             &term_ident,
@@ -1079,6 +1046,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
             gen_decl,
             gen_use,
             &root_keys,
+            prefix,
         )
     } else {
         quote!()
@@ -1092,14 +1060,14 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
             let (id, generics): (&Ident, &Generics) = match item {
                 Item::Enum(e)
                     if matches!(e.vis, Visibility::Public(_))
-                        && cycle_types.contains(&e.ident.to_string())
+                        && scc.contains(&e.ident.to_string())
                         && e.ident.to_string() != root_name =>
                 {
                     (&e.ident, &e.generics)
                 }
                 Item::Struct(s)
                     if matches!(s.vis, Visibility::Public(_))
-                        && cycle_types.contains(&s.ident.to_string())
+                        && scc.contains(&s.ident.to_string())
                         && s.ident.to_string() != root_name =>
                 {
                     (&s.ident, &s.generics)
@@ -1115,37 +1083,144 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         })
         .collect();
 
+    let tail = quote! {
+        #term_decl
+
+        impl< #(#gen_decl,)* __Atom: ::syan::span::Spanned > ::syan::parse::Parse<__Atom> for #term_ident #term_args {
+            type Error = ::syan::error::ParseError;
+            fn parse(
+                _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
+            ) -> ::core::result::Result<Self, Self::Error> {
+                Err(::syan::error::ParseError::new((), "recursion depth limit reached"))
+            }
+        }
+
+        impl< #(#gen_decl,)* __Atom > ::syan::parse::Unparse<__Atom> for #term_ident #term_args {
+            fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                &self,
+                _sink: &mut __E,
+            ) -> ::core::result::Result<(), __E::Error> {
+                ::core::panic!("recursion depth limit reached")
+            }
+        }
+
+        type #default_alias<#(#gen_decl),*> = #depth_ty;
+        pub type #root_ident<#(#gen_decl),*> =
+            #root_internal<#(#gen_use,)* #default_alias<#(#gen_use),*>>;
+
+        #(#non_root_aliases)*
+
+        #visitor_ts
+    };
+
+    (ctx, tail)
+}
+
+pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
+    let args: RecurseArgs = match syn::parse(attr) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let recursion_depth = args.limit;
+
+    let module: ItemMod = match syn::parse(input) {
+        Ok(m) => m,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
+    // On any later `abort!` (missing root param, non-identity root arg, multi-root + visit, …) emit
+    // the *original* module unchanged instead of nothing. The user's definitions are valid Rust on
+    // their own, so downstream `mod::Type` references still resolve — the diagnostic stands alone
+    // rather than triggering a cascade of "cannot find type/module" errors.
+    set_dummy(quote!(#module));
+
+    let Some((_, items)) = module.content else {
+        return quote!(#module).into();
+    };
+
+    let mod_attrs = &module.attrs;
+    let mod_vis = &module.vis;
+    let mod_ident = &module.ident;
+
+    // Collect all pub type names
+    let pub_types: HashSet<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => Some(e.ident.to_string()),
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => Some(s.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    // Build both reference maps in a single pass over the items:
+    //   * `type_refs`        — *all* references (nested too, via `collect_refs_item`); this is the
+    //                          adjacency that drives cycle detection.
+    //   * `direct_type_refs` — only outermost-constructor references (`collect_direct_refs_item`);
+    //                          the primary signal for root selection (a bare field, not `Vec`/`Box`).
+    // `type_refs` is kept a plain adjacency `HashMap` rather than a `safegraph` graph: it is built
+    // straight from the AST and is also queried as a map for self-reference and degree counting;
+    // `find_cycle_types` lifts it into a `safegraph` graph for the one operation that needs graph
+    // algorithms (Tarjan SCC). A `Copy`-keyed graph here would just push name<->id bookkeeping outward.
+    let mut type_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut direct_type_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    for item in &items {
+        let name = match item {
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => e.ident.to_string(),
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => s.ident.to_string(),
+            _ => continue,
+        };
+        type_refs.insert(name.clone(), collect_refs_item(item, &pub_types));
+        direct_type_refs.insert(name, collect_direct_refs_item(item, &pub_types));
+    }
+
+    // Partition the cycle types into independent cycles (SCCs). A module may hold several cycles
+    // that don't reference one another; each is handled on its own.
+    let sccs = find_cycle_sccs(&type_refs);
+
+    if sccs.is_empty() {
+        return quote!(
+            #(#mod_attrs)* #mod_vis mod #mod_ident { #(#items)* }
+        )
+        .into();
+    }
+
+    // Build every cycle's `(transform ctx, tail tokens)` up front from the ORIGINAL items (the
+    // visitor and aliases read the un-renamed defs), then rewrite the module's items by applying each
+    // cycle's transform in turn. A transform only matches the types named in its own cycle, and once
+    // a type is renamed to `__XxxRec` no later cycle's transform matches it — so the passes compose.
+    // A field referencing another cycle's type is left as-is and resolves to that cycle's public
+    // alias. `multi_scc` root-prefixes the visitor trait names so independent cycles don't collide.
+    let multi_scc = sccs.len() > 1;
+    let plans: Vec<(TransformCtx, TokenStream)> = sccs
+        .iter()
+        .map(|scc| {
+            build_scc(
+                scc,
+                &items,
+                &type_refs,
+                &direct_type_refs,
+                recursion_depth,
+                args.visit,
+                multi_scc,
+                mod_ident,
+            )
+        })
+        .collect();
+
+    let mut items = items;
+    for (ctx, _) in &plans {
+        items = items
+            .into_iter()
+            .map(|item| transform_item(item, ctx))
+            .collect();
+    }
+    let tails: Vec<TokenStream> = plans.into_iter().map(|(_, tail)| tail).collect();
+
     quote! {
         #(#mod_attrs)* #mod_vis mod #mod_ident {
-            #(for item in items.into_iter().map(|item| transform_item(item, &ctx))) { #item }
+            #(#items)*
 
-            #term_decl
-
-            impl< #(#gen_decl,)* __Atom: ::syan::span::Spanned > ::syan::parse::Parse<__Atom> for #term_ident #term_args {
-                type Error = ::syan::error::ParseError;
-                fn parse(
-                    _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
-                ) -> ::core::result::Result<Self, Self::Error> {
-                    Err(::syan::error::ParseError::new((), "recursion depth limit reached"))
-                }
-            }
-
-            impl< #(#gen_decl,)* __Atom > ::syan::parse::Unparse<__Atom> for #term_ident #term_args {
-                fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
-                    &self,
-                    _sink: &mut __E,
-                ) -> ::core::result::Result<(), __E::Error> {
-                    ::core::panic!("recursion depth limit reached")
-                }
-            }
-
-            type #default_alias<#(#gen_decl),*> = #depth_ty;
-            pub type #root_ident<#(#gen_decl),*> =
-                #root_internal<#(#gen_use,)* #default_alias<#(#gen_use),*>>;
-
-            #(#non_root_aliases)*
-
-            #visitor_ts
+            #(#tails)*
         }
     }
     .into()
