@@ -11,9 +11,9 @@ use type_leak::Leaker;
 /// One `#[subast(..)]` entry: a path to a sub-AST type, optionally aliased (`b::Foo as BFoo`). The
 /// `matchkey` (the alias, or the path's last segment) is the ident a field head is matched against;
 /// `path` is the resolvable path used to fetch that sub-AST's metadata macro / as a drill scrutinee.
-struct SubastEntry {
-    path: Path,
-    alias: Option<Ident>,
+pub(crate) struct SubastEntry {
+    pub(crate) path: Path,
+    pub(crate) alias: Option<Ident>,
 }
 
 impl Parse for SubastEntry {
@@ -31,11 +31,26 @@ impl Parse for SubastEntry {
 
 impl SubastEntry {
     /// The ident a (container-peeled) field head is matched against.
-    fn matchkey(&self) -> Ident {
+    pub(crate) fn matchkey(&self) -> Ident {
         self.alias
             .clone()
             .unwrap_or_else(|| self.path.segments.last().unwrap().ident.clone())
     }
+}
+
+/// Render a `#[subast(..)]` allowlist as the `@subast { path as key, … }` token list carried in a
+/// metadata macro: each entry's path is `$crate`-rooted (so it resolves downstream, exactly as
+/// `derive_ast`) and paired with its matchkey. Shared by `#[derive(Ast)]` and `#[recurse]`'s
+/// per-cycle-type metadata macros.
+pub(crate) fn subast_tokens(entries: &[SubastEntry]) -> Vec<TokenStream> {
+    entries
+        .iter()
+        .map(|e| {
+            let path = crate_rooted_tokens(&e.path);
+            let key = e.matchkey();
+            quote!( #path as #key )
+        })
+        .collect()
 }
 
 /// Re-root a `crate::…` path at `$crate::…` for emission inside the `#[macro_export]` metadata
@@ -43,7 +58,7 @@ impl SubastEntry {
 /// expanded in a downstream crate building a visitor that drills through these types. Non-`crate`
 /// paths (`::abs`, `super`, `self`, bare) are emitted verbatim (only `crate`-rooted paths are
 /// downstream-portable — the recommended canonical form).
-fn crate_rooted_tokens(path: &Path) -> TokenStream {
+pub(crate) fn crate_rooted_tokens(path: &Path) -> TokenStream {
     let rooted = path.leading_colon.is_none()
         && path
             .segments
@@ -59,7 +74,7 @@ fn crate_rooted_tokens(path: &Path) -> TokenStream {
 
 /// Collect the `#[subast(..)]` allowlist from the type's attributes. Two entries resolving to the
 /// same `matchkey` is an error (a bare field head can't disambiguate them — alias one).
-fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
+pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
     let mut entries = Vec::new();
     for attr in attrs {
         if !attr.path().is_ident("subast") {
@@ -90,7 +105,7 @@ fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
 
 /// Produce a cleaned copy of the input definition (all attributes stripped) so it can be embedded
 /// verbatim inside the metadata `macro_rules!` and re-parsed as a `syn::Item` by `__visitor_build`.
-fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
+pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
     let mut di = input.clone();
     di.attrs.clear();
     di.vis = Visibility::Public(Default::default());
@@ -118,6 +133,39 @@ fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
         }
     }
     di
+}
+
+/// Like `cleaned_definition` but for a `syn::Item` (`#[recurse]` works with `Item::Enum`/`Item::
+/// Struct`, not a `DeriveInput`): strip all attributes, force `pub`, and clear field attrs/vis so the
+/// item re-parses cleanly as a `syn::Item` downstream. The emitted token shape matches what
+/// `cleaned_definition` produces for the equivalent `DeriveInput`, so `__visitor_build` parses a
+/// `#[recurse]`-supplied `@ast { .. }` identically to a `#[derive(Ast)]` one. A non-enum/-struct item
+/// is returned unchanged (the caller only passes cycle enums/structs).
+pub(crate) fn cleaned_item(item: &Item) -> Item {
+    let mut it = item.clone();
+    match &mut it {
+        Item::Enum(e) => {
+            e.attrs.clear();
+            e.vis = Visibility::Public(Default::default());
+            for v in &mut e.variants {
+                v.attrs.clear();
+                for f in &mut v.fields {
+                    f.attrs.clear();
+                    f.vis = Visibility::Inherited;
+                }
+            }
+        }
+        Item::Struct(s) => {
+            s.attrs.clear();
+            s.vis = Visibility::Public(Default::default());
+            for f in &mut s.fields {
+                f.attrs.clear();
+                f.vis = Visibility::Inherited;
+            }
+        }
+        _ => {}
+    }
+    it
 }
 
 /// Build a `type_leak::Referrer` for the definition (the ordered list of field types that depend on
@@ -301,14 +349,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
             );
         }
     }
-    let subast_tokens: Vec<TokenStream> = subast
-        .iter()
-        .map(|e| {
-            let path = crate_rooted_tokens(&e.path);
-            let key = e.matchkey();
-            quote!( #path as #key )
-        })
-        .collect();
+    let subast_entry_tokens = subast_tokens(&subast);
 
     let cleaned = cleaned_definition(input);
     let macro_name = Ident::new(&format!("__{}_ast_{}", to_snake(ident), nonce), Span::call_site());
@@ -349,7 +390,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
                 $cb ! {
                     $($pre)*
                     @ast { #cleaned }
-                    @subast { #(#subast_tokens),* }
+                    @subast { #(#subast_entry_tokens),* }
                 }
             };
         }
