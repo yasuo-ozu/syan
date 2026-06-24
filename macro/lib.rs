@@ -109,7 +109,7 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
-    recurse::recurse(attr, input)
+    recurse::recurse(attr, input, random())
 }
 
 #[proc_macro_error]

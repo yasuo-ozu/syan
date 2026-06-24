@@ -1,5 +1,10 @@
-error[E0433]: failed to resolve: could not find `Expr` in `ast`
-  --> tests/ui/recurse_cycle_visitor.rs:31:39
+error: unknown section @recurse
+  --> tests/ui/recurse_cycle_visitor.rs:13:1
    |
-31 |     syan::visit::visitor!(crate::ast::Expr, crate::ast::Stmt);
-   |                                       ^^^^ could not find `Expr` in `ast`
+13 | #[recurse]
+   | ^^^^^^^^^^
+...
+32 |     syan::visit::visitor!(crate::ast::Expr, crate::ast::Stmt);
+   |     --------------------------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `crate::ast::Expr` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

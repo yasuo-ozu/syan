@@ -1,3 +1,4 @@
+use crate::ast::{cleaned_item, crate_rooted_tokens, parse_subast, subast_tokens};
 use crate::util::{peel, to_snake, Container};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
@@ -5,7 +6,7 @@ use proc_macro_error::{abort, set_dummy};
 use std::collections::{HashMap, HashSet};
 use syn::{
     punctuated::Punctuated, AngleBracketedGenericArguments, Fields, FieldsNamed, FieldsUnnamed,
-    FnArg, GenericArgument, GenericParam, Generics, ImplItem, Item, ItemMod, PathArguments,
+    FnArg, GenericArgument, GenericParam, Generics, ImplItem, Item, ItemMod, Path, PathArguments,
     ReturnType, Token, Type, TypePath, Visibility,
 };
 use template_quote::quote;
@@ -976,12 +977,130 @@ fn generate_multiroot_visitor(
     }
 }
 
+/// A `$crate::<mod>::<ident>` path, `$crate`-rooted via `crate_rooted_tokens` so it resolves to the
+/// defining crate even when the metadata macro is expanded downstream (mirrors `#[derive(Ast)]`'s
+/// `crate::`-rooted `#[subast]` paths). Used to spell `@node`/`@terms` in the recurse metadata.
+fn mod_local_path(mod_ident: &Ident, item: &Ident) -> TokenStream {
+    let path: Path = syn::parse_quote!(crate::#mod_ident::#item);
+    crate_rooted_tokens(&path)
+}
+
+/// Emit, for **each cycle type** of an SCC, a `#[macro_export]` muncher metadata macro re-exported
+/// under the type's *original* name (so it is reachable as `path::to::X! { .. }`, coexisting with the
+/// `pub type X = …` alias — the macro and type namespaces don't clash, exactly as `#[derive(Ast)]`
+/// places a macro and a type under one ident). The macro answers the visitor's fetch
+/// `X! { @ast $cb { $pre } }` by appending this type's ORIGINAL (pre-transform) cleaned definition,
+/// its `#[subast]` allowlist, and a `@recurse { … }` section keyed on by `visitor!()`:
+///
+/// ```text
+/// @recurse {
+///     @node  { $crate::ast::__XRec }   // depth-generic node type for X (per type)
+///     @roots { A B }                   // root idents of the SCC      (SCC-level)
+///     @depth { __RecA __RecB }         // depth-param idents, parallel to @roots
+///     @terms { $crate::ast::ATerm $crate::ast::BTerm }  // terminator paths, parallel to @roots
+///     @cycle { A B C }                 // all cycle-type idents in the SCC
+/// }
+/// ```
+///
+/// The muncher shape (the `@ast`/`@subast` prefix) mirrors `#[derive(Ast)]`'s metadata macro so the
+/// consumer parses a `#[recurse]`-supplied def identically; `@recurse` is the only addition. Purely
+/// additive: the renamed `__XRec` keeps its own `#[derive(Ast)]` metadata macro; this is a *new* macro
+/// under the original name. `roots_sorted` fixes the parallel order of `@roots`/`@depth`/`@terms`;
+/// `rec_for_root` maps a root to its depth param (`__Rec` single-root, `__Rec<Root>` multi-root); each
+/// root's terminator is `<Root>Term`.
+fn recurse_metadata_macros(
+    scc: &HashSet<String>,
+    items: &[Item],
+    internal_names: &HashMap<String, Ident>,
+    roots_sorted: &[String],
+    rec_for_root: &HashMap<String, Ident>,
+    mod_ident: &Ident,
+    nonce: u64,
+) -> TokenStream {
+    // SCC-level `@recurse` rows (identical for every cycle type): roots, their depth params, their
+    // terminator paths (all parallel in `roots_sorted` order), and every cycle-type ident.
+    let root_idents: Vec<Ident> = roots_sorted
+        .iter()
+        .map(|r| Ident::new(r, Span::call_site()))
+        .collect();
+    let depth_idents: Vec<&Ident> = roots_sorted.iter().map(|r| &rec_for_root[r]).collect();
+    let term_paths: Vec<TokenStream> = roots_sorted
+        .iter()
+        .map(|r| mod_local_path(mod_ident, &Ident::new(&format!("{r}Term"), Span::call_site())))
+        .collect();
+    let mut cycle_names: Vec<String> = scc.iter().cloned().collect();
+    cycle_names.sort();
+    let cycle_idents: Vec<Ident> = cycle_names
+        .iter()
+        .map(|n| Ident::new(n, Span::call_site()))
+        .collect();
+
+    // One metadata macro per cycle type, in deterministic (sorted) order.
+    let macros: Vec<TokenStream> = items
+        .iter()
+        .filter_map(|item| {
+            let (orig_ident, attrs): (&Ident, &[syn::Attribute]) = match item {
+                Item::Enum(e)
+                    if matches!(e.vis, Visibility::Public(_))
+                        && scc.contains(&e.ident.to_string()) =>
+                {
+                    (&e.ident, &e.attrs)
+                }
+                Item::Struct(s)
+                    if matches!(s.vis, Visibility::Public(_))
+                        && scc.contains(&s.ident.to_string()) =>
+                {
+                    (&s.ident, &s.attrs)
+                }
+                _ => return None,
+            };
+            // ORIGINAL definition (pre-transform): the field types stay `Box<Stmt<S>>` etc., NOT the
+            // renamed `__Rec` form. Cleaned so it re-parses as a `syn::Item` downstream.
+            let cleaned = cleaned_item(item);
+            let sub_tokens = subast_tokens(&parse_subast(attrs));
+            let node_path = mod_local_path(mod_ident, &internal_names[&orig_ident.to_string()]);
+            let macro_name = Ident::new(
+                &format!("__recurse_meta_{}_{}", to_snake(orig_ident), nonce),
+                Span::call_site(),
+            );
+            Some(quote! {
+                #[macro_export]
+                #[doc(hidden)]
+                macro_rules! #macro_name {
+                    // Callback muncher: append this cycle type's metadata (def + subast + recurse
+                    // section), then re-invoke the continuation `$cb`.
+                    (@ast $cb:path { $($pre:tt)* }) => {
+                        $cb ! {
+                            $($pre)*
+                            @ast { #cleaned }
+                            @subast { #(#sub_tokens),* }
+                            @recurse {
+                                @node { #node_path }
+                                @roots { #(#root_idents)* }
+                                @depth { #(#depth_idents)* }
+                                @terms { #(#term_paths)* }
+                                @cycle { #(#cycle_idents)* }
+                            }
+                        }
+                    };
+                }
+
+                #[doc(hidden)]
+                pub use #macro_name as #orig_ident;
+            })
+        })
+        .collect();
+
+    quote!( #(#macros)* )
+}
+
 /// Build the recurse machinery for ONE independent cycle (`scc`): pick its root, rename its types,
 /// and produce (a) the `TransformCtx` that rewrites the cycle's items and (b) the *tail* tokens
 /// appended to the module (terminator + its `Parse`/`Unparse` impls, the depth-default alias, the
-/// public type aliases, and — under `want_visit` — the depth-generic visitor). Each cycle is handled
-/// independently, so a module may hold several (see `find_cycle_sccs`); `multi_scc` only controls
-/// whether the visitor's trait names are root-prefixed to avoid collisions between cycles.
+/// public type aliases, the per-cycle-type `visitor!()` metadata macros, and — under `want_visit` —
+/// the depth-generic visitor). Each cycle is handled independently, so a module may hold several (see
+/// `find_cycle_sccs`); `multi_scc` only controls whether the visitor's trait names are root-prefixed
+/// to avoid collisions between cycles.
 #[allow(clippy::too_many_arguments)]
 fn build_scc(
     scc: &HashSet<String>,
@@ -992,6 +1111,7 @@ fn build_scc(
     want_visit: bool,
     multi_scc: bool,
     mod_ident: &Ident,
+    nonce: u64,
 ) -> (TransformCtx, TokenStream) {
     // Root types: this cycle's types that directly reference themselves.
     let root_types: HashSet<String> = scc
@@ -1350,7 +1470,20 @@ fn build_scc(
         )
     };
 
-    (ctx, tail)
+    // Per cycle type: a `visitor!()`-consumable metadata macro under the type's original name (additive
+    // — the renamed `__XRec` keeps its own `#[derive(Ast)]` macro). Emitted for both the single-root
+    // and multi-root tails; `roots_sorted` / `rec_for_root` give the parallel `@roots`/`@depth` order.
+    let meta = recurse_metadata_macros(
+        scc,
+        items,
+        &internal_names,
+        &roots_sorted,
+        &rec_for_root,
+        mod_ident,
+        nonce,
+    );
+
+    (ctx, quote!( #tail #meta ))
 }
 
 /// Emit the tail (terminators, depth-chain aliases, public aliases, and — under `want_visit` — the
@@ -1563,7 +1696,7 @@ fn build_multiroot_tail(
     }
 }
 
-pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
+pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStream1 {
     let args: RecurseArgs = match syn::parse(attr) {
         Ok(a) => a,
         Err(e) => return e.to_compile_error().into(),
@@ -1650,6 +1783,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
                 args.visit,
                 multi_scc,
                 mod_ident,
+                nonce,
             )
         })
         .collect();

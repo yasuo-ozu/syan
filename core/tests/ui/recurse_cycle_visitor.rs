@@ -1,11 +1,12 @@
 //! GAP (documented, not yet supported): a `visitor!(..)` directly over a `#[recurse]` cyclic type.
 //!
-//! `#[recurse]` renames the cyclic `Expr`/`Stmt` to internal `__ExprRec`/`__StmtRec` and exposes
-//! `Expr`/`Stmt` only as *type aliases*. `#[derive(Ast)]`'s metadata macro is therefore re-exported
-//! under the internal name, not the alias — so `crate::ast::Expr! { .. }` (the fetch the visitor
-//! emits) finds no macro. Even if that were bridged, the cycle's back-edges are rewritten to the
-//! generic `__Rec` param and so are not name-resolvable traversal edges. Building a visitor over the
-//! cycle is future work.
+//! `#[recurse]` now emits, under each cycle type's *original* name, a metadata macro carrying the
+//! type's def + `#[subast]` **plus** a `@recurse { .. }` section (Phase 0 of bridging recurse into
+//! `visitor!()`). So `crate::ast::Expr! { .. }` (the fetch the visitor emits) *does* resolve — but the
+//! `visitor!()` consumer (`__visitor_build`) does not yet understand `@recurse`, so it rejects it with
+//! `unknown section @recurse`. Consuming the recurse metadata (the depth-generic `visit_*<R>` + shared
+//! `VisitRec`) is a later phase; until then, building a `visitor!()` over the cycle is still
+//! unsupported (use `#[recurse(visit)]`).
 
 use syan::parse::recurse;
 
