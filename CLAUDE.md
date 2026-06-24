@@ -337,6 +337,139 @@ lets the `Leaker` be dropped, per the standing TODO).
   descends into each element (visited ⇒ method, unlisted ⇒ drilled); reduce/append via overriding the
   parent's `visit_*_mut`.
 
+---
+
+# `#[recurse]` expansion & how `visitor!()` consumes it (design)
+
+> Reference for splitting `#[recurse]` (type transformer + metadata) from `visitor!()` (the one
+> visitor generator). It explains what `#[recurse]` expands to and how a *unified* `visitor!()` builds
+> a depth-generic visitor over that output, so one `visitor!(…)` can span both **outer** (acyclic)
+> and **inner** (recurse-cycle) types in a single `Visit` trait.
+
+## What `#[recurse]` expands to
+
+Input:
+
+```rust
+#[recurse(limit = 2)]
+mod ast {
+    use core::marker::PhantomData;
+    pub enum Expr<S> {
+        Bin(Box<Expr<S>>, Box<Expr<S>>),   // self-reference: the recursion's back-edge
+        Lit(PhantomData<S>),
+    }
+}
+```
+
+Expands (structural core) to:
+
+```rust
+mod ast {
+    use core::marker::PhantomData;
+
+    // The cycle type, RENAMED and parameterized by the depth `__Rec`. Every back-edge to the root
+    // (`Box<Expr<S>>`) is rewritten to the depth param `Box<__Rec>`.
+    pub enum __ExprRec<S, __Rec = __ExprDefault<S>> {
+        Bin(Box<__Rec>, Box<__Rec>),
+        Lit(PhantomData<S>),
+    }
+
+    // Terminator: caps the recursion. Its `Parse` errors ("recursion depth limit reached"),
+    // its `Unparse` panics. (`#[recurse]` emits these impls for the terminator.)
+    pub struct ExprTerm<S>(PhantomData<(S,)>);
+
+    // Depth chain: `limit` levels of `__ExprRec`, bottoming out at the terminator.
+    type __ExprDefault<S> = __ExprRec<S, ExprTerm<S>>;            // limit-1 = 1 inner level
+
+    // The public, depth-limited type the user actually names:
+    pub type Expr<S> = __ExprRec<S, __ExprDefault<S>>;
+    //               = __ExprRec<S, __ExprRec<S, ExprTerm<S>>>     // 2 levels, then terminate
+}
+```
+
+Pieces (general rules — see `macro/recurse.rs`):
+- **`__ExprRec<S, __Rec = …>`** — the renamed cycle type, gaining one depth param per *root* (a
+  directly self-referential cycle type). A **back-edge** to root `X` becomes that root's depth param;
+  a **cross-edge** to another cycle type `Y` becomes `__YRec<S, __Rec…>` (Y re-expressed at the same
+  depth — it threads the same depth params); a leaf is untouched.
+- **`XTerm<…>`** — one terminator per root.
+- **`__XDefault<…>`** — the depth chain (the multi-root case builds all roots' chains *mutually*).
+- **`pub type X<…> = __XRec<…, defaults…>`** — the public alias; each *depth level is a distinct
+  type*. User derives (`#[derive(Ast)]`, `Parse`, `Unparse`) apply to the renamed `__XRec`.
+
+The crucial fact for visiting: **each depth level of `Expr<S>` is a different type** (`__ExprRec<S,
+__ExprDefault<S>>`, then `__ExprRec<S, ExprTerm<S>>`, …). A *fixed-type* `visit_expr(&Expr)` therefore
+cannot recurse into its own child — the visitor must be **depth-generic**.
+
+## How `visitor!()` consumes it
+
+`visitor!(crate::ast::Expr)` (Expr listed) generates a **depth-generic** visitor keyed on its *own*
+`Visit` trait:
+
+```rust
+pub trait VisitRec<S, V> { fn visit_rec(&self, v: &mut V); }      // depth dispatch
+
+pub trait Visit<S> {
+    // depth-generic: `R` is the remaining depth (`VisitRec`-bounded)
+    fn visit_expr<R: VisitRec<S, Self>>(&mut self, i: &__ExprRec<S, R>) { visit_expr(self, i) }
+}
+
+pub fn visit_expr<S, V: Visit<S>, R: VisitRec<S, V>>(v: &mut V, i: &__ExprRec<S, R>) {
+    match i {
+        __ExprRec::Bin(a, b) => { R::visit_rec(a, v); R::visit_rec(b, v); }   // back-edge → R
+        __ExprRec::Lit(_) => {}                                              // leaf
+    }
+}
+
+// the root's depth chain drives the visit; the terminator is a no-op
+impl<S, R: VisitRec<S, V>, V: Visit<S>> VisitRec<S, V> for __ExprRec<S, R> {
+    fn visit_rec(&self, v: &mut V) { <V as Visit<S>>::visit_expr(v, self); }
+}
+impl<S, V: Visit<S>> VisitRec<S, V> for ExprTerm<S> {
+    fn visit_rec(&self, _v: &mut V) {}
+}
+
+pub use __ExprRec as ExprNode;   // so users can spell the method's node type
+```
+
+**Field classification** in a recurse type's body (this is `recurse_dispatch_field`'s logic, keyed on
+`visitor!()`'s method set): a field head that is a **root** → back-edge → `R::visit_rec`; a head that
+is another **listed** cycle type → `this.visit_<head>(field)`; an **unlisted** cycle type → drilled
+inline (its fields recursed, its back-edges still via `R`); anything else → leaf. `visit_<X>` is
+emitted **only** when `X` is listed in `visitor!(…)` (selective), exactly as for acyclic types.
+
+**Why outer + inner unify in one trait.** An outer (acyclic) type `Program<S>` with a field
+`body: Vec<Expr<S>>` lowers that field to `this.visit_expr(e)` — and because `Expr<S> =
+__ExprRec<S, __ExprDefault<S>>`, the call infers `R = __ExprDefault<S>`. So a *fixed* `visit_program`
+and a *depth-generic* `visit_expr` live in the **same `Visit<S>` trait**; one `Visit` impl + one
+`.visit()` walks the whole tree and crosses the boundary into the cycle automatically (no manual
+`rec::Visit::visit_expr(...)` hand-off as in `visitor_mixed_recurse.rs`). The back-edge inside the
+cycle dispatches through `R::visit_rec`, so the depth `__Rec` is handled entirely by the visit traits.
+
+**Constraints.** Depth-generic methods can't be implemented by a closure `Driver`, so a visitor that
+lists any recurse type is **trait/struct-only** (no closures/tuples) — the same limitation
+`#[recurse(visit)]` always had. Multi-root cycles give `visit_<X>` one `R` per root.
+
+## Metadata contract (`#[recurse]` → `visitor!()`)
+
+For each cycle type, `#[recurse]` emits (additionally, under the type's *original* name) a muncher
+metadata macro that answers the visitor's fetch `X! { @ast $cb { $pre } }` by appending the type's
+`@ast { <ORIGINAL def> } @subast { … }` **plus** a `@recurse { … }` section the consumer keys on:
+
+```text
+@recurse {
+    @node  { $crate::ast::__ExprRec }     // depth-generic node type (path, $crate-rooted)
+    @roots { Expr }                        // root idents (1 single-root; N multi-root)
+    @depth { __Rec }                       // depth-param idents, PARALLEL to @roots
+    @terms { $crate::ast::ExprTerm }       // terminator paths, PARALLEL to @roots
+    @cycle { Expr }                        // all cycle-type idents in this SCC
+}
+```
+
+An acyclic type emits **no** `@recurse` section (normal `#[derive(Ast)]` metadata). `visitor!()`'s
+`build` branches on `@recurse`: a recurse type gets the depth-generic `visit_*<R…>` + the shared
+`VisitRec` trait/impls above; an acyclic type is handled as today.
+
 # TODOs
 
 - [x] ~~Implement `Repeater` directly on the macro target (drop the leaker struct).~~ Done.

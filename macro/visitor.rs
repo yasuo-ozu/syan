@@ -169,11 +169,77 @@ fn norm_path(p: &Path) -> String {
     quote!(#p).to_string().replace(' ', "")
 }
 
-/// A fetched AST type: the path it was fetched by, its (cleaned) definition, and its `#[subast]`.
+/// The `@recurse { … }` metadata a `#[recurse]` cycle type carries (absent for acyclic types). It
+/// drives depth-generic visitor generation: `node` is the `__XRec` depth-generic node type; `roots`
+/// and `depth` are the parallel root idents and their depth params; `terms` the per-root terminators;
+/// `cycle` every type ident in the SCC. (See the CLAUDE.md "Metadata contract" section.)
+#[derive(Clone)]
+struct RecurseMeta {
+    node: Path,
+    roots: Vec<Ident>,
+    depth: Vec<Ident>,
+    terms: Vec<Path>,
+    cycle: Vec<Ident>,
+}
+
+/// Parse comma-separated paths (for `@terms`).
+fn parse_paths(ts: TokenStream) -> Result<Vec<Path>> {
+    Ok(Punctuated::<Path, Token![,]>::parse_terminated
+        .parse2(ts)?
+        .into_iter()
+        .collect())
+}
+
+/// Parse a `@recurse` body: `@node {PATH} @roots {idents} @depth {idents} @terms {paths,} @cycle {idents}`.
+/// `@roots`/`@depth`/`@cycle` are space-separated idents; `@terms` is comma-separated paths.
+fn parse_recurse(ts: TokenStream) -> Result<RecurseMeta> {
+    let parser = |input: ParseStream| {
+        let (mut node, mut roots, mut depth, mut terms, mut cycle) =
+            (None, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        while !input.is_empty() {
+            let (name, content) = parse_section(input)?;
+            match name.to_string().as_str() {
+                "node" => node = Some(syn::parse2(content)?),
+                "roots" => roots = parse_idents(content)?,
+                "depth" => depth = parse_idents(content)?,
+                "terms" => terms = parse_paths(content)?,
+                "cycle" => cycle = parse_idents(content)?,
+                other => {
+                    return Err(Error::new(name.span(), format!("unknown @recurse section @{other}")))
+                }
+            }
+        }
+        let node = node.ok_or_else(|| Error::new(Span::call_site(), "missing @node in @recurse"))?;
+        if roots.len() != depth.len() || roots.len() != terms.len() {
+            return Err(Error::new(
+                Span::call_site(),
+                "@recurse: @roots, @depth, @terms must be parallel (same length)",
+            ));
+        }
+        Ok(RecurseMeta { node, roots, depth, terms, cycle })
+    };
+    parser.parse2(ts)
+}
+
+/// Re-serialize a `RecurseMeta` for the next ping-pong bounce (mirrors `parse_recurse`).
+fn emit_recurse(r: &RecurseMeta) -> TokenStream {
+    let RecurseMeta { node, roots, depth, terms, cycle } = r;
+    quote! {
+        @node { #node }
+        @roots { #(#roots)* }
+        @depth { #(#depth)* }
+        @terms { #(#terms),* }
+        @cycle { #(#cycle)* }
+    }
+}
+
+/// A fetched AST type: the path it was fetched by, its (cleaned) definition, its `#[subast]`, and —
+/// for a `#[recurse]` cycle type — its `@recurse` coordinates (`None` for an acyclic type).
 struct DoneType {
     path: Path,
     def: Item,
     subast: Vec<SubEntry>,
+    recurse: Option<RecurseMeta>,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +268,8 @@ struct BuildInput {
     rest: Vec<Path>,
     just_def: Option<Item>,
     just_subast: Vec<SubEntry>,
+    /// The `@recurse` section of the type fetched this bounce (a `#[recurse]` cycle type), if any.
+    just_recurse: Option<RecurseMeta>,
 }
 
 /// Parse one `@<name> { .. }` section, returning the name and the braced content as tokens.
@@ -336,12 +404,14 @@ fn parse_done_type(input: ParseStream) -> Result<DoneType> {
     let mut path = None;
     let mut def = None;
     let mut subast = Vec::new();
+    let mut recurse = None;
     while !input.is_empty() {
         let (name, content) = parse_section(input)?;
         match name.to_string().as_str() {
             "path" => path = Some(syn::parse2(content)?),
             "def" => def = Some(syn::parse2(content)?),
             "subast" => subast = parse_subentries(content)?,
+            "recurse" => recurse = Some(parse_recurse(content)?),
             other => {
                 return Err(Error::new(name.span(), format!("unknown @t section @{other}")))
             }
@@ -351,6 +421,7 @@ fn parse_done_type(input: ParseStream) -> Result<DoneType> {
         path: path.ok_or_else(|| Error::new(Span::call_site(), "missing @path in @t"))?,
         def: def.ok_or_else(|| Error::new(Span::call_site(), "missing @def in @t"))?,
         subast,
+        recurse,
     })
 }
 
@@ -368,6 +439,7 @@ impl Parse for BuildInput {
         let mut rest = Vec::new();
         let mut just_def = None;
         let mut just_subast = Vec::new();
+        let mut just_recurse = None;
 
         while !input.is_empty() {
             let (name, content) = parse_section(input)?;
@@ -411,6 +483,7 @@ impl Parse for BuildInput {
                 }
                 "ast" => just_def = Some(syn::parse2(content)?),
                 "subast" => just_subast = parse_subentries(content)?,
+                "recurse" => just_recurse = Some(parse_recurse(content)?),
                 other => {
                     return Err(Error::new(name.span(), format!("unknown section @{other}")))
                 }
@@ -430,6 +503,7 @@ impl Parse for BuildInput {
             rest,
             just_def,
             just_subast,
+            just_recurse,
         })
     }
 }
@@ -483,7 +557,8 @@ pub fn build(input: TokenStream) -> TokenStream {
                 st.rest.push(entry_path);
             }
         }
-        st.done.push(DoneType { path, def, subast });
+        let recurse = st.just_recurse.take();
+        st.done.push(DoneType { path, def, subast, recurse });
     }
     st.fetching = None;
 
@@ -536,7 +611,14 @@ fn emit_done(done: &[DoneType]) -> TokenStream {
             let path = &d.path;
             let def = &d.def;
             let subast = subentries_tokens(&d.subast);
-            quote! { @t { @path { #path } @def { #def } @subast { #subast } } }
+            let recurse = match &d.recurse {
+                Some(r) => {
+                    let r = emit_recurse(r);
+                    quote!( @recurse { #r } )
+                }
+                None => quote!(),
+            };
+            quote! { @t { @path { #path } @def { #def } @subast { #subast } #recurse } }
         })
         .collect();
     quote!( #(#blocks)* )
