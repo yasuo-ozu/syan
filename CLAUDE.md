@@ -85,8 +85,10 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `Visit<S…>` trait with `visit_*<R>` methods (+ free `visit_*` drive fns), and a `VisitRec<S…, V>`
   dispatch trait implemented by the root's depth chain (drives the root visit) and by the terminator
   (no-op) — turning the depth recursion into trait dispatch on the back-edge. `XxxNode` aliases name
-  the depth-generic node types. Trait-based only (a closure can't be generic over the depth);
-  single-root cycles only. Followed fields traverse through `Vec`/`Option`/`Box` (incl. a `Box`
+  the depth-generic node types. Trait-based only (a closure can't be generic over the depth).
+  Single-root cycles use one depth param `__Rec`; **multi-root cycles** (several independent cycles, or
+  several self-referential roots in one SCC) are also supported — see the "Multiple … cycles" bullets
+  below. Followed fields traverse through `Vec`/`Option`/`Box` (incl. a `Box`
   *around* an `Option`, via `cont_box`) and **tuples** (each element dispatched). Cycle types may
   carry **lifetime / type / const generic params**, and the types in a cycle may have *different*
   params (heterogeneous): each keeps its own params (threaded into its `__*Rec` node + public alias),
@@ -97,7 +99,8 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   to the single depth param `__Rec`, so a non-identity argument like `Expr<Vec<S>>` (a *non-regular*
   recursion whose param grows per level) cannot be threaded. Unsupported shapes are rejected with a
   clear `abort!` (not cryptic generated-code errors): a nested container (`Vec<Option<_>>`), a cycle
-  type missing a root param, a multi-root cycle, and a non-identity arg on a back-edge to the root
+  type missing a root param, a multi-root cycle whose roots aren't a feedback vertex set (a sub-cycle
+  avoids every self-referential type), and a non-identity arg on a back-edge to the root
   (was silently *dropped* → miscompile; both `#[recurse]` and `#[recurse(visit)]`). Tests:
   `visitor_recurse_cycle.rs` (root / cross-edge / back-edge /
   self-recursive root), `visitor_recurse_containers.rs` (container + tuple traversal),
@@ -113,8 +116,21 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   are root-prefixed (`ExprVisit`/`ExprVisitRec`, `TypeVisit`/`TypeVisitRec`; the `visit_*` fns and
   `XxxNode` aliases are already per-type-unique); a **lone** cycle keeps the legacy unprefixed
   `Visit`/`VisitRec` (byte-compatible). This also fixed a latent miscompile where plain `#[recurse]`
-  collapsed independent cycles into one `__Rec`. Tests: `recurse_multi_cycle.rs`. (Multiple
-  self-referential roots *within one* SCC is still rejected — see "Known gaps".)
+  collapsed independent cycles into one `__Rec`. Tests: `recurse_multi_cycle.rs`.
+- **Multiple self-referential roots *within one* cycle** (shipped): an SCC where several types each
+  self-reference (mutually-recursive `A`/`B` that *both* `Box<Self>`). Each root keeps its **own depth
+  dimension** — every cycle type carries one depth param per root (`__RecA`, `__RecB`, …; `__R0`/`__R1`
+  in the visitor), a back-edge to root `i` is that root's param, the per-root depth chains are unrolled
+  **mutually** (level `k` of each root embeds level `k-1` of *all* roots), and each root gets its own
+  `XxxTerm`. The visitor (`build_multiroot_tail` + `generate_multiroot_visitor`) gives each cycle type
+  a `visit_*` generic over *all* roots' remaining depth, and `VisitRec` is implemented by every root's
+  depth chain (driving its own visit) + every terminator. Soundness guard: the depth only decrements at
+  a root, so every cycle must pass through one — the SCC with the roots removed must be acyclic
+  (`subgraph_is_cyclic`, via `safegraph`'s `is_cyclic_directed`), else a clear `abort!`
+  (`ui/recurse_multiroot_rootless_subcycle.rs`). Roots must all declare the same generic params (extras
+  allowed on non-root cycle types). Tests: `recurse_multiroot.rs`. The transform is generalized over
+  the root count (`TransformCtx::{rec_params, root_rec, rec_decls}`); a single root reduces to the
+  original `__Rec` machinery.
 
 ## Known gaps / limitations
 
@@ -122,12 +138,10 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   instead. The `visitor!()` path can't bridge to a recurse'd cycle: `#[derive(Ast)]` applies to the
   renamed internal type so `crate::ast::Expr!` finds no macro (`visitor_recurse_gap.rs`), and the
   rewritten fields (`__Rec`/`__StmtRec<…,__Rec>`) don't match `#[subast]` matchkeys. **Drill-in over
-  *acyclic* types in a `#[recurse]` module works** (`visitor_recurse_drill.rs`). A cycle with
-  **several self-referential roots *within one* SCC** (mutually recursive `A`/`B` that *both* self-ref)
-  gets no `#[recurse(visit)]` visitor — those back-edges collapse to one ambiguous `__Rec`, still a
-  **clear `abort!`** (`ui/recurse_visit_multi_root.rs`). (Several *independent* cycles in one module
-  are now fully supported — see "Multiple independent cycles" above; this gap is only the
-  multiple-roots-in-a-single-SCC case.)
+  *acyclic* types in a `#[recurse]` module works** (`visitor_recurse_drill.rs`). (Multi-root cycles —
+  both *independent* cycles and several self-referential roots *within one* SCC — are now supported;
+  see the two "Multiple … cycles" bullets above. The only remaining multi-root rejection is a sub-cycle
+  that avoids every self-referential root, which can't terminate: `ui/recurse_multiroot_rootless_subcycle.rs`.)
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.

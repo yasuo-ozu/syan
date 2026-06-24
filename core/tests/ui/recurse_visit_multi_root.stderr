@@ -1,5 +1,0 @@
-error: #[recurse(visit)] does not support multi-root cycles (found 2 self-referential cycle types: A, B); it generates a depth-generic visitor for a single recursion root
-  --> tests/ui/recurse_visit_multi_root.rs:12:5
-   |
-12 | mod ast {
-   |     ^^^

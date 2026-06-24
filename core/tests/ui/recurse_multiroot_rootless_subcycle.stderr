@@ -1,0 +1,5 @@
+error: #[recurse]: this multi-root cycle has a sub-cycle running entirely through non-self-referential types, so the depth recursion (which only decrements at a self-referential type) would not terminate. Make one type on that sub-cycle directly self-referential, or split it into its own `#[derive(Ast)]` type.
+  --> tests/ui/recurse_multiroot_rootless_subcycle.rs:11:5
+   |
+11 | mod ast {
+   |     ^^^

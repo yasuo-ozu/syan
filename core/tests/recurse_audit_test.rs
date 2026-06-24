@@ -26,9 +26,11 @@ fn recurse_audit_compile_fail() {
     //    (Lifetime / type / const params and per-type extras ARE supported — see recurse_generics.rs.)
     t.compile_fail("tests/ui/recurse_missing_root_param.rs");
 
-    // 6. A multi-root cycle + `visit` cannot yield a single depth-generic visitor →
-    //    rejected with a clear message (was: silently no visitor).
-    t.compile_fail("tests/ui/recurse_visit_multi_root.rs");
+    // 6. A multi-root cycle whose self-referential roots are NOT a feedback vertex set — i.e. a
+    //    sub-cycle runs entirely through non-self-referential types, so the depth (which only
+    //    decrements at a root) would never terminate. Rejected with a clear message. (Multi-root
+    //    cycles where every cycle passes through a root ARE supported — see recurse_multiroot.rs.)
+    t.compile_fail("tests/ui/recurse_multiroot_rootless_subcycle.rs");
 
     // 7. A non-identity generic argument on a back-edge to the root (`Expr<Vec<S>>`) makes the
     //    recursion non-regular; the single-`__Rec` depth machinery can't thread it, so it's
