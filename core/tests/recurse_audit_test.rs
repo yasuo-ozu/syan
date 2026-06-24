@@ -29,4 +29,9 @@ fn recurse_audit_compile_fail() {
     // 6. A multi-root cycle + `visit` cannot yield a single depth-generic visitor →
     //    rejected with a clear message (was: silently no visitor).
     t.compile_fail("tests/ui/recurse_visit_multi_root.rs");
+
+    // 7. A non-identity generic argument on a back-edge to the root (`Expr<Vec<S>>`) makes the
+    //    recursion non-regular; the single-`__Rec` depth machinery can't thread it, so it's
+    //    rejected (was: the argument was silently dropped → miscompile).
+    t.compile_fail("tests/ui/recurse_complex_root_param.rs");
 }

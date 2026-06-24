@@ -57,6 +57,12 @@ struct TransformCtx {
     /// declaration order — used to spell the `__Rec` default `__XxxDefault<'a, S, N>`. Every cycle
     /// type shares the root's params (checked by the caller), so the default is spellable in each.
     root_gen_use: Vec<TokenStream>,
+    /// Per root type, its own declared generic params as *use*-form normalized token strings (e.g.
+    /// `["'a", "S", "N"]`). A back-edge to a root collapses to the single depth param `__Rec`, so its
+    /// generic arguments must be the *identity* (the root's own params, unchanged) — there is nowhere
+    /// to thread a different param like `Expr<Vec<S>>`. `transform_type` checks a root reference's
+    /// args against this and aborts on a mismatch instead of silently dropping the param.
+    root_ident_args: HashMap<String, Vec<String>>,
 }
 
 fn collect_refs(ty: &Type, known: &HashSet<String>, out: &mut HashSet<String>) {
@@ -136,32 +142,52 @@ fn collect_direct_refs_item(item: &Item, known: &HashSet<String>) -> HashSet<Str
     out
 }
 
-fn can_reach(
-    from: &str,
-    target: &str,
-    graph: &HashMap<String, HashSet<String>>,
-    visited: &mut HashSet<String>,
-) -> bool {
-    for next in graph.get(from).into_iter().flatten() {
-        if next == target {
-            return true;
-        }
-        if visited.insert(next.clone()) && can_reach(next, target, graph, visited) {
-            return true;
+/// Every type that lies on a directed cycle in the reference `graph`, found via Tarjan's strongly
+/// connected components (`safegraph`). A type is on a cycle iff it sits in a non-trivial SCC (mutual
+/// recursion, including longer cycles), or it is a singleton SCC carrying a self-loop (a directly
+/// self-referential type) — exactly the "can reach itself" set the old hand-rolled DFS computed.
+fn find_cycle_types(graph: &HashMap<String, HashSet<String>>) -> HashSet<String> {
+    use safegraph::algo::connectivity::tarjan_scc;
+    use safegraph::graph::Graph;
+    use safegraph::BTreeGraph;
+
+    // Build the directed reference graph. `safegraph`'s map-backed graph keys nodes by their value
+    // (which must be `Copy`), so each type name gets a small `u32` id (its position in `names`);
+    // edges carry a bare unique counter (edges are keyed by value too).
+    let names: Vec<&String> = graph.keys().collect();
+    let id_of: HashMap<&str, u32> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i as u32))
+        .collect();
+
+    let mut g = BTreeGraph::<u32, u32>::default();
+    let node_ix: Vec<_> = (0..names.len() as u32)
+        .map(|i| g.insert_node(i).unwrap())
+        .collect();
+    let mut edge_id = 0u32;
+    for (from, tos) in graph {
+        let fi = node_ix[id_of[from.as_str()] as usize];
+        for to in tos {
+            if let Some(&tid) = id_of.get(to.as_str()) {
+                g.push_edge(edge_id, [fi, node_ix[tid as usize]]).unwrap();
+                edge_id += 1;
+            }
         }
     }
-    false
-}
 
-fn find_cycle_types(graph: &HashMap<String, HashSet<String>>) -> HashSet<String> {
-    graph
-        .keys()
-        .filter(|name| {
-            let mut visited = HashSet::new();
-            can_reach(name, name, graph, &mut visited)
-        })
-        .cloned()
-        .collect()
+    let mut cycle = HashSet::new();
+    for scc in tarjan_scc(&g) {
+        if scc.len() > 1 {
+            cycle.extend(scc.iter().map(|&n| names[*g.node(n) as usize].clone()));
+        } else {
+            let name = names[*g.node(scc[0]) as usize];
+            if graph.get(name).map_or(false, |refs| refs.contains(name)) {
+                cycle.insert(name.clone());
+            }
+        }
+    }
+    cycle
 }
 
 fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
@@ -170,6 +196,34 @@ fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
             if let Some(seg) = path.segments.first() {
                 let name = seg.ident.to_string();
                 if ctx.root_types.contains(&name) {
+                    // A back-edge to the root collapses to the single opaque depth param `__Rec`, so
+                    // any generic arguments it supplies must be the root's own params unchanged. A
+                    // non-identity argument (`Expr<Vec<S>>`, `Expr<u8>`, reordered params, …) would be
+                    // silently dropped here and miscompile; reject it instead.
+                    if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+                        if let Some(identity) = ctx.root_ident_args.get(&name) {
+                            let actual: Vec<String> =
+                                ab.args.iter().map(|a| quote!(#a).to_string()).collect();
+                            if &actual != identity {
+                                abort!(
+                                    seg.ident,
+                                    "#[recurse]: the reference to recursion root `{}` carries \
+                                     generic arguments `<{}>` that differ from its declared \
+                                     parameters `<{}>`. A root reference is the cycle's back-edge \
+                                     and collapses to the single depth parameter `__Rec`, so it \
+                                     must repeat the root's parameters verbatim; a non-identity \
+                                     argument (e.g. `{}<Vec<{}>>`) is unsupported. Move the \
+                                     differing part into its own `#[derive(Ast)]` type, or pass the \
+                                     root's parameters unchanged.",
+                                    name,
+                                    actual.join(", "),
+                                    identity.join(", "),
+                                    name,
+                                    identity.first().map(String::as_str).unwrap_or("S"),
+                                );
+                            }
+                        }
+                    }
                     let p = &ctx.rec_param;
                     return syn::parse_quote!(#p);
                 }
@@ -619,7 +673,10 @@ fn generate_recurse_visitor(
 ) -> TokenStream {
     let root_internal = &internal_names[root_name];
     let visit_root = Ident::new(
-        &format!("visit_{}", to_snake(&Ident::new(root_name, Span::call_site()))),
+        &format!(
+            "visit_{}",
+            to_snake(&Ident::new(root_name, Span::call_site()))
+        ),
         Span::call_site(),
     );
 
@@ -709,6 +766,7 @@ fn generate_recurse_visitor(
 }
 
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
+    // TODO: use proc_macro_error::dummy::set_dummy()
     let args: RecurseArgs = match syn::parse(attr) {
         Ok(a) => a,
         Err(e) => return e.to_compile_error().into(),
@@ -739,6 +797,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         .collect();
 
     // Build reference graph
+    // TODO: change the type from HashMap to HashGraph
     let type_refs: HashMap<String, HashSet<String>> = items
         .iter()
         .filter_map(|item| match item {
@@ -775,6 +834,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
 
     // Build direct-reference counts: how many cycle types reference each type as a bare field
     // (not wrapped in Vec, Box, etc.). This is the primary criterion for root selection.
+    // TODO: unify this with `type_refs` defined above
     let direct_type_refs: HashMap<String, HashSet<String>> = items
         .iter()
         .filter_map(|item| match item {
@@ -873,6 +933,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         });
         if let Some(param_ident) = first_ty_param {
             let name = param_ident.to_string();
+            // TODO: write that whjy this limitation is required
             if name != "S" && name != "Span" {
                 emit_warning!(
                     param_ident.span(),
@@ -941,6 +1002,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
                 quote!(#i)
             }
             GenericParam::Const(c) => {
+                // TODO: support const generics that is not `usize`
                 let i = &c.ident;
                 quote!([(); #i])
             }
@@ -968,6 +1030,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
             _ => continue,
         };
         let have: HashSet<String> = generics.params.iter().map(param_key).collect();
+        // TODO: also check the parameter kind is the same
         if let Some(missing) = root_keys.iter().find(|k| !have.contains(*k)) {
             abort!(
                 id,
@@ -989,6 +1052,31 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     // A visitor is only sound for a single effective root (else back-edges collapse ambiguously).
     let single_root = effective_roots.len() == 1;
 
+    // Identity generic arguments per effective root, as use-form normalized token strings: a
+    // back-edge to a root must repeat these verbatim (see `TransformCtx::root_ident_args`).
+    let root_ident_args: HashMap<String, Vec<String>> = items
+        .iter()
+        .filter_map(|item| {
+            let (id, generics): (&Ident, &Generics) = match item {
+                Item::Enum(e)
+                    if matches!(e.vis, Visibility::Public(_))
+                        && effective_roots.contains(&e.ident.to_string()) =>
+                {
+                    (&e.ident, &e.generics)
+                }
+                Item::Struct(s)
+                    if matches!(s.vis, Visibility::Public(_))
+                        && effective_roots.contains(&s.ident.to_string()) =>
+                {
+                    (&s.ident, &s.generics)
+                }
+                _ => return None,
+            };
+            let (_, us) = generic_tokens(generics);
+            Some((id.to_string(), us.iter().map(|t| t.to_string()).collect()))
+        })
+        .collect();
+
     let ctx = TransformCtx {
         cycle_types: cycle_types.clone(),
         root_types: effective_roots,
@@ -996,6 +1084,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         rec_param: rec_param.clone(),
         default_alias: default_alias.clone(),
         root_gen_use: gen_use.clone(),
+        root_ident_args,
     };
 
     // Inner default: (recursion_depth - 1) levels of __ExprRec<P0, P1, …, depth_ty>.

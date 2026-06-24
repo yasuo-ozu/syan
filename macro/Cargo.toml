@@ -26,6 +26,7 @@ proc-macro-error = { version = "1.0", default-features = false }
 derive-syn-parse = "0.2.0"
 type-leak = "0.2.0"
 itertools = "0.14.0"
+safegraph = { version = "0.1", default-features = false }
 
 [dependencies.syn]
 version = "2.0"

@@ -76,6 +76,36 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
     symbol::symbol(args).into()
 }
 
+/// Turn a module of mutually-recursive AST types (a *cycle*) into depth-limited concrete types.
+/// `#[recurse(visit)]` additionally emits a depth-generic visitor; `limit = N` sets the depth.
+///
+/// # The recursion root
+///
+/// The **root** is the single cycle type that controls recursion depth (its back-edges become the
+/// depth parameter `__Rec`). It is chosen automatically: a directly **self-referential** cycle type
+/// if one exists (the alphabetically-first when several), otherwise the cycle type most referenced by
+/// the others (as a bare field; ties broken by total references, then alphabetically). Any directly
+/// self-referential type is *also* treated as a root and collapses to `__Rec`.
+///
+/// # Generic arguments on a reference to the recursion root
+///
+/// A reference to a **root** type is the cycle's back-edge and collapses to the single depth
+/// parameter `__Rec`, so it must repeat the root's own parameters **verbatim (identity)**. A complex
+/// or substituted argument there is *non-regular* recursion (the param would grow at every level),
+/// which the single-`__Rec` depth machinery cannot express, so it is **rejected**:
+///
+/// ```text
+/// // root `Expr<S>`:
+/// Box<Expr<S>>          // OK   — identity back-edge
+/// Box<Expr<Vec<S>>>     // ERROR — wrapped param
+/// Box<Expr<u8>>         // ERROR — concrete substitution
+/// Stmt<Expr<Vec<S>>>    // ERROR — even nested inside a cross-edge
+/// ```
+///
+/// Complex arguments are only unsupported on a root back-edge. They are fine on a **cross-edge** to a
+/// non-root cycle type (`Box<Stmt<S, u8>>` — `u8` fills `Stmt`'s own param) and on **non-cycle** types
+/// (`Vec<S>`, `Option<S>`). Workaround for the rejected case: move the differing part into its own
+/// `#[derive(Ast)]` type.
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {

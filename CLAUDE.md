@@ -92,13 +92,18 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   params (heterogeneous): each keeps its own params (threaded into its `__*Rec` node + public alias),
   the `Visit`/`VisitRec` traits are keyed on the root's params, and a type's extra params become
   generics on its `visit_*` method. The one requirement is that every cycle type declare all of the
-  **root's** params (so the `__Rec` default `__RootDefault<root params>` is spellable). Unsupported
-  shapes are rejected with a clear `abort!` (not cryptic generated-code errors): a nested container
-  (`Vec<Option<_>>`), a cycle type missing a root param, and a multi-root cycle. Tests:
+  **root's** params (so the `__Rec` default `__RootDefault<root params>` is spellable), and that every
+  **back-edge to the root repeat the root's params verbatim** (identity) — a root reference collapses
+  to the single depth param `__Rec`, so a non-identity argument like `Expr<Vec<S>>` (a *non-regular*
+  recursion whose param grows per level) cannot be threaded. Unsupported shapes are rejected with a
+  clear `abort!` (not cryptic generated-code errors): a nested container (`Vec<Option<_>>`), a cycle
+  type missing a root param, a multi-root cycle, and a non-identity arg on a back-edge to the root
+  (was silently *dropped* → miscompile; both `#[recurse]` and `#[recurse(visit)]`). Tests:
   `visitor_recurse_cycle.rs` (root / cross-edge / back-edge /
   self-recursive root), `visitor_recurse_containers.rs` (container + tuple traversal),
   `recurse_generics.rs` (lifetime / type / const / heterogeneous params), `recurse_audit_test.rs` +
-  `ui/recurse_*.rs` (the rejections; `limit = 0` still panics).
+  `ui/recurse_*.rs` (the rejections; `ui/recurse_complex_root_param.rs` is the non-identity-arg case;
+  `limit = 0` still panics).
 
 ## Known gaps / limitations
 
@@ -322,3 +327,12 @@ lets the `Leaker` be dropped, per the standing TODO).
       visitor (`Visit`/`VisitRec`/`visit_*`/`XxxNode`); single-root cycles, trait-based
       (`visitor_recurse_cycle.rs`). The `visitor!()` path over a recurse cycle remains unsupported
       (see "Known gaps").
+- [x] ~~in recurse macro, support the case that one of the cycle type references root type giving
+      complex type params (not giving just the cycle type's type params, but giving `Vec<T>`,
+      `Option<T>`, ...).~~ Resolved by **rejection**, not support: a back-edge to the root collapses
+      to the single depth param `__Rec`, so a non-identity argument (`Expr<Vec<S>>`) is a *non-regular*
+      recursion the single-`__Rec` depth machinery cannot express. The argument used to be silently
+      dropped (miscompile); `transform_type` now compares a root reference's args against the root's
+      own params and `abort!`s with an actionable message (move the differing part into its own
+      `#[derive(Ast)]` type, or pass the params unchanged). Fires for both `#[recurse]` and
+      `#[recurse(visit)]`. Fixture: `ui/recurse_complex_root_param.rs` (in `recurse_audit_test.rs`).
