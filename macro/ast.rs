@@ -258,9 +258,13 @@ fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
 }
 
 /// Peel a field type (containers + refs) to its innermost head ident — the same heads the visitor
-/// follows. `None` for a non-path leaf. Used only by the "follows nothing" lint.
+/// follows. `None` for a non-path leaf or a tuple (a tuple contributes no single suspect head — the
+/// "follows nothing" lint, this fn's only caller, conservatively ignores it).
 fn peel_head(ty: &Type) -> Option<Ident> {
-    crate::util::peel(ty, &std::collections::HashSet::new()).map(|p| p.head)
+    match crate::util::peel(ty, &std::collections::HashSet::new())?.head {
+        crate::util::Head::Path { head, .. } => Some(head),
+        crate::util::Head::Tuple(_) => None,
+    }
 }
 
 fn for_each_field(data: &Data, mut f: impl FnMut(&Type)) {

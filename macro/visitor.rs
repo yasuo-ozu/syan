@@ -1,7 +1,7 @@
 use crate::util::{
-    angle, as_tuple, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
+    angle, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
     method_ident_m, mt, param_name, param_tokens, param_use, peel, recurse_lower_body, to_snake,
-    RecLower,
+    Head, RecLower,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -722,23 +722,27 @@ fn discover_followed(
     user_types: &HashSet<String>,
     out: &mut Vec<Path>,
 ) {
-    // Tuple element types must be inspected too (a followed type may be nested in a tuple field).
-    if let Some(elems) = as_tuple(ty) {
-        for elem in elems {
-            discover_followed(elem, subast, method_set, self_ident, user_types, out);
-        }
-        return;
-    }
     if let Some(p) = peel(ty, user_types) {
-        let hs = p.head.to_string();
-        if Some(hs.as_str()) == self_ident {
-            return; // self -> already in `done`
-        }
-        if let Some(e) = subast.iter().find(|e| e.key == p.head) {
-            // Fetch only when the entry's *real* type isn't visited/inherited (else a method,
-            // already fetched under its `visitor!(..)` path — even when the head is aliased).
-            if !method_set.contains(&last_ident(&e.path).to_string()) {
-                out.push(e.path.clone());
+        match &p.head {
+            // Tuple element types must be inspected too (a followed type may be nested in a tuple, or
+            // a tuple nested behind containers — `Vec<(Cast, Type)>`).
+            Head::Tuple(elems) => {
+                for elem in elems {
+                    discover_followed(elem, subast, method_set, self_ident, user_types, out);
+                }
+            }
+            Head::Path { head, .. } => {
+                let hs = head.to_string();
+                if Some(hs.as_str()) == self_ident {
+                    return; // self -> already in `done`
+                }
+                if let Some(e) = subast.iter().find(|e| &e.key == head) {
+                    // Fetch only when the entry's *real* type isn't visited/inherited (else a method,
+                    // already fetched under its `visitor!(..)` path — even when the head is aliased).
+                    if !method_set.contains(&last_ident(&e.path).to_string()) {
+                        out.push(e.path.clone());
+                    }
+                }
             }
         }
     }
@@ -1026,37 +1030,6 @@ impl<'a> Lower<'a> {
         depth: usize,
         stack: &mut Vec<String>,
     ) -> Option<TokenStream> {
-        // A tuple field: destructure it and lower each element (an element may itself be a followed
-        // type, a container of one, or a nested tuple). Leaf elements bind `_`; if no element is
-        // followed the whole tuple is a leaf (`None`, caller binds `_`). Mirrors the `#[recurse]`
-        // path's tuple handling.
-        if let Some(elems) = as_tuple(ty) {
-            let mut pats = Vec::new();
-            let mut stmts = Vec::new();
-            for (i, elem) in elems.iter().enumerate() {
-                let ebind = Ident::new(&format!("__t{depth}_{idx}_{i}"), Span::call_site());
-                if let Some(stmt) = self.lower_field(
-                    elem,
-                    &quote!(#ebind),
-                    idx,
-                    subast,
-                    self_ident,
-                    path,
-                    depth + 1,
-                    stack,
-                ) {
-                    pats.push(quote!(#ebind));
-                    stmts.push(stmt);
-                } else {
-                    pats.push(quote!(_));
-                }
-            }
-            if stmts.is_empty() {
-                return None; // tuple of only leaves -> leaf
-            }
-            return Some(quote!( { let ( #(#pats,)* ) = #binding; #(#stmts)* } ));
-        }
-
         let user_types = self_and_subast_keys(self_ident, subast);
         let p = peel(ty, &user_types)?;
         // A field behind a shared reference (`&T`/`&[T]`) is visitable on the shared side but a leaf
@@ -1064,22 +1037,76 @@ impl<'a> Lower<'a> {
         if self.mutable && p.shared_ref {
             return None;
         }
-        // Followed iff the head is self (implicit) or listed in this type's `#[subast]`. The
-        // *effective* head — the real type name + path — comes from the matched entry (so an
-        // aliased entry `Real as Aliased` dispatches to `visit_real`, not `visit_aliased`).
-        let (head, drill_path): (Ident, Path) = if Some(&p.head) == self_ident {
-            (p.head.clone(), path.clone())
-        } else if let Some(e) = subast.iter().find(|e| e.key == p.head) {
-            (last_ident(&e.path).clone(), e.path.clone())
-        } else {
-            return None; // leaf
-        };
         // Dispatch at the innermost (container-peeled) accessor, then wrap the container chain
-        // (handles nested containers like `Vec<Option<T>>`). An empty body (head drills to nothing)
-        // ⇒ the whole field is a leaf.
+        // (handles nested containers like `Vec<Option<T>>`, and now `Vec<(A, B)>`). An empty body
+        // (a leaf head, or a finite drill reaching nothing) ⇒ the whole field is a leaf.
         let acc = innermost_acc(&p.conts, binding);
-        let body = self.visit_value(&acc, &head, &drill_path, p.head_box, depth, stack);
+        let body = match &p.head {
+            // A tuple at the innermost position: destructure and lower each element (an element may
+            // itself be a followed type, a container of one, or a nested tuple).
+            Head::Tuple(elems) => {
+                self.lower_tuple(elems, &acc, p.head_box, idx, subast, self_ident, path, depth, stack)
+            }
+            // Followed iff the head is self (implicit) or listed in this type's `#[subast]`. The
+            // *effective* head — the real type name + path — comes from the matched entry (so an
+            // aliased entry `Real as Aliased` dispatches to `visit_real`, not `visit_aliased`).
+            Head::Path { head: phead, .. } => {
+                let resolved: Option<(Ident, Path)> = if Some(phead) == self_ident {
+                    Some((phead.clone(), path.clone()))
+                } else {
+                    // else: an entry's *real* type/path (aliased entries dispatch to the real type);
+                    // no match ⇒ leaf.
+                    subast
+                        .iter()
+                        .find(|e| &e.key == phead)
+                        .map(|e| (last_ident(&e.path).clone(), e.path.clone()))
+                };
+                match resolved {
+                    Some((head, drill_path)) => {
+                        self.visit_value(&acc, &head, &drill_path, p.head_box, depth, stack)
+                    }
+                    None => quote!(),
+                }
+            }
+        };
         (!body.is_empty()).then(|| fold_containers(&p.conts, binding, body, self.mutable))
+    }
+
+    /// Lower a tuple at the (container-peeled, box-dereffed) accessor `acc`: destructure it and lower
+    /// each element. Leaf elements bind `_`; an empty result (no followed element) makes the tuple a
+    /// leaf. Mirrors the `#[recurse]` path's `recurse_lower_tuple`.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_tuple(
+        &self,
+        elems: &[Type],
+        acc: &TokenStream,
+        head_box: usize,
+        idx: usize,
+        subast: &[SubEntry],
+        self_ident: Option<&Ident>,
+        path: &Path,
+        depth: usize,
+        stack: &mut Vec<String>,
+    ) -> TokenStream {
+        let mut pats = Vec::new();
+        let mut stmts = Vec::new();
+        for (i, elem) in elems.iter().enumerate() {
+            let ebind = Ident::new(&format!("__t{depth}_{idx}_{i}"), Span::call_site());
+            if let Some(stmt) =
+                self.lower_field(elem, &quote!(#ebind), idx, subast, self_ident, path, depth + 1, stack)
+            {
+                pats.push(quote!(#ebind));
+                stmts.push(stmt);
+            } else {
+                pats.push(quote!(_));
+            }
+        }
+        if stmts.is_empty() {
+            return quote!(); // tuple of only leaves -> leaf (empty body)
+        }
+        let amp = self.amp();
+        let stars: TokenStream = (0..=head_box).map(|_| quote!(*)).collect();
+        quote!( { let ( #(#pats,)* ) = #amp #stars #acc; #(#stmts)* } )
     }
 }
 

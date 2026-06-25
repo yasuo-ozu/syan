@@ -120,17 +120,6 @@ pub(crate) fn first_ty_arg(seg: &PathSegment) -> Option<&Type> {
     }
 }
 
-/// The element list of a tuple type, seeing through transparent `Group`/`Paren` wrappers; `None` if
-/// `ty` is not a tuple. (A visitor dispatches each followed element of a tuple field.)
-pub(crate) fn as_tuple(ty: &Type) -> Option<&punctuated::Punctuated<Type, Token![,]>> {
-    match ty {
-        Type::Tuple(t) => Some(&t.elems),
-        Type::Group(g) => as_tuple(&g.elem),
-        Type::Paren(p) => as_tuple(&p.elem),
-        _ => None,
-    }
-}
-
 /// The identifier of an enum/struct item (`None` for anything else).
 pub(crate) fn item_ident(item: &Item) -> Option<&Ident> {
     match item {
@@ -165,18 +154,29 @@ pub(crate) struct ContLayer {
     pub boxes: usize,
 }
 
+/// What sits at the innermost peeled position (after the container/box layers): the common case is a
+/// path head, but a tuple can appear there too — directly (`(A, B)`) or nested behind containers/boxes
+/// (`Vec<(A, B)>`, `Box<(A, B)>`). A tuple has no single head ident; its elements are lowered
+/// recursively (each may itself be a followed type, a container of one, or a nested tuple).
+pub(crate) enum Head {
+    Path {
+        head: Ident,
+        /// The FIRST path segment ident of the innermost peeled path (for a single-segment path
+        /// `head_lead == head`). A same-module cycle reference is always a bare single-segment ident,
+        /// so a caller deciding cycle membership (e.g. `recurse`) keys on this to reject a foreign
+        /// multi-segment path whose last segment merely happens to equal a cycle type name.
+        head_lead: Ident,
+    },
+    Tuple(Vec<Type>),
+}
+
 /// The result of peeling a field type to its visitable head.
 pub(crate) struct Peeled {
     /// Container layers wrapping the head, OUTER→INNER. Empty ⇒ a direct (single-value) head; a chain
     /// of length > 1 is a nested container (`Vec<Option<T>>` ⇒ `[Seq, Opt]`).
     pub conts: Vec<ContLayer>,
-    pub head: Ident,
-    /// The FIRST path segment ident of the innermost peeled path (for a single-segment path
-    /// `head_lead == head`). A same-module cycle reference is always a bare single-segment ident, so
-    /// a caller deciding cycle membership (e.g. `recurse`) keys on this to reject a foreign
-    /// multi-segment path whose last segment merely happens to equal a cycle type name.
-    pub head_lead: Ident,
-    /// `Box` layers directly around the head; a dispatch derefs through these (`&**…`) to reach `&head`.
+    pub head: Head,
+    /// `Box` layers directly around the head/tuple; a dispatch derefs through these (`&**…`).
     pub head_box: usize,
     /// The head sits behind a shared reference (`&T`, `&[T]`, …) — peeled transparently. Such a field
     /// can be visited on the shared side but NOT on the `&mut` side (no `&mut head` through a `&`), so
@@ -192,7 +192,12 @@ fn container_of(c: Container, mut inner: Peeled) -> Peeled {
 }
 
 fn direct(head: Ident, head_lead: Ident) -> Peeled {
-    Peeled { conts: Vec::new(), head, head_lead, head_box: 0, shared_ref: false }
+    Peeled {
+        conts: Vec::new(),
+        head: Head::Path { head, head_lead },
+        head_box: 0,
+        shared_ref: false,
+    }
 }
 
 /// Peel a field type to its visitable head + its container chain. A path head listed in `user_types`
@@ -237,6 +242,14 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
                 _ => Some(direct(seg.ident.clone(), lead)),
             }
         }
+        // A tuple at the innermost peeled position (`(A, B)`, or `Vec<(A, B)>` / `Box<(A, B)>` after
+        // its container/box layers are peeled): each element is lowered recursively by the caller.
+        Type::Tuple(t) => Some(Peeled {
+            conts: Vec::new(),
+            head: Head::Tuple(t.elems.iter().cloned().collect()),
+            head_box: 0,
+            shared_ref: false,
+        }),
         _ => None,
     }
 }
@@ -337,73 +350,87 @@ pub(crate) fn recurse_lower_field(
     ty: &Type,
     binding: &TokenStream,
 ) -> Option<TokenStream> {
-    if let Some(elems) = as_tuple(ty) {
-        let mut pats = Vec::new();
-        let mut stmts = Vec::new();
-        for (i, elem) in elems.iter().enumerate() {
-            let bi = Ident::new(&format!("__t{i}"), Span::call_site());
-            if let Some(s) = recurse_lower_field(ctx, stack, elem, &quote!(#bi)) {
-                pats.push(quote!(#bi));
-                stmts.push(s);
-            } else {
-                pats.push(quote!(_));
-            }
-        }
-        if stmts.is_empty() {
-            return None;
-        }
-        return Some(quote!( { let ( #(#pats,)* ) = #binding; #(#stmts)* } ));
-    }
     let p = peel(ty, &HashSet::new())?;
-    let hs = p.head_lead.to_string();
-    let dp = ctx.root_dp.get(&hs);
-    let listed = ctx.method_set.contains(&hs);
-    if dp.is_none() && !listed && !ctx.cycle.contains(&hs) {
-        return None; // leaf (not a followed cycle type)
-    }
-    let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
-    let amp = if ctx.mutable { quote!(&mut) } else { quote!(&) };
-    let visit_rec_fn = if ctx.mutable {
-        quote!(visit_rec_mut)
-    } else {
-        quote!(visit_rec)
-    };
-    // The action on one (container-peeled, box-dereffed) element accessor: a back-edge dispatches
-    // through the depth param, a listed head calls its `visit_*`, and an *unlisted* cycle head is
-    // drilled inline (destructure its node + recurse into its fields, back-edges still via the depth
-    // params) — the recurse analogue of the acyclic drill-in.
-    let one = |acc: &TokenStream, stack: &mut Vec<String>| -> TokenStream {
-        if let Some(d) = dp {
-            quote!( #d::#visit_rec_fn(#amp #stars #acc, v); )
-        } else if listed {
-            let m = method_ident_m(&p.head_lead, ctx.mutable);
-            quote!( v.#m(#amp #stars #acc); )
-        } else {
-            let Some((y_def, y_node)) = ctx.cycle_defs.get(&hs) else {
-                abort!(
-                    ty,
-                    "visitor!() over `#[recurse]`: cannot drill the unlisted cross-edge cycle type \
-                     `{}` (its definition was not fetched — list it in `#[subast(...)]`)",
-                    hs
-                );
-            };
-            if stack.contains(&hs) {
-                abort!(
-                    ty,
-                    "visitor!() over `#[recurse]`: a cycle of *unlisted* intermediates (through `{}`) \
-                     can't be drilled inline; list one of them in `visitor!(...)` to break it",
-                    hs
-                );
+    let acc = innermost_acc(&p.conts, binding);
+    let body = match &p.head {
+        Head::Tuple(elems) => recurse_lower_tuple(ctx, stack, elems, &acc, p.head_box)?,
+        Head::Path { head_lead, .. } => {
+            let hs = head_lead.to_string();
+            let dp = ctx.root_dp.get(&hs);
+            let listed = ctx.method_set.contains(&hs);
+            if dp.is_none() && !listed && !ctx.cycle.contains(&hs) {
+                return None; // leaf (not a followed cycle type)
             }
-            stack.push(hs.clone());
-            let body = recurse_lower_scrut(ctx, stack, y_def, y_node, &quote!(#amp #stars #acc));
-            stack.pop();
-            body
+            let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
+            let amp = if ctx.mutable { quote!(&mut) } else { quote!(&) };
+            let visit_rec_fn = if ctx.mutable {
+                quote!(visit_rec_mut)
+            } else {
+                quote!(visit_rec)
+            };
+            // The action on the (container-peeled, box-dereffed) accessor: a back-edge dispatches
+            // through the depth param, a listed head calls its `visit_*`, and an *unlisted* cycle head
+            // is drilled inline (destructure its node + recurse into its fields, back-edges still via
+            // the depth params) — the recurse analogue of the acyclic drill-in.
+            if let Some(d) = dp {
+                quote!( #d::#visit_rec_fn(#amp #stars #acc, v); )
+            } else if listed {
+                let m = method_ident_m(head_lead, ctx.mutable);
+                quote!( v.#m(#amp #stars #acc); )
+            } else {
+                let Some((y_def, y_node)) = ctx.cycle_defs.get(&hs) else {
+                    abort!(
+                        ty,
+                        "visitor!() over `#[recurse]`: cannot drill the unlisted cross-edge cycle \
+                         type `{}` (its definition was not fetched — list it in `#[subast(...)]`)",
+                        hs
+                    );
+                };
+                if stack.contains(&hs) {
+                    abort!(
+                        ty,
+                        "visitor!() over `#[recurse]`: a cycle of *unlisted* intermediates (through \
+                         `{}`) can't be drilled inline; list one of them in `visitor!(...)` to break it",
+                        hs
+                    );
+                }
+                stack.push(hs.clone());
+                let drilled =
+                    recurse_lower_scrut(ctx, stack, y_def, y_node, &quote!(#amp #stars #acc));
+                stack.pop();
+                drilled
+            }
         }
     };
-    let acc = innermost_acc(&p.conts, binding);
-    let body = one(&acc, stack);
     Some(fold_containers(&p.conts, binding, body, ctx.mutable))
+}
+
+/// Lower a tuple at the (container-peeled, box-dereffed) accessor `acc`: destructure it and recurse
+/// into each element. `None` if no element is followed (the whole tuple is then a leaf).
+fn recurse_lower_tuple(
+    ctx: &RecLower,
+    stack: &mut Vec<String>,
+    elems: &[Type],
+    acc: &TokenStream,
+    head_box: usize,
+) -> Option<TokenStream> {
+    let mut pats = Vec::new();
+    let mut stmts = Vec::new();
+    for (i, elem) in elems.iter().enumerate() {
+        let bi = Ident::new(&format!("__t{i}"), Span::call_site());
+        if let Some(s) = recurse_lower_field(ctx, stack, elem, &quote!(#bi)) {
+            pats.push(quote!(#bi));
+            stmts.push(s);
+        } else {
+            pats.push(quote!(_));
+        }
+    }
+    if stmts.is_empty() {
+        return None;
+    }
+    let amp = if ctx.mutable { quote!(&mut) } else { quote!(&) };
+    let stars: TokenStream = (0..=head_box).map(|_| quote!(*)).collect();
+    Some(quote!( { let ( #(#pats,)* ) = #amp #stars #acc; #(#stmts)* } ))
 }
 
 /// `(pattern, statements)` for a recurse cycle type's fields.
