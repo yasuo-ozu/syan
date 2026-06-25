@@ -141,12 +141,19 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   crate::ast::Stmt)` over a recurse cycle now works (no `#[recurse(visit)]` needed):
   `generate_recurse_module` emits `VisitRec` + `visit_*<R…>` + node aliases + the `VisitRec` impls
   (root node → its visit, terminator → no-op); a back-edge drives via the depth param, a cross-edge to
-  a listed type calls `this.visit_*`. Test: `visitor_recurse_via_visitor.rs`. **Current Phase-1a
-  limits** (all clean `abort!`s, lifted in later phases): one cycle per `visitor!()` call; no *mixing*
-  recurse cycle types with acyclic types in one call (separate calls for now); no inheritance
-  (`base => …`) over recurse; no closures (depth-generic methods can't back a closure `Driver`) and no
-  `visit_mut` for recurse types yet; drilling an *unlisted* recurse cross-edge isn't supported (list
-  it). `#[recurse(visit)]` still works (and `#[derive(Ast)]`'s own `__XRec!` metadata is untouched).
+  a listed type calls `this.visit_*`. Test: `visitor_recurse_via_visitor.rs`.
+  **Mixed outer+inner in one `visitor!()`** (Phase 1b, shipped): one call can list both acyclic types
+  and a recurse cycle (`visitor!(crate::Program, crate::ast::Expr, crate::ast::Stmt)`), producing ONE
+  `Visit<…>` trait with fixed `visit_program(&Program)` *and* depth-generic `visit_expr<R>(&ExprNode<…>)`
+  methods (`generate_module_mixed`). An acyclic body that follows a recurse field lowers (via the
+  existing `Lower`) to `this.visit_expr(field)`, which type-checks because the public alias
+  `Expr<…> = __ExprRec<…, default>` infers `R = default` — so **one `Visit` impl + one `.visit()` crosses
+  the boundary automatically** (no manual `rec::Visit::visit_*` hand-off as in `visitor_mixed_recurse.rs`).
+  Test: `visitor_recurse_mixed.rs`. **Current limits** (clean `abort!`s, later phases): one cycle per
+  call; no inheritance (`base => …`) over recurse; no closures (depth-generic methods can't back a
+  closure `Driver`, so a recurse-listing visitor is struct/`&mut`-visitor only) and no `visit_mut` for
+  recurse types yet; drilling an *unlisted* recurse cross-edge isn't supported (list it).
+  `#[recurse(visit)]` still works (and `#[derive(Ast)]`'s own `__XRec!` metadata is untouched).
   **Drill-in over *acyclic* types in a `#[recurse]` module** also works (`visitor_recurse_drill.rs`).
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
