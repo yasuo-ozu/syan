@@ -455,7 +455,7 @@ pub(crate) trait Adt {
                     &substruct.generics,
                     &substruct.ident,
                     nonce,
-                    &trait_path,
+                    trait_path,
                 )
             })
             .collect();

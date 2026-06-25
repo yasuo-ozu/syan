@@ -189,7 +189,7 @@ fn find_cycle_sccs(graph: &HashMap<String, HashSet<String>>) -> Vec<HashSet<Stri
             sccs.push(scc.iter().map(|&n| names[*g.node(n) as usize].clone()).collect());
         } else {
             let name = names[*g.node(scc[0]) as usize];
-            if graph.get(name).map_or(false, |refs| refs.contains(name)) {
+            if graph.get(name).is_some_and(|refs| refs.contains(name)) {
                 sccs.push(std::iter::once(name.clone()).collect());
             }
         }
@@ -816,7 +816,7 @@ fn build_scc(
         .filter(|name| {
             type_refs
                 .get(*name)
-                .map_or(false, |refs| refs.contains(*name))
+                .is_some_and(|refs| refs.contains(*name))
         })
         .cloned()
         .collect();
@@ -888,12 +888,12 @@ fn build_scc(
         .iter()
         .find_map(|item| match item {
             Item::Enum(e)
-                if matches!(e.vis, Visibility::Public(_)) && e.ident.to_string() == root_name =>
+                if matches!(e.vis, Visibility::Public(_)) && e.ident == root_name =>
             {
                 Some(e.generics.clone())
             }
             Item::Struct(s)
-                if matches!(s.vis, Visibility::Public(_)) && s.ident.to_string() == root_name =>
+                if matches!(s.vis, Visibility::Public(_)) && s.ident == root_name =>
             {
                 Some(s.generics.clone())
             }
@@ -1097,14 +1097,14 @@ fn build_scc(
                     Item::Enum(e)
                         if matches!(e.vis, Visibility::Public(_))
                             && scc.contains(&e.ident.to_string())
-                            && e.ident.to_string() != root_name =>
+                            && e.ident != root_name =>
                     {
                         (&e.ident, &e.generics)
                     }
                     Item::Struct(s)
                         if matches!(s.vis, Visibility::Public(_))
                             && scc.contains(&s.ident.to_string())
-                            && s.ident.to_string() != root_name =>
+                            && s.ident != root_name =>
                     {
                         (&s.ident, &s.generics)
                     }

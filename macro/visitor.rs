@@ -717,8 +717,6 @@ fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
     }
 }
 
-/// See through transparent wrappers (`Group`/`Paren`) to a tuple type's element list. `None` if `ty`
-/// is not a tuple. Mirrors `recurse::as_tuple` so the `visitor!()` path traverses tuple fields too.
 // ---------------------------------------------------------------------------
 // Module generation
 // ---------------------------------------------------------------------------
@@ -1641,7 +1639,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     let targets: Vec<&DoneType> = st
         .done
         .iter()
-        .filter(|d| item_ident(&d.def).map_or(false, |id| visited.contains(&id.to_string())))
+        .filter(|d| item_ident(&d.def).is_some_and(|id| visited.contains(&id.to_string())))
         .collect();
     if targets.is_empty() {
         abort!(Span::call_site(), "no AST definitions resolved for the visitor");
