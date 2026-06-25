@@ -53,11 +53,9 @@ fn macro_audit_compile_fail() {
     // A union listed in visitor!() is silently dropped (misleading "no AST definitions resolved").
     t.compile_fail("tests/ui/audit_visitor_union.rs");
 
-    // ── #[recurse] / #[recurse(visit)] ──────────────────────────────────────────────────────────
+    // ── #[recurse] ──────────────────────────────────────────────────────────────────────────────
     // (#6 limit=1-generic and #7 foreign-dispatch are now FIXED — positive regression tests live in
     //  recurse_fixes.rs.)
-    // Helper params __V / __R / __Rec are not hygienic (collide with a user param) → E0403.
-    t.compile_fail("tests/ui/audit_recurse_helper_param_collision.rs");
     // Generated terminator `XxxTerm` collides with a user type of that name → E0428.
     t.compile_fail("tests/ui/audit_recurse_terminator_collision.rs");
     // A where-clause on a cycle type is not threaded into the regenerated items → cryptic E0277.

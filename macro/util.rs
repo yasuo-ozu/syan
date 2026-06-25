@@ -51,6 +51,26 @@ pub(crate) fn param_use(p: &GenericParam) -> TokenStream {
     }
 }
 
+/// One generic param's `(declaration, use)` token forms. They coincide for lifetimes (`'a`) and type
+/// params (`T`) but differ for const params (`const N: usize` vs `N`). The declaration form is bare
+/// (no bounds/defaults), so it suits a method generic too.
+pub(crate) fn param_tokens(p: &GenericParam) -> (TokenStream, TokenStream) {
+    match p {
+        GenericParam::Lifetime(lt) => {
+            let l = &lt.lifetime;
+            (quote!(#l), quote!(#l))
+        }
+        GenericParam::Type(t) => {
+            let i = &t.ident;
+            (quote!(#i), quote!(#i))
+        }
+        GenericParam::Const(c) => {
+            let (i, ty) = (&c.ident, &c.ty);
+            (quote!(const #i: #ty), quote!(#i))
+        }
+    }
+}
+
 /// Generic params with defaults stripped (for `impl<...>` / `trait<...>` / `struct<...>` headers).
 pub(crate) fn gparams(g: &Generics) -> Vec<GenericParam> {
     g.params
@@ -246,12 +266,12 @@ pub(crate) fn method_ident_m(head: &Ident, mutable: bool) -> Ident {
 }
 
 // ---------------------------------------------------------------------------
-// Recurse cycle-body lowering, shared by `#[recurse(visit)]` (recurse.rs) and `visitor!()` over a
-// recurse cycle (visitor.rs). Classifies a cycle type's fields: a back-edge to a root drives via that
+// Recurse cycle-body lowering for `visitor!()` over a `#[recurse]` cycle (visitor.rs's
+// `generate_module_mixed`). Classifies a cycle type's fields: a back-edge to a root drives via that
 // root's depth param (`root_dp[head]::visit_rec{,_mut}`); a cross-edge to a *listed* type
 // (`method_set`) calls `v.visit_<head>{,_mut}`; an unlisted cycle type aborts (no inline drill yet);
 // anything else is a leaf. `mutable` selects the `&`/`&mut`, `.iter()`/`.iter_mut()`, and method/
-// `visit_rec` suffix. `#[recurse(visit)]` lists every cycle type, so `method_set == cycle` there.
+// `visit_rec` suffix.
 // ---------------------------------------------------------------------------
 
 /// Lower one field (see the module-comment above). `binding` is the destructured field (`&Field` /

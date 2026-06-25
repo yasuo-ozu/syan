@@ -76,8 +76,9 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
     symbol::symbol(args).into()
 }
 
-/// Turn a module of mutually-recursive AST types (a *cycle*) into depth-limited concrete types.
-/// `#[recurse(visit)]` additionally emits a depth-generic visitor; `limit = N` sets the depth.
+/// Turn a module of mutually-recursive AST types (a *cycle*) into depth-limited concrete types plus
+/// `@recurse` metadata; `limit = N` sets the depth. A depth-generic visitor over the cycle is then
+/// built by `syan::visit::visitor!(<cycle types>)` (see the "Visiting" section).
 ///
 /// # The recursion root
 ///
@@ -109,13 +110,13 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 ///
 /// # Visiting & limitations
 ///
-/// A depth-generic visitor over the cycle is generated either by `#[recurse(visit)]` or by
-/// `syan::visit::visitor!(<cycle types>)` (the latter can also span acyclic/outer types in one
-/// `Visit` trait). Such a recurse visitor is **trait/struct-based only** — its `visit_*<R>` methods are
-/// generic over the remaining depth, which a closure cannot be — and **cannot be inherited**:
-/// `visitor!(base => New)` where `base`/`New` cover `#[recurse]` cycle types is not supported (the
-/// inheritance supertrait machinery does not interop with the depth-generic methods). Build the
-/// recurse visitor directly with `visitor!(<cycle types>)` instead of via `base => …`.
+/// `#[recurse]` itself emits only the depth-limited *types* and `@recurse` metadata. A depth-generic
+/// visitor over the cycle is built by `syan::visit::visitor!(<cycle types>)` (which can also span
+/// acyclic/outer types in one `Visit` trait — the outer→inner boundary is crossed automatically).
+/// Such a recurse visitor is **trait/struct-based only** — its `visit_*<R>` methods are generic over
+/// the remaining depth, which a closure cannot be — and **cannot be inherited**: `visitor!(base =>
+/// New)` where `base`/`New` cover `#[recurse]` cycle types is not supported (the inheritance
+/// supertrait machinery does not interop with the depth-generic methods).
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {

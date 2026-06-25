@@ -7,6 +7,10 @@
 //!    used to be misdispatched as a cycle reference (E0308). Cycle membership now keys on the FIRST
 //!    path segment (via `Peeled::head_lead`), so it is correctly treated as a leaf.
 #![allow(dead_code)]
+// `visitor!()` fetching the `#[recurse]` `ast` module's metadata (with its foreign-typed `Foreign`
+// leaf) makes rustc misattribute a spurious "unused import" to the `#[recurse]` line — the
+// `use syan::visit::Ast;` is in fact used by `#[derive(Ast)]`. Cosmetic span-mapping artifact.
+#![allow(unused_imports)]
 
 use syan::parse::recurse;
 
@@ -56,7 +60,7 @@ mod other {
     pub struct Stmt;
 }
 
-#[recurse(visit)]
+#[recurse]
 mod ast {
     use core::marker::PhantomData;
     use syan::visit::Ast;
@@ -77,12 +81,16 @@ mod ast {
     }
 }
 
+mod v_ast {
+    syan::visit::visitor!(crate::ast::Expr, crate::ast::Stmt);
+}
+
 #[test]
 fn bug7_foreign_field_sharing_cycle_last_segment_is_a_leaf() {
-    // Compilation of the `#[recurse(visit)]` module above is the regression check (the generated
-    // visitor used to mis-call `visit_stmt` on the foreign `super::other::Stmt`). The empty impl
-    // relies on the trait's default method bodies.
+    // Compilation of the `visitor!()` over the `#[recurse]` module above is the regression check (the
+    // generated visitor used to mis-call `visit_stmt` on the foreign `super::other::Stmt`). The empty
+    // impl relies on the trait's default method bodies.
     struct V;
-    impl ast::Visit<()> for V {}
+    impl v_ast::Visit<()> for V {}
     let _ = V;
 }

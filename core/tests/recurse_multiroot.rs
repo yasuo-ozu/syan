@@ -10,7 +10,7 @@
 use core::marker::PhantomData;
 use syan::parse::recurse;
 
-#[recurse(visit)]
+#[recurse]
 mod ast {
     use core::marker::PhantomData;
     use syan::visit::Ast;
@@ -32,26 +32,30 @@ mod ast {
     }
 }
 
+mod v_ast {
+    syan::visit::visitor!(crate::ast::A, crate::ast::B);
+}
+
 #[derive(Default)]
 struct Counter {
     a: usize,
     b: usize,
 }
 
-impl<S> ast::Visit<S> for Counter {
-    fn visit_a<R0: ast::VisitRec<S, Self>, R1: ast::VisitRec<S, Self>>(
+impl<S> v_ast::Visit<S> for Counter {
+    fn visit_a<R0: v_ast::VisitRec<S, Self>, R1: v_ast::VisitRec<S, Self>>(
         &mut self,
-        i: &ast::ANode<S, R0, R1>,
+        i: &v_ast::ANode<S, R0, R1>,
     ) {
         self.a += 1;
-        ast::visit_a(self, i);
+        v_ast::visit_a(self, i);
     }
-    fn visit_b<R0: ast::VisitRec<S, Self>, R1: ast::VisitRec<S, Self>>(
+    fn visit_b<R0: v_ast::VisitRec<S, Self>, R1: v_ast::VisitRec<S, Self>>(
         &mut self,
-        i: &ast::BNode<S, R0, R1>,
+        i: &v_ast::BNode<S, R0, R1>,
     ) {
         self.b += 1;
-        ast::visit_b(self, i);
+        v_ast::visit_b(self, i);
     }
 }
 
@@ -59,19 +63,19 @@ impl<S> ast::Visit<S> for Counter {
 fn each_root_keeps_its_own_depth() {
     // A(outer) -> ToB(B) -> ToA(A) -> Lit. Each back-edge crosses between the A and B depth
     // dimensions; the visitor descends both and counts each type's nodes independently.
-    let v: ast::A<()> = ast::A::ToB(Box::new(ast::BNode::ToA(Box::new(ast::ANode::Lit(
+    let v: ast::A<()> = ast::A::ToB(Box::new(v_ast::BNode::ToA(Box::new(v_ast::ANode::Lit(
         PhantomData,
     )))));
     let mut c = Counter::default();
-    ast::Visit::visit_a(&mut c, &v);
+    v_ast::Visit::visit_a(&mut c, &v);
     assert_eq!((c.a, c.b), (2, 1), "two A nodes (outer + inner) and one B node");
 }
 
 #[test]
 fn visit_from_either_root() {
     // Pure-B nesting B -> Me(B) -> Lit, entered through visit_b.
-    let v: ast::B<()> = ast::B::Me(Box::new(ast::BNode::Lit(PhantomData)));
+    let v: ast::B<()> = ast::B::Me(Box::new(v_ast::BNode::Lit(PhantomData)));
     let mut c = Counter::default();
-    ast::Visit::visit_b(&mut c, &v);
+    v_ast::Visit::visit_b(&mut c, &v);
     assert_eq!((c.a, c.b), (0, 2), "two B nodes, no A");
 }

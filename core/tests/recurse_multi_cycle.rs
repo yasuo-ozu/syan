@@ -1,10 +1,9 @@
 //! Step 1 of multi-root support: several *independent* cycles (separate SCCs) in one `#[recurse]`
-//! module. Each cycle gets its own root, depth chain, terminator, public aliases, and — under
-//! `#[recurse(visit)]` — its own (root-prefixed) visitor traits, so the cycles don't interfere.
+//! module. Each cycle gets its own root, depth chain, terminator, and public aliases, so the cycles
+//! don't interfere; a `visitor!()` over both then keeps each cycle's depth dimension separate.
 //!
-//! Previously this was either a miscompile (plain `#[recurse]` collapsed both cycles into one
-//! `__Rec`, so one cycle's recursion wrongly bottomed out via the other's terminator) or a hard
-//! abort (`#[recurse(visit)]` rejected >1 self-referential type module-wide).
+//! Previously this was a miscompile (plain `#[recurse]` collapsed both cycles into one `__Rec`, so
+//! one cycle's recursion wrongly bottomed out via the other's terminator).
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -44,10 +43,11 @@ fn two_independent_cycles_build() {
     let _t: plain::Type<()> = plain::Type::Unit(PhantomData);
 }
 
-// ── two independent cycles, #[recurse(visit)] ────────────────────────────────────
-// Each cycle gets its own root-prefixed visitor: `ExprVisit`/`ExprVisitRec` and
-// `TypeVisit`/`TypeVisitRec`, plus `visit_expr`/`visit_type` and `ExprNode`/`TypeNode`.
-#[recurse(visit)]
+// ── two independent cycles, visited via one visitor!() ───────────────────────────
+// A single unified `visitor!()` over both cycles: one `Visit` trait carrying `visit_expr` +
+// `visit_type`, and one `VisitRec` dispatch serving both cycles' nodes/terminators — yet each cycle
+// keeps its own depth dimension, so the visitors descend only their own type and don't bleed.
+#[recurse]
 mod vis {
     use core::marker::PhantomData;
     use syan::visit::Ast;
@@ -67,17 +67,18 @@ mod vis {
     }
 }
 
-impl<S> vis::ExprVisit<S> for Counter {
-    fn visit_expr<R: vis::ExprVisitRec<S, Self>>(&mut self, i: &vis::ExprNode<S, R>) {
-        self.0 += 10;
-        vis::visit_expr(self, i);
-    }
+mod v_vis {
+    syan::visit::visitor!(crate::vis::Expr, crate::vis::Type);
 }
 
-impl<S> vis::TypeVisit<S> for Counter {
-    fn visit_type<R: vis::TypeVisitRec<S, Self>>(&mut self, i: &vis::TypeNode<S, R>) {
+impl<S> v_vis::Visit<S> for Counter {
+    fn visit_expr<R: v_vis::VisitRec<S, Self>>(&mut self, i: &v_vis::ExprNode<S, R>) {
+        self.0 += 10;
+        v_vis::visit_expr(self, i);
+    }
+    fn visit_type<R: v_vis::VisitRec<S, Self>>(&mut self, i: &v_vis::TypeNode<S, R>) {
         self.0 += 1;
-        vis::visit_type(self, i);
+        v_vis::visit_type(self, i);
     }
 }
 
@@ -85,14 +86,14 @@ impl<S> vis::TypeVisit<S> for Counter {
 fn independent_visitors_are_separate() {
     // Expr depth 2 (Nest + Lit) → +10 twice = 20; Type depth 2 → +1 twice = 2. Each cycle's visitor
     // descends only its own type — they don't bleed into each other.
-    let e: vis::Expr<()> = vis::Expr::Nest(Box::new(vis::ExprNode::Lit(PhantomData)));
-    let t: vis::Type<()> = vis::Type::Arrow(Box::new(vis::TypeNode::Unit(PhantomData)));
+    let e: vis::Expr<()> = vis::Expr::Nest(Box::new(v_vis::ExprNode::Lit(PhantomData)));
+    let t: vis::Type<()> = vis::Type::Arrow(Box::new(v_vis::TypeNode::Unit(PhantomData)));
 
     let mut c = Counter::default();
-    vis::ExprVisit::visit_expr(&mut c, &e);
+    v_vis::Visit::visit_expr(&mut c, &e);
     assert_eq!(c.0, 20, "two Expr nodes at +10 each");
 
     let mut c2 = Counter::default();
-    vis::TypeVisit::visit_type(&mut c2, &t);
+    v_vis::Visit::visit_type(&mut c2, &t);
     assert_eq!(c2.0, 2, "two Type nodes at +1 each");
 }

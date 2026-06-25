@@ -45,38 +45,41 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   (`base_host_crate`/`requalify_ancestor`). Tests: `cross_crate_inherit{,_multilevel,_4level,_downstream_mid}.rs`.
   Residual hole: a `super::`/`self::`-relative ancestor from an upstream intermediate isn't requalified
   (use `crate::`-rooted entry paths).
-- **`#[recurse(visit)]`**: a **depth-generic** visitor over a `#[recurse]` *cycle* — a `Visit<S…>` with
-  `visit_*<R>` methods, a `VisitRec<S…,V>` dispatch (root's depth chain drives, terminator is a no-op),
-  and `XxxNode` aliases. Trait-based only. Traverses `Vec`/`Option`/`Box` (incl. `Box`-around-`Option`)
-  and **tuples**; cycle types may carry lifetime/type/const params, possibly heterogeneous (extras
-  become `visit_*` method generics). Requirements: every cycle type declares the root's params, and a
-  back-edge to the root repeats them **verbatim** (a non-identity arg like `Expr<Vec<S>>` is rejected).
-  Clean `abort!`s for nested containers, a missing root param, and a non-identity root arg. Tests:
-  `visitor_recurse_cycle.rs`, `visitor_recurse_containers.rs`, `recurse_generics.rs`,
-  `recurse_audit_test.rs` + `ui/recurse_*.rs` (`limit = 0` still panics).
-- **Multiple independent cycles in one `#[recurse]` module**: cycle types are partitioned into SCCs
-  (`find_cycle_sccs`, via `safegraph` Tarjan); each cycle gets its own root/chain/`XxxTerm`/aliases/
-  visitor (`build_scc`). Several cycles → root-prefixed visitor trait names (`ExprVisit`, …); a lone
-  cycle keeps `Visit`/`VisitRec`. Fixed a latent collapse-into-one-`__Rec` miscompile.
-  `recurse_multi_cycle.rs`.
-- **Multiple self-referential roots within one cycle**: each root keeps its own depth dimension (one
-  depth param per root, depth chains unrolled mutually, per-root `XxxTerm`) — `build_multiroot_tail` /
-  `generate_multiroot_visitor`. Soundness guard: the SCC minus its roots must be acyclic
-  (`subgraph_is_cyclic`, via `safegraph` `is_cyclic_directed`) else a clear `abort!`
-  (`ui/recurse_multiroot_rootless_subcycle.rs`). Roots share params. `recurse_multiroot.rs`.
-- **`visitor!(…)` over a `#[recurse]` cycle**: `#[recurse]` emits `@recurse` metadata under each cycle
-  type's original name, and `visitor!()` consumes it to generate a depth-generic visitor keyed on its
-  own `Visit`/`VisitMut` traits — fixed `visit_X(&X)` for acyclic targets, depth-generic
-  `visit_Y<R…>(&YNode<…>)` for recurse targets, with `VisitRec`/`VisitRecMut` dispatch, in one unified
-  `generate_module_mixed` (acyclic-only visitors keep the original `gen_side` path). One `visitor!()`
-  can **mix** acyclic + recurse types (the outer→inner boundary auto-crosses), span **several
-  independent cycles** (each recurse target carries its own cycle's roots/depth), handle **multi-root**
-  cycles (one depth param per root), and emits both the **shared and `&mut`** sides. Works
-  **cross-crate** too — a downstream `visitor!(upstream::Expr, …)` over an upstream `#[recurse]` cycle
-  resolves the `$crate`-rooted `@node`/`@terms` back to the defining crate; inherent `.visit()` is
-  skipped for a *foreign* target (an inherent impl there is E0116 — use the `Visit::visit_*` trait
-  method), via `path_is_crate_local`. Tests: `visitor_recurse_via_visitor.rs` (incl. `visit_mut`),
-  `visitor_recurse_mixed.rs`, `visitor_recurse_multiroot_via_visitor.rs`,
+- **`#[recurse(limit = N)]`** (type transformer + metadata — *no* visitor): turns a module of
+  mutually-recursive AST types into depth-limited concrete types — renames each cycle type `Xxx` →
+  `__XxxRec<…, depth>`, emits per-root terminators / `__XxxDefault` depth chains / the public `pub type
+  Xxx = …` aliases, and a `@recurse` metadata macro (under each type's original name) that `visitor!()`
+  consumes. Cycle types may carry lifetime/type/const params, possibly **heterogeneous** across the
+  cycle; every cycle type declares the root's params and a back-edge to the root repeats them
+  **verbatim** (a non-identity arg like `Expr<Vec<S>>` is rejected). **Multiple independent cycles** in
+  one module are partitioned into SCCs (`find_cycle_sccs`, via `safegraph` Tarjan), each with its own
+  root/chain/`XxxTerm`/aliases (`build_scc`; fixed a latent collapse-into-one-`__Rec` miscompile).
+  **Multiple self-referential roots** in one cycle each keep their own depth dimension (one depth param
+  per root, chains unrolled mutually, per-root `XxxTerm` — `build_multiroot_tail`); soundness guard:
+  the SCC minus its roots must be acyclic (`subgraph_is_cyclic`, via `safegraph` `is_cyclic_directed`)
+  else a clear `abort!` (`ui/recurse_multiroot_rootless_subcycle.rs`). Clean `abort!`s for a missing
+  root param and a non-identity root arg (`limit = 0` still panics). Tests: `recurse_multi_cycle.rs`,
+  `recurse_multiroot.rs`, `recurse_fixes.rs`, `recurse_audit_test.rs` + `ui/recurse_*.rs`.
+- **`visitor!(…)` over a `#[recurse]` cycle** (the **only** recurse-visitor path): `visitor!()`
+  consumes the `@recurse` metadata to generate a **depth-generic** visitor keyed on its own
+  `Visit`/`VisitMut` traits — `visit_X(&X)` for acyclic targets, depth-generic `visit_Y<R…>(&YNode<…>)`
+  for recurse targets, with `VisitRec`/`VisitRecMut` dispatch (root's depth chain drives, terminator a
+  no-op) + `XxxNode` aliases, all in one `generate_module_mixed` (acyclic-only visitors keep the
+  `gen_side` path). Trait/struct-based only (a closure can't be depth-generic). The trait is keyed on
+  the cycle **roots'** params; a non-root cycle type's params beyond the roots' become `visit_*`
+  **method generics** — so a **heterogeneous** cycle `Expr<S>` + `Stmt<S, T>` ⇒ `Visit<S>` +
+  `visit_stmt<T, R>` (`visitor_recurse_heterogeneous.rs`). One `visitor!()` can **mix** acyclic +
+  recurse types (the outer→inner boundary auto-crosses; acyclic params must be ⊆ the roots' params else
+  a clear `abort!` — `ui/visitor_recurse_mixed_acyclic_extra_param.rs`), span **several independent
+  cycles** (one unified `Visit`; each target carries its cycle's roots/depth), handle **multi-root**
+  cycles (one depth param per root), traverse `Vec`/`Option`/`Box` (incl. `Box`-around-`Option`) +
+  **tuples**, and emit both the **shared and `&mut`** sides. Works **cross-crate** — a downstream
+  `visitor!(upstream::Expr, …)` resolves the `$crate`-rooted `@node`/`@terms` to the defining crate;
+  inherent `.visit()` is skipped for a *foreign* target (E0116 — use the `Visit::visit_*` trait
+  method), via `path_is_crate_local`. Nested containers (`Vec<Option<T>>`) get a clean `abort!`. Tests:
+  `visitor_recurse_via_visitor.rs` (incl. `visit_mut`), `visitor_recurse_heterogeneous.rs`,
+  `visitor_recurse_mixed.rs`, `visitor_recurse_containers.rs`, `visitor_recurse_cycle.rs`,
+  `recurse_generics.rs`, `visitor_recurse_multiroot_via_visitor.rs`,
   `visitor_recurse_multicycle_via_visitor.rs`, `rust/tests/cross_crate_recurse.rs`. See the
   "`#[recurse]` expansion & how `visitor!()` consumes it" section for the contract and current limits.
 
@@ -91,8 +94,8 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.
-- **Nested containers** (`Vec<Option<T>>`) are unsupported on both the `visitor!()` and
-  `#[recurse(visit)]` paths (clear build error); wrap the inner part in its own `#[derive(Ast)]` type.
+- **Nested containers** (`Vec<Option<T>>`) are unsupported on the `visitor!()` path (acyclic and over
+  a `#[recurse]` cycle alike — clear build error); wrap the inner part in its own `#[derive(Ast)]` type.
 
 ## Fix plan — `visitor!()`-over-`#[recurse]` remaining limits
 
@@ -115,18 +118,10 @@ value/tractability:
    impls come from `base`), and let the new types' bodies cross into them via `this.visit_<inherited>`.
    Requires the new union params ⊇ the base's, and the base's depth params to line up — feasible since
    `VisitRec`'s `visit_rec` signature is uniform.
-3. **Collapse `#[recurse(visit)]` into sugar** (cleanup; large + breaking-risk). Make it expand to
-   `#[recurse]` + an auto-`visitor!(<cycle types>)`, then delete `recurse.rs`'s
-   `generate_recurse_visitor`/`generate_multiroot_visitor`. **Blocker:** `#[recurse(visit)]` keys its
-   `Visit` trait on the *root's* params (a non-root's extras → method generics, e.g. the heterogeneous
-   `recurse_generics.rs` case `Visit<S>` + `visit_stmt<T, R>`), while `generate_module_mixed` keys on
-   the *union* (`Visit<S, T>`). To avoid changing the API (and breaking those tests), first switch the
-   recurse path to **root-params keying** (union → roots' params; each recurse type's params beyond
-   the roots' become `visit_*` method generics), then route both through one generator.
-4. **Closures over recurse — won't fix (fundamental).** A `visit_*<R: VisitRec>` method is generic
+3. **Closures over recurse — won't fix (fundamental).** A `visit_*<R: VisitRec>` method is generic
    over the remaining depth; a closure is one concrete `FnMut` and can't be depth-generic, so the
    `Driver`/`Hook`/`Chain` machinery cannot implement the unified `Visit` trait. This is inherent (the
-   same reason `#[recurse(visit)]` was always trait-only) — document it, don't track it as a TODO.
+   reason a recurse visitor has always been trait-only) — document it, don't track it as a TODO.
 
 ---
 
@@ -423,12 +418,12 @@ emitted **only** when `X` is listed in `visitor!(…)` (selective), exactly as f
 __ExprRec<S, __ExprDefault<S>>`, the call infers `R = __ExprDefault<S>`. So a *fixed* `visit_program`
 and a *depth-generic* `visit_expr` live in the **same `Visit<S>` trait**; one `Visit` impl + one
 `.visit()` walks the whole tree and crosses the boundary into the cycle automatically (no manual
-`rec::Visit::visit_expr(...)` hand-off as in `visitor_mixed_recurse.rs`). The back-edge inside the
+`v_rec::Visit::visit_expr(...)` hand-off as in `visitor_mixed_recurse.rs`). The back-edge inside the
 cycle dispatches through `R::visit_rec`, so the depth `__Rec` is handled entirely by the visit traits.
 
 **Constraints.** Depth-generic methods can't be implemented by a closure `Driver`, so a visitor that
-lists any recurse type is **trait/struct-only** (no closures/tuples) — the same limitation
-`#[recurse(visit)]` always had. Multi-root cycles give `visit_<X>` one `R` per root.
+lists any recurse type is **trait/struct-only** (no closures/tuples) — inherent to a depth-generic
+recurse visitor. Multi-root cycles give `visit_<X>` one `R` per root.
 
 ## Multiple AST types + multi-root example
 

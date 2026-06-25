@@ -1,5 +1,5 @@
 use crate::ast::{cleaned_item, crate_rooted_tokens, parse_subast, subast_tokens};
-use crate::util::{item_generics, recurse_lower_body, to_snake};
+use crate::util::{param_tokens, to_snake};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::{abort, set_dummy};
@@ -16,27 +16,19 @@ const DEFAULT_RECURSION_DEPTH: usize = 4;
 
 struct RecurseArgs {
     limit: usize,
-    /// `#[recurse(visit)]`: also generate a depth-generic visitor over the cycle.
-    visit: bool,
 }
 
 impl syn::parse::Parse for RecurseArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut limit = DEFAULT_RECURSION_DEPTH;
-        let mut visit = false;
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
             if ident == "limit" {
                 let _: Token![=] = input.parse()?;
                 let lit: syn::LitInt = input.parse()?;
                 limit = lit.base10_parse()?;
-            } else if ident == "visit" {
-                visit = true;
             } else {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    "expected `limit = <integer>` or `visit`",
-                ));
+                return Err(syn::Error::new(ident.span(), "expected `limit = <integer>`"));
             }
             if input.peek(Token![,]) {
                 let _: Token![,] = input.parse()?;
@@ -44,7 +36,7 @@ impl syn::parse::Parse for RecurseArgs {
                 break;
             }
         }
-        Ok(RecurseArgs { limit, visit })
+        Ok(RecurseArgs { limit })
     }
 }
 
@@ -322,25 +314,6 @@ fn param_key(p: &GenericParam) -> String {
     }
 }
 
-/// One generic param's `(declaration, use)` token forms. They coincide for lifetimes (`'a`) and type
-/// params (`T`) but differ for const params (`const N: usize` vs `N`).
-fn param_tokens(p: &GenericParam) -> (TokenStream, TokenStream) {
-    match p {
-        GenericParam::Lifetime(lt) => {
-            let l = &lt.lifetime;
-            (quote!(#l), quote!(#l))
-        }
-        GenericParam::Type(t) => {
-            let i = &t.ident;
-            (quote!(#i), quote!(#i))
-        }
-        GenericParam::Const(c) => {
-            let (i, ty) = (&c.ident, &c.ty);
-            (quote!(const #i: #ty), quote!(#i))
-        }
-    }
-}
-
 /// A type's generic params as `(declaration, use)` token lists, in declaration order. Used both for
 /// the root (the depth chain) and per cycle type (its own alias / node type), so a recurse cycle may
 /// carry lifetimes / type params / const params alongside the depth `__Rec`.
@@ -353,25 +326,6 @@ fn generic_tokens(generics: &Generics) -> (Vec<TokenStream>, Vec<TokenStream>) {
         us.push(u);
     }
     (decl, us)
-}
-
-/// A cycle type's own params in *use* form (to spell its `__*Rec` node) plus the params the root does
-/// NOT have, in *declaration* form. In the visitor the trait is keyed on the root's (shared) params;
-/// a cycle type's extra params become generics on its `visit_*` method.
-fn type_param_tokens(
-    generics: &Generics,
-    root_keys: &HashSet<String>,
-) -> (Vec<TokenStream>, Vec<TokenStream>) {
-    let mut own_use = Vec::new();
-    let mut extra_decl = Vec::new();
-    for p in &generics.params {
-        let (decl, us) = param_tokens(p);
-        own_use.push(us);
-        if !root_keys.contains(&param_key(p)) {
-            extra_decl.push(decl);
-        }
-    }
-    (own_use, extra_decl)
 }
 
 fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
@@ -481,14 +435,12 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
 }
 
 // ---------------------------------------------------------------------------
-// `#[recurse(visit)]`: a depth-generic visitor over the cycle.
+// Multi-root soundness guard.
 //
-// `#[recurse]` rewrites the cycle's back-edges to the root into the generic `__Rec` param and each
-// nesting level into a distinct concrete type, so a fixed-type visitor cannot traverse it. Instead
-// we generate visit methods generic over the depth (one `__R` per root) plus a `VisitRec` dispatch
-// trait that each root's depth chain and the terminators implement, turning the depth recursion into
-// trait dispatch. `generate_recurse_visitor` handles one or several roots; the per-field body lowering
-// is shared with `visitor!()`'s recurse path via `util::recurse_lower_body`.
+// `#[recurse]` only emits the depth-limited *types* + `@recurse` metadata; the depth-generic visitor
+// is built by `visitor!(<cycle types>)` (see `macro/visitor.rs`). The depth decrements only at a
+// self-referential root, so a multi-root cycle whose roots are not a feedback vertex set would not
+// terminate — `subgraph_is_cyclic` rejects that at the type level.
 // ---------------------------------------------------------------------------
 
 /// Is the subgraph induced by the cycle's **non-root** types cyclic? Used as the multi-root soundness
@@ -525,153 +477,6 @@ fn subgraph_is_cyclic(
         }
     }
     is_cyclic_directed(&g)
-}
-
-/// The depth-generic visitor for a `#[recurse]` cycle, keyed on `roots_sorted` (one or more roots).
-/// Threads one depth parameter per root (`__R0, __R1, …`, in `roots_sorted` order): every visit method
-/// is generic over all of them, a back-edge to root `i` drives via `__Ri::visit_rec`, and each root's
-/// depth chain plus each terminator implements `VisitRec`. A cycle type may carry params beyond the
-/// roots' — those become generics on its `visit_*` method (`extra_decl`). `trait_prefix` root-prefixes
-/// the trait names when the module holds other cycles too. (A single root is just the one-element case.)
-#[allow(clippy::too_many_arguments)]
-fn generate_recurse_visitor(
-    items: &[Item],
-    cycle_types: &HashSet<String>,
-    roots_sorted: &[String],
-    internal_names: &HashMap<String, Ident>,
-    term_for_root: &HashMap<String, Ident>,
-    gen_decl: &[TokenStream],
-    gen_use: &[TokenStream],
-    root_keys: &HashSet<String>,
-    term_args: &TokenStream,
-    trait_prefix: Option<&str>,
-) -> TokenStream {
-    let visit_t = Ident::new(
-        &format!("{}Visit", trait_prefix.unwrap_or("")),
-        Span::call_site(),
-    );
-    let visit_rec_t = Ident::new(
-        &format!("{}VisitRec", trait_prefix.unwrap_or("")),
-        Span::call_site(),
-    );
-    // One depth param per root, `__R{i}` in canonical order, plus the root → param map for dispatch.
-    let dps: Vec<Ident> = (0..roots_sorted.len())
-        .map(|i| Ident::new(&format!("__R{i}"), Span::call_site()))
-        .collect();
-    let root_depth: HashMap<String, Ident> = roots_sorted
-        .iter()
-        .cloned()
-        .zip(dps.iter().cloned())
-        .collect();
-
-    struct CycInfo {
-        vm: Ident,
-        node: Ident,
-        internal: Ident,
-        own_use: Vec<TokenStream>,
-        extra_decl: Vec<TokenStream>,
-        body: TokenStream,
-    }
-    let infos: Vec<CycInfo> = items
-        .iter()
-        .filter_map(|it| {
-            let orig = match it {
-                Item::Enum(e) => &e.ident,
-                Item::Struct(s) => &s.ident,
-                _ => return None,
-            };
-            if !cycle_types.contains(&orig.to_string()) {
-                return None;
-            }
-            let internal = internal_names[&orig.to_string()].clone();
-            let (own_use, extra_decl) =
-                type_param_tokens(item_generics(it).expect("cycle item"), root_keys);
-            Some(CycInfo {
-                vm: Ident::new(&format!("visit_{}", to_snake(orig)), Span::call_site()),
-                node: Ident::new(&format!("{orig}Node"), Span::call_site()),
-                // `#[recurse(visit)]` lists every cycle type, so `method_set == cycle == cycle_types`,
-                // immutable (`mutable = false`). Shared with `visitor!()`'s recurse path.
-                body: recurse_lower_body(it, &internal, cycle_types, &root_depth, cycle_types, false),
-                internal,
-                own_use,
-                extra_decl,
-            })
-        })
-        .collect();
-
-    // Per root: its internal node ident + the `visit_<root>` method that its depth chain drives.
-    let root_internals: Vec<&Ident> = roots_sorted.iter().map(|r| &internal_names[r]).collect();
-    let root_vms: Vec<Ident> = roots_sorted
-        .iter()
-        .map(|r| Ident::new(&format!("visit_{}", to_snake(&Ident::new(r, Span::call_site()))), Span::call_site()))
-        .collect();
-    let root_terms: Vec<&Ident> = roots_sorted.iter().map(|r| &term_for_root[r]).collect();
-
-    quote! {
-        /// Dispatch trait turning the cycle's depth recursion into trait calls: implemented by every
-        /// root's depth chain (each drives its own root visit) and by every terminator (no-op).
-        pub trait #visit_rec_t < #(#gen_decl,)* __V > {
-            fn visit_rec(&self, v: &mut __V);
-        }
-
-        /// Depth-generic visitor over the multi-root `#[recurse]` cycle. Implement the `visit_*`
-        /// methods (each generic over the remaining depth of *every* root); call the free `visit_*`.
-        pub trait #visit_t < #(#gen_decl),* > {
-            #(for info in &infos) {
-                fn #{&info.vm}<
-                    #(for e in &info.extra_decl) { #e, }
-                    #(for d in &dps) { #d: #visit_rec_t < #(#gen_use,)* Self >, }
-                >(
-                    &mut self,
-                    i: & #{&info.internal} < #(for u in &info.own_use) { #u, } #(#dps),* >,
-                ) where Self: ::core::marker::Sized {
-                    #{&info.vm}(self, i)
-                }
-            }
-        }
-
-        #(for info in &infos) {
-            pub fn #{&info.vm}<
-                #(#gen_decl,)*
-                #(for e in &info.extra_decl) { #e, }
-                __V: #visit_t < #(#gen_use),* >,
-                #(for d in &dps) { #d: #visit_rec_t < #(#gen_use,)* __V >, }
-            >(
-                v: &mut __V,
-                i: & #{&info.internal} < #(for u in &info.own_use) { #u, } #(#dps),* >,
-            ) {
-                #{&info.body}
-            }
-        }
-
-        #(for info in &infos) {
-            #[doc = "Depth-generic node type for the visitor (an alias of the internal recurse type)."]
-            pub use #{&info.internal} as #{&info.node};
-        }
-
-        // Each root's depth chain drives that root's visit method.
-        #(for (ri, internal) in root_internals.iter().enumerate()) {
-            impl<
-                #(#gen_decl,)*
-                #(for d in &dps) { #d: #visit_rec_t < #(#gen_use,)* __V >, }
-                __V: #visit_t < #(#gen_use),* >
-            >
-                #visit_rec_t < #(#gen_use,)* __V > for #internal < #(#gen_use,)* #(#dps),* >
-            {
-                fn visit_rec(&self, v: &mut __V) {
-                    <__V as #visit_t < #(#gen_use),* >>::#{&root_vms[ri]}(v, self);
-                }
-            }
-        }
-        // Every terminator is a no-op leaf.
-        #(for term in &root_terms) {
-            impl< #(#gen_decl,)* __V: #visit_t < #(#gen_use),* > >
-                #visit_rec_t < #(#gen_use,)* __V > for #term #term_args
-            {
-                fn visit_rec(&self, _v: &mut __V) {}
-            }
-        }
-    }
 }
 
 /// A `$crate::<mod>::<ident>` path, `$crate`-rooted via `crate_rooted_tokens` so it resolves to the
@@ -794,10 +599,9 @@ fn recurse_metadata_macros(
 /// Build the recurse machinery for ONE independent cycle (`scc`): pick its root, rename its types,
 /// and produce (a) the `TransformCtx` that rewrites the cycle's items and (b) the *tail* tokens
 /// appended to the module (terminator + its `Parse`/`Unparse` impls, the depth-default alias, the
-/// public type aliases, the per-cycle-type `visitor!()` metadata macros, and — under `want_visit` —
-/// the depth-generic visitor). Each cycle is handled independently, so a module may hold several (see
-/// `find_cycle_sccs`); `multi_scc` only controls whether the visitor's trait names are root-prefixed
-/// to avoid collisions between cycles.
+/// public type aliases, and the per-cycle-type `@recurse` metadata macros that `visitor!()` consumes
+/// to build a depth-generic visitor). Each cycle is handled independently, so a module may hold
+/// several (see `find_cycle_sccs`).
 #[allow(clippy::too_many_arguments)]
 fn build_scc(
     scc: &HashSet<String>,
@@ -805,8 +609,6 @@ fn build_scc(
     type_refs: &HashMap<String, HashSet<String>>,
     direct_type_refs: &HashMap<String, HashSet<String>>,
     recursion_depth: usize,
-    want_visit: bool,
-    multi_scc: bool,
     mod_ident: &Ident,
     nonce: u64,
 ) -> (TransformCtx, TokenStream) {
@@ -1067,27 +869,6 @@ fn build_scc(
             depth_ty = quote!(#root_internal<#(#gen_use,)* #depth_ty>);
         }
 
-        let visitor_ts = if want_visit {
-            let prefix = if multi_scc { Some(root_name.as_str()) } else { None };
-            // A single-root cycle is the one-root case of the general generator.
-            let term_for_root: HashMap<String, Ident> =
-                std::iter::once((root_name.clone(), term_ident.clone())).collect();
-            generate_recurse_visitor(
-                items,
-                scc,
-                std::slice::from_ref(&root_name),
-                &internal_names,
-                &term_for_root,
-                gen_decl,
-                gen_use,
-                &root_keys,
-                &term_args,
-                prefix,
-            )
-        } else {
-            quote!()
-        };
-
         // Public alias per non-root cycle type, using *its own* generic params (a type may carry
         // extras beyond the root's): `pub type Stmt<S, T> = __StmtRec<S, T, __RootDefault<root>>`.
         let non_root_aliases: Vec<TokenStream> = items
@@ -1145,8 +926,6 @@ fn build_scc(
                 #root_internal<#(#gen_use,)* #default_alias<#(#gen_use),*>>;
 
             #(#non_root_aliases)*
-
-            #visitor_ts
         }
     } else {
         // ── several self-referential roots in one cycle ─────────────────────────────────────────
@@ -1163,8 +942,6 @@ fn build_scc(
             &root_keys,
             &term_args,
             recursion_depth,
-            want_visit,
-            multi_scc,
             type_refs,
             mod_ident,
         )
@@ -1186,12 +963,12 @@ fn build_scc(
     (ctx, quote!( #tail #meta ))
 }
 
-/// Emit the tail (terminators, depth-chain aliases, public aliases, and — under `want_visit` — the
-/// visitor) for a cycle with **several self-referential roots**. Each root keeps its own depth
-/// dimension: every cycle type carries one depth param per root, a back-edge to root `X` is that
-/// root's param, and the per-root depth chains are built mutually (level `k` of each root embeds
-/// level `k-1` of *all* roots). The depth only decrements at a root back-edge, so every cycle in the
-/// SCC must pass through a root — checked via `safegraph` (the SCC minus the roots must be acyclic).
+/// Emit the tail (terminators, depth-chain aliases, public aliases) for a cycle with **several
+/// self-referential roots**. Each root keeps its own depth dimension: every cycle type carries one
+/// depth param per root, a back-edge to root `X` is that root's param, and the per-root depth chains
+/// are built mutually (level `k` of each root embeds level `k-1` of *all* roots). The depth only
+/// decrements at a root back-edge, so every cycle in the SCC must pass through a root — checked via
+/// `safegraph` (the SCC minus the roots must be acyclic).
 #[allow(clippy::too_many_arguments)]
 fn build_multiroot_tail(
     scc: &HashSet<String>,
@@ -1206,8 +983,6 @@ fn build_multiroot_tail(
     root_keys: &HashSet<String>,
     term_args: &TokenStream,
     recursion_depth: usize,
-    want_visit: bool,
-    multi_scc: bool,
     type_refs: &HashMap<String, HashSet<String>>,
     mod_ident: &Ident,
 ) -> TokenStream {
@@ -1366,33 +1141,10 @@ fn build_multiroot_tail(
         })
         .collect();
 
-    let visitor_ts = if want_visit {
-        let prefix = if multi_scc {
-            Some(roots_sorted[0].as_str())
-        } else {
-            None
-        };
-        generate_recurse_visitor(
-            items,
-            scc,
-            roots_sorted,
-            internal_names,
-            &term_for_root,
-            gen_decl,
-            gen_use,
-            root_keys,
-            term_args,
-            prefix,
-        )
-    } else {
-        quote!()
-    };
-
     quote! {
         #(#term_items)*
         #(#default_decls)*
         #(#aliases)*
-        #visitor_ts
     }
 }
 
@@ -1469,8 +1221,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
     // cycle's transform in turn. A transform only matches the types named in its own cycle, and once
     // a type is renamed to `__XxxRec` no later cycle's transform matches it — so the passes compose.
     // A field referencing another cycle's type is left as-is and resolves to that cycle's public
-    // alias. `multi_scc` root-prefixes the visitor trait names so independent cycles don't collide.
-    let multi_scc = sccs.len() > 1;
+    // alias.
     let plans: Vec<(TransformCtx, TokenStream)> = sccs
         .iter()
         .map(|scc| {
@@ -1480,8 +1231,6 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
                 &type_refs,
                 &direct_type_refs,
                 recursion_depth,
-                args.visit,
-                multi_scc,
                 mod_ident,
                 nonce,
             )

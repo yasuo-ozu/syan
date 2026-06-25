@@ -1,5 +1,10 @@
 error: `#[recurse]` visitor cannot traverse a nested container (e.g. `Vec<Option<_>>`); wrap the inner part in its own `#[derive(Ast)]` type
-  --> tests/ui/recurse_visit_nested_container.rs:20:14
+  --> tests/ui/recurse_visit_nested_container.rs:19:14
    |
-20 |         Many(Vec<Option<Expr<S>>>),
+19 |         Many(Vec<Option<Expr<S>>>),
    |              ^^^^^^^^^^^^^^^^^^^^
+...
+25 |     syan::visit::visitor!(crate::ast::Expr);
+   |     --------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `crate::ast::Expr` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

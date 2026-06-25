@@ -1,6 +1,6 @@
-//! `#[recurse]` / `#[recurse(visit)]` edge cases that are *cleanly rejected* — compile-fail tests
-//! confirming each unsupported shape aborts with an intentional diagnostic rather than silently
-//! misbehaving or emitting cryptic generated-code errors.
+//! `#[recurse]` (and `visitor!()`-over-`#[recurse]`) edge cases that are *cleanly rejected* —
+//! compile-fail tests confirming each unsupported shape aborts with an intentional diagnostic rather
+//! than silently misbehaving or emitting cryptic generated-code errors.
 //!
 //! Companion to `recurse_problems_test.rs` (the original `#[derive(Parse, Unparse)]` recurse
 //! limitations). The *supported* container/tuple traversals live in `visitor_recurse_containers.rs`;
@@ -17,8 +17,8 @@ fn recurse_audit_compile_fail() {
     //    (Left as a panic on purpose; the smallest sound limit is 1.)
     t.compile_fail("tests/ui/recurse_limit_zero.rs");
 
-    // 2. A nested container (`Vec<Option<Expr>>`) cannot be traversed — rejected with a
-    //    clear message (matching the `visitor!()` builder).
+    // 2. A nested container (`Vec<Option<Expr>>`) in a `#[recurse]` cycle cannot be traversed by a
+    //    `visitor!()` over it — rejected with a clear message (the shared body-lowering guard).
     t.compile_fail("tests/ui/recurse_visit_nested_container.rs");
 
     // 4. A cycle type may carry *extra* generic params, but must declare all of the ROOT's params

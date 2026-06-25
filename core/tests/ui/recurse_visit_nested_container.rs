@@ -1,15 +1,14 @@
-// AUDIT 2 (now a clean error): a nested container (`Vec<Option<Expr>>`) inside a
-// `#[recurse(visit)]` cycle is rejected with a clear message.
+// AUDIT 2 (now a clean error): a nested container (`Vec<Option<Expr>>`) in a `#[recurse]` cycle that
+// a `visitor!()` walks is rejected with a clear message.
 //
-// `recurse_dispatch_field` checks `Peeled::nested` and aborts, matching the
-// `visitor!()` builder (which also rejects nested containers). Previously it
-// ignored `nested` and emitted mistyped traversal code (`&Option<__R>` vs `&__R`).
-// The fix for non-nested containers — `Vec<Box<Expr>>`, `Option<Box<Expr>>`,
+// `#[recurse]` rewrites the back-edge type fine, but `visitor!()`'s shared body lowering
+// (`util::recurse_lower_field`) checks `Peeled::nested` and aborts (it can't generate `&Option<__R>`
+// vs `&__R` traversal). The fix for non-nested containers — `Vec<Box<Expr>>`, `Option<Box<Expr>>`,
 // `Box<Option<Expr>>` — is exercised in `visitor_recurse_containers.rs`.
 
 use syan::parse::recurse;
 
-#[recurse(visit)]
+#[recurse]
 mod ast {
     use core::marker::PhantomData;
     use syan::visit::Ast;
@@ -20,6 +19,10 @@ mod ast {
         Many(Vec<Option<Expr<S>>>),
         Lit(PhantomData<S>),
     }
+}
+
+mod v {
+    syan::visit::visitor!(crate::ast::Expr);
 }
 
 fn main() {}

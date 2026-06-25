@@ -1,6 +1,6 @@
 use crate::util::{
     angle, as_tuple, gargs, gparams, item_generics, item_ident, method_ident_m, mt, param_name,
-    param_use, peel, recurse_lower_body, to_snake, Container,
+    param_tokens, param_use, peel, recurse_lower_body, to_snake, Container,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -1344,21 +1344,64 @@ fn generate_module_mixed(
         .filter(|p| seen_t.insert(quote!(#p).to_string()))
         .collect();
 
+    // Trait keying = the recurse cycles' ROOTS' params. Roots share params; a non-root cycle type's
+    // params *beyond* the roots' become `visit_*` method generics (`extra_decl` below) rather than
+    // trait params — only root nodes get `VisitRec` impls, so keeping non-root extras off the trait
+    // avoids unconstrained impl params (E0207) and lets a heterogeneous cycle (`Expr<S>` + `Stmt<S, T>`)
+    // be expressed. Built as the union of every target's params (deduped, `targets` order) filtered to
+    // those a root carries — so for a homogeneous cycle (every cycle type shares the roots' params,
+    // acyclic params ⊆ roots') this equals the full union and the emitted code is unchanged.
     let mut seen = HashSet::new();
-    let mut g_params: Vec<GenericParam> = Vec::new();
+    let mut union_params: Vec<GenericParam> = Vec::new();
     for d in targets {
         for p in gparams(item_generics(&d.def).unwrap()) {
             if seen.insert(param_name(&p)) {
-                g_params.push(p);
+                union_params.push(p);
             }
         }
     }
+    let root_key_names: HashSet<String> = rec
+        .iter()
+        .filter(|d| {
+            let id = item_ident(&d.def).unwrap();
+            d.recurse.as_ref().unwrap().roots.iter().any(|rr| rr == id)
+        })
+        .flat_map(|d| gparams(item_generics(&d.def).unwrap()))
+        .map(|p| param_name(&p))
+        .collect();
+    let g_params: Vec<GenericParam> = union_params
+        .iter()
+        .filter(|p| root_key_names.contains(&param_name(p)))
+        .cloned()
+        .collect();
     let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
     let g_use_angle: TokenStream = if g_args.is_empty() {
         quote!()
     } else {
         quote!( < #(#g_args),* > )
     };
+
+    // Mixed-visitor guard: an acyclic target's params must be ⊆ the roots' params. The depth-generic
+    // `VisitRec` impls are keyed on the roots' params only, so an acyclic-only param would be
+    // unconstrained there (E0207). Pure-recurse heterogeneity is supported; only an acyclic type that
+    // introduces an extra param is walled (split it out of this visitor, or share the roots' params).
+    for d in targets.iter().filter(|d| d.recurse.is_none()) {
+        for p in gparams(item_generics(&d.def).unwrap()) {
+            if !root_key_names.contains(&param_name(&p)) {
+                let id = item_ident(&d.def).unwrap();
+                abort!(
+                    Span::call_site(),
+                    "visitor!() over a `#[recurse]` cycle: acyclic type `{}` has generic param `{}` \
+                     not carried by any cycle root; the depth-generic `VisitRec` impls are keyed on \
+                     the roots' params, so this param would be unconstrained. Give `{}` only params \
+                     the roots also have, or visit it from a separate `visitor!()`.",
+                    id,
+                    param_name(&p),
+                    id
+                );
+            }
+        }
+    }
     let mut seen_pred = HashSet::new();
     let union_where: Vec<WherePredicate> = targets
         .iter()
@@ -1372,6 +1415,9 @@ fn generate_module_mixed(
     struct Rec {
         node: Path,
         own_args: Vec<TokenStream>,
+        /// This cycle type's params beyond the roots' (decl form) — lowered to `visit_*` method
+        /// generics, since the trait is keyed on the roots' params only. Empty for a root.
+        extra_decl: Vec<TokenStream>,
         dps: Vec<Ident>,
         is_root: bool,
         vm: Ident,
@@ -1397,6 +1443,11 @@ fn generate_module_mixed(
             Rec {
                 node: r.node.clone(),
                 own_args: gargs(item_generics(&d.def).unwrap()),
+                extra_decl: gparams(item_generics(&d.def).unwrap())
+                    .iter()
+                    .filter(|p| !root_key_names.contains(&param_name(p)))
+                    .map(|p| param_tokens(p).0)
+                    .collect(),
                 is_root: r.roots.iter().any(|rr| rr == id),
                 vm: method_ident_m(id, false),
                 vm_mut: method_ident_m(id, true),
@@ -1519,7 +1570,7 @@ fn generate_module_mixed(
                     }
                 }
                 #(for c in &recs) {
-                    fn #{ if mutable { &c.vm_mut } else { &c.vm } }< #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* Self >, } >(
+                    fn #{ if mutable { &c.vm_mut } else { &c.vm } }< #(for e in &c.extra_decl) { #e, } #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* Self >, } >(
                         &mut self,
                         i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >,
                     ) where Self: ::core::marker::Sized {
@@ -1541,6 +1592,7 @@ fn generate_module_mixed(
             #(for c in &recs) {
                 pub fn #{ if mutable { &c.vm_mut } else { &c.vm } }<
                     #(#g_params,)*
+                    #(for e in &c.extra_decl) { #e, }
                     __V: #visit_tr #g_use_angle,
                     #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* __V >, }
                 >(

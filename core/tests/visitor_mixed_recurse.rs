@@ -1,9 +1,9 @@
 //! A complex tree spanning both visitor worlds: acyclic AST types **outside** a `#[recurse]` module
 //! (walked by the normal `visitor!()` with drill-in) whose tree contains a node from a cyclic AST
-//! **inside** a `#[recurse(visit)]` module (walked by the depth-generic recurse visitor). One
-//! `Walker` implements both visitor traits and crosses the boundary, so a single `.visit(&mut w)`
-//! walks the whole tree: outside `Func -> Param -> Type` (drilled) plus the inside `Expr/Stmt` cycle
-//! hanging off `Func::body`.
+//! **inside** a `#[recurse]` module (walked by the depth-generic recurse visitor built by a sibling
+//! `visitor!()`). One `Walker` implements both visitor traits and crosses the boundary, so a single
+//! `.visit(&mut w)` walks the whole tree: outside `Func -> Param -> Type` (drilled) plus the inside
+//! `Expr/Stmt` cycle hanging off `Func::body`.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -11,7 +11,7 @@ use syan::parse::recurse;
 use syan::visit::Ast;
 
 // ── inside: a recurse'd cycle, visited depth-generically ─────────────────────────────────────────
-#[recurse(visit)]
+#[recurse]
 mod rec {
     use core::marker::PhantomData;
     use syan::visit::Ast;
@@ -29,6 +29,10 @@ mod rec {
         Expr(Box<Expr<S>>),
         Nop(PhantomData<S>),
     }
+}
+
+mod v_rec {
+    syan::visit::visitor!(crate::rec::Expr, crate::rec::Stmt);
 }
 
 // ── outside: acyclic types, visited by the normal visitor with drill-in ──────────────────────────
@@ -69,7 +73,7 @@ struct Walker {
 // Outside side: drill Func -> Param -> Type / ret; at Func, cross into the recurse visitor for body.
 impl<S> nv::Visit<S> for Walker {
     fn visit_func(&mut self, i: &Func<S>) {
-        rec::Visit::visit_expr(self, &i.body); // boundary crossing into the recurse cycle
+        v_rec::Visit::visit_expr(self, &i.body); // boundary crossing into the recurse cycle
         nv::visit_func(self, i); // drill into params / ret (Types)
     }
     fn visit_type(&mut self, i: &Type<S>) {
@@ -79,14 +83,14 @@ impl<S> nv::Visit<S> for Walker {
 }
 
 // Inside side: depth-generic visitor over the recurse cycle.
-impl<S> rec::Visit<S> for Walker {
-    fn visit_expr<R: rec::VisitRec<S, Self>>(&mut self, i: &rec::ExprNode<S, R>) {
+impl<S> v_rec::Visit<S> for Walker {
+    fn visit_expr<R: v_rec::VisitRec<S, Self>>(&mut self, i: &v_rec::ExprNode<S, R>) {
         self.exprs += 1;
-        rec::visit_expr(self, i);
+        v_rec::visit_expr(self, i);
     }
-    fn visit_stmt<R: rec::VisitRec<S, Self>>(&mut self, i: &rec::StmtNode<S, R>) {
+    fn visit_stmt<R: v_rec::VisitRec<S, Self>>(&mut self, i: &v_rec::StmtNode<S, R>) {
         self.stmts += 1;
-        rec::visit_stmt(self, i);
+        v_rec::visit_stmt(self, i);
     }
 }
 
@@ -98,7 +102,7 @@ fn sample() -> Func<()> {
         ],
         ret: Type::Int(PhantomData),
         // Expr -> Stmt -> Expr: exercises a cross-edge and the recurse back-edge.
-        body: rec::Expr::Stmt(Box::new(rec::Stmt::Expr(Box::new(rec::ExprNode::Lit(PhantomData))))),
+        body: rec::Expr::Stmt(Box::new(rec::Stmt::Expr(Box::new(v_rec::ExprNode::Lit(PhantomData))))),
     }
 }
 
