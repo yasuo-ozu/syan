@@ -388,6 +388,104 @@ cycle dispatches through `R::visit_rec`, so the depth `__Rec` is handled entirel
 lists any recurse type is **trait/struct-only** (no closures/tuples) — the same limitation
 `#[recurse(visit)]` always had. Multi-root cycles give `visit_<X>` one `R` per root.
 
+## Multiple AST types + multi-root example
+
+When several cycle types are **each self-referential** (here `A` and `B` both `Box<Self>`), the cycle
+has *two roots*. Every cycle type then carries **one depth param per root** (`__RecA`, `__RecB`, in
+sorted-root order), a reference to root `X` becomes that root's param, and the depth chains are
+unrolled **mutually**.
+
+Input:
+
+```rust
+#[recurse(limit = 2)]
+mod ast {
+    use core::marker::PhantomData;
+    pub enum A<S> {
+        SelfA(Box<A<S>>),   // back-edge to root A
+        ToB(Box<B<S>>),     // edge to root B
+        Lit(PhantomData<S>),
+    }
+    pub enum B<S> {
+        ToA(Box<A<S>>),     // edge to root A
+        SelfB(Box<B<S>>),   // back-edge to root B
+        Lit(PhantomData<S>),
+    }
+}
+```
+
+`#[recurse]` expands (structural core) to:
+
+```rust
+mod ast {
+    use core::marker::PhantomData;
+
+    // Each cycle type carries one depth param PER ROOT (sorted order A, B). A ref to root A → __RecA,
+    // a ref to root B → __RecB (both A and B are roots).
+    pub enum __ARec<S, __RecA = __ADefault<S>, __RecB = __BDefault<S>> {
+        SelfA(Box<__RecA>),
+        ToB(Box<__RecB>),
+        Lit(PhantomData<S>),
+    }
+    pub enum __BRec<S, __RecA = __ADefault<S>, __RecB = __BDefault<S>> {
+        ToA(Box<__RecA>),
+        SelfB(Box<__RecB>),
+        Lit(PhantomData<S>),
+    }
+
+    pub struct ATerm<S>(PhantomData<(S,)>);   // one terminator per root
+    pub struct BTerm<S>(PhantomData<(S,)>);
+
+    // Depth chains unrolled MUTUALLY: level k of each root embeds level k-1 of *all* roots
+    // (limit = 2 → one inner level, then the terminators).
+    type __ADefault<S> = __ARec<S, ATerm<S>, BTerm<S>>;
+    type __BDefault<S> = __BRec<S, ATerm<S>, BTerm<S>>;
+
+    pub type A<S> = __ARec<S, __ADefault<S>, __BDefault<S>>;   // one default per root
+    pub type B<S> = __BRec<S, __ADefault<S>, __BDefault<S>>;
+}
+```
+
+`visitor!(crate::ast::A, crate::ast::B)` then emits a visitor whose `visit_*` are generic over **all**
+roots' remaining depth (`__R0` = A's, `__R1` = B's), dispatching each back-edge through the matching
+param; each root's node drives its own `visit_*` via `VisitRec`:
+
+```rust
+pub trait VisitRec<S, V> { fn visit_rec(&self, v: &mut V); }
+
+pub trait Visit<S> {
+    fn visit_a<__R0: VisitRec<S, Self>, __R1: VisitRec<S, Self>>(&mut self, i: &__ARec<S, __R0, __R1>) { visit_a(self, i) }
+    fn visit_b<__R0: VisitRec<S, Self>, __R1: VisitRec<S, Self>>(&mut self, i: &__BRec<S, __R0, __R1>) { visit_b(self, i) }
+}
+
+pub fn visit_a<S, V: Visit<S>, __R0: VisitRec<S, V>, __R1: VisitRec<S, V>>(v: &mut V, i: &__ARec<S, __R0, __R1>) {
+    match i {
+        __ARec::SelfA(a) => __R0::visit_rec(a, v),   // → root A's depth param
+        __ARec::ToB(b)   => __R1::visit_rec(b, v),   // → root B's depth param
+        __ARec::Lit(_)   => {}
+    }
+}
+// visit_b is symmetric: ToA → __R0, SelfB → __R1.
+
+// One VisitRec impl per ROOT node (drives that root's visit) + one per terminator (no-op).
+impl<S, __R0: VisitRec<S, V>, __R1: VisitRec<S, V>, V: Visit<S>> VisitRec<S, V> for __ARec<S, __R0, __R1> {
+    fn visit_rec(&self, v: &mut V) { <V as Visit<S>>::visit_a(v, self); }
+}
+impl<S, __R0: VisitRec<S, V>, __R1: VisitRec<S, V>, V: Visit<S>> VisitRec<S, V> for __BRec<S, __R0, __R1> {
+    fn visit_rec(&self, v: &mut V) { <V as Visit<S>>::visit_b(v, self); }
+}
+impl<S, V: Visit<S>> VisitRec<S, V> for ATerm<S> { fn visit_rec(&self, _v: &mut V) {} }
+impl<S, V: Visit<S>> VisitRec<S, V> for BTerm<S> { fn visit_rec(&self, _v: &mut V) {} }
+
+pub use __ARec as ANode;
+pub use __BRec as BNode;
+```
+
+(A reference to a *non-root* listed cycle type would instead lower to `this.visit_<head>(field)`, as
+in the single-root case; here both `A` and `B` are roots, so every edge is a depth-param dispatch.)
+This is exactly the soundness requirement under "Multiple self-referential roots": the depth only
+decrements at a root, so a sub-cycle that avoids every root is rejected.
+
 ## Metadata contract (`#[recurse]` → `visitor!()`)
 
 For each cycle type, `#[recurse]` emits (additionally, under the type's *original* name) a muncher
