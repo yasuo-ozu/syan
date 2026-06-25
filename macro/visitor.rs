@@ -2025,7 +2025,11 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     // Every visitor module exports its full visited-type set (idents), its generic-param union
     // (`@bg`), and its full ancestor chain (`@an`) so another visitor can inherit it (transitively).
     let anc_export = emit_ancestors(&chain);
-    let visited_macro = emit_visited_macro(st, &g_params, anc_export, false);
+    // Propagate the recurse-base taint: if THIS (acyclic) visitor inherits a recurse base, it is built
+    // struct-only, and any downstream visitor inheriting it must be too (the transitive recurse
+    // supertrait's `visit_*` methods are `where Self: Sized`). So re-export `@recbase {}` iff tainted —
+    // an acyclic intermediate must not swallow the marker (`recurse-base => acyclic-mid => new`).
+    let visited_macro = emit_visited_macro(st, &g_params, anc_export, st.base_is_recurse);
 
     // Items are emitted directly into the enclosing module (where `visitor!(...)` was invoked).
     quote! {
