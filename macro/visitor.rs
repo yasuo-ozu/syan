@@ -1353,13 +1353,14 @@ fn recurse_lower_field(
     method_set: &HashSet<String>,
     root_dp: &HashMap<String, Ident>,
     cycle: &HashSet<String>,
+    mutable: bool,
 ) -> Option<TokenStream> {
     if let Some(elems) = as_tuple(ty) {
         let mut pats = Vec::new();
         let mut stmts = Vec::new();
         for (i, elem) in elems.iter().enumerate() {
             let bi = Ident::new(&format!("__t{i}"), Span::call_site());
-            if let Some(s) = recurse_lower_field(elem, &quote!(#bi), method_set, root_dp, cycle) {
+            if let Some(s) = recurse_lower_field(elem, &quote!(#bi), method_set, root_dp, cycle, mutable) {
                 pats.push(quote!(#bi));
                 stmts.push(s);
             } else {
@@ -1393,25 +1394,32 @@ fn recurse_lower_field(
         );
     }
     let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
+    let amp = if mutable { quote!(&mut) } else { quote!(&) };
+    let visit_rec_fn = if mutable {
+        quote!(visit_rec_mut)
+    } else {
+        quote!(visit_rec)
+    };
     let one = |acc: &TokenStream| -> TokenStream {
         match dp {
-            Some(d) => quote!( #d::visit_rec(& #stars #acc, v); ),
+            Some(d) => quote!( #d::#visit_rec_fn(#amp #stars #acc, v); ),
             None => {
-                let m = method_ident_m(&p.head_lead, false);
-                quote!( v.#m(& #stars #acc); )
+                let m = method_ident_m(&p.head_lead, mutable);
+                quote!( v.#m(#amp #stars #acc); )
             }
         }
     };
     Some(match p.container {
         Container::Direct => one(binding),
         Container::Seq => {
+            let iter = if mutable { quote!(iter_mut) } else { quote!(iter) };
             let inner = one(&quote!(__x));
-            quote!( for __x in #binding.iter() { #inner } )
+            quote!( for __x in #binding.#iter() { #inner } )
         }
         Container::Opt => {
             let cont_stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
             let inner = one(&quote!(__x));
-            quote!( if let ::core::option::Option::Some(__x) = & #cont_stars #binding { #inner } )
+            quote!( if let ::core::option::Option::Some(__x) = #amp #cont_stars #binding { #inner } )
         }
     })
 }
@@ -1422,6 +1430,7 @@ fn recurse_lower_fields(
     method_set: &HashSet<String>,
     root_dp: &HashMap<String, Ident>,
     cycle: &HashSet<String>,
+    mutable: bool,
 ) -> (TokenStream, TokenStream) {
     match fields {
         Fields::Named(named) => {
@@ -1429,7 +1438,8 @@ fn recurse_lower_fields(
             let mut stmts = Vec::new();
             for f in &named.named {
                 let name = f.ident.clone().unwrap();
-                if let Some(s) = recurse_lower_field(&f.ty, &quote!(#name), method_set, root_dp, cycle)
+                if let Some(s) =
+                    recurse_lower_field(&f.ty, &quote!(#name), method_set, root_dp, cycle, mutable)
                 {
                     binds.push(quote!(#name));
                     stmts.push(s);
@@ -1442,7 +1452,9 @@ fn recurse_lower_fields(
             let mut stmts = Vec::new();
             for (i, f) in unnamed.unnamed.iter().enumerate() {
                 let b = Ident::new(&format!("__f{i}"), Span::call_site());
-                if let Some(s) = recurse_lower_field(&f.ty, &quote!(#b), method_set, root_dp, cycle) {
+                if let Some(s) =
+                    recurse_lower_field(&f.ty, &quote!(#b), method_set, root_dp, cycle, mutable)
+                {
                     pats.push(quote!(#b));
                     stmts.push(s);
                 } else {
@@ -1455,26 +1467,27 @@ fn recurse_lower_fields(
     }
 }
 
-/// Body of a recurse cycle type's `visit_*` drive fn: destructure `i` (a `&__XRec<…>`, matched via the
-/// `node` path) and dispatch followed fields.
+/// Body of a recurse cycle type's `visit_*`/`visit_*_mut` drive fn: destructure `i` (a `&__XRec<…>` /
+/// `&mut __XRec<…>`, matched via the `node` path) and dispatch followed fields.
 fn recurse_lower_body(
     def: &Item,
     node: &Path,
     method_set: &HashSet<String>,
     root_dp: &HashMap<String, Ident>,
     cycle: &HashSet<String>,
+    mutable: bool,
 ) -> TokenStream {
     match def {
         Item::Enum(e) => {
             let arms = e.variants.iter().map(|v| {
-                let (pat, stmts) = recurse_lower_fields(&v.fields, method_set, root_dp, cycle);
+                let (pat, stmts) = recurse_lower_fields(&v.fields, method_set, root_dp, cycle, mutable);
                 let vid = &v.ident;
                 quote!( #node::#vid #pat => { #stmts } )
             });
             quote!( match i { #(#arms)* } )
         }
         Item::Struct(s) => {
-            let (pat, stmts) = recurse_lower_fields(&s.fields, method_set, root_dp, cycle);
+            let (pat, stmts) = recurse_lower_fields(&s.fields, method_set, root_dp, cycle, mutable);
             match &s.fields {
                 Fields::Unit => quote!(),
                 _ => quote!( let #node #pat = i; #stmts ),
@@ -1484,160 +1497,15 @@ fn recurse_lower_body(
     }
 }
 
-/// Phase 1a: a `visitor!()` whose targets are ALL `#[recurse]` cycle types of a single cycle. Emits a
-/// depth-generic visitor keyed on THIS module's `Visit` trait (so it unifies with `visitor!()`): a
-/// `VisitRec<…, V>` dispatch trait, a `Visit<…>` trait with `visit_*<R…>` methods, free `visit_*` fns,
-/// `XNode` aliases, and `VisitRec` impls for each root's node (→ its `visit_*`) and each terminator
-/// (no-op). No closures/`visit_mut`/inherent `.visit()` yet (the recurse methods are depth-generic, so
-/// a closure `Driver` can't implement them). The user implements `Visit` and calls `Visit::visit_x`.
-fn generate_recurse_module(targets: &[&DoneType], method_set: &HashSet<String>) -> TokenStream {
-    let metas: Vec<&RecurseMeta> = targets.iter().map(|d| d.recurse.as_ref().unwrap()).collect();
-    let cycle_set: HashSet<String> = metas[0].cycle.iter().map(|i| i.to_string()).collect();
-    for m in &metas {
-        let cs: HashSet<String> = m.cycle.iter().map(|i| i.to_string()).collect();
-        if cs != cycle_set {
-            abort!(
-                Span::call_site(),
-                "visitor!() over `#[recurse]` currently supports a single cycle per visitor!() call"
-            );
-        }
-    }
-    let roots = &metas[0].roots;
-    let terms = &metas[0].terms;
-    let dps: Vec<Ident> = (0..roots.len())
-        .map(|i| Ident::new(&format!("__R{i}"), Span::call_site()))
-        .collect();
-    let root_dp: HashMap<String, Ident> = roots
-        .iter()
-        .map(|r| r.to_string())
-        .zip(dps.iter().cloned())
-        .collect();
-
-    // Union of the targets' generic params (Phase 1a assumes they coincide; first declaration wins).
-    let mut seen = HashSet::new();
-    let mut g_params: Vec<GenericParam> = Vec::new();
-    for d in targets {
-        for p in gparams(item_generics(&d.def).unwrap()) {
-            if seen.insert(param_name(&p)) {
-                g_params.push(p);
-            }
-        }
-    }
-    let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
-    let g_use_angle: TokenStream = if g_args.is_empty() {
-        quote!()
-    } else {
-        quote!( < #(#g_args),* > )
-    };
-
-    struct CycInfo {
-        vm: Ident,
-        node: Path,
-        own_args: Vec<TokenStream>,
-        body: TokenStream,
-        is_root: bool,
-    }
-    let infos: Vec<CycInfo> = targets
-        .iter()
-        .map(|d| {
-            let id = item_ident(&d.def).unwrap();
-            let r = d.recurse.as_ref().unwrap();
-            CycInfo {
-                vm: method_ident_m(id, false),
-                node: r.node.clone(),
-                own_args: gargs(item_generics(&d.def).unwrap()),
-                body: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set),
-                is_root: roots.iter().any(|rr| rr == id),
-            }
-        })
-        .collect();
-
-    let node_aliases: Vec<TokenStream> = targets
-        .iter()
-        .map(|d| {
-            let id = item_ident(&d.def).unwrap();
-            let node = &d.recurse.as_ref().unwrap().node;
-            let alias = Ident::new(&format!("{id}Node"), Span::call_site());
-            quote!( #[doc = "Depth-generic node type for the visitor."] pub use #node as #alias; )
-        })
-        .collect();
-
-    let root_impls: Vec<TokenStream> = infos
-        .iter()
-        .filter(|c| c.is_root)
-        .map(|c| {
-            let (node, own, vm) = (&c.node, &c.own_args, &c.vm);
-            quote! {
-                impl< #(#g_params,)* #(for d in &dps) { #d: VisitRec< #(#g_args,)* __V >, } __V: Visit #g_use_angle >
-                    VisitRec< #(#g_args,)* __V > for #node < #(#own,)* #(#dps),* >
-                {
-                    fn visit_rec(&self, v: &mut __V) {
-                        <__V as Visit #g_use_angle>::#vm(v, self);
-                    }
-                }
-            }
-        })
-        .collect();
-    let term_impls: Vec<TokenStream> = terms
-        .iter()
-        .map(|t| {
-            quote! {
-                impl< #(#g_params,)* __V: Visit #g_use_angle > VisitRec< #(#g_args,)* __V >
-                    for #t #g_use_angle
-                {
-                    fn visit_rec(&self, _v: &mut __V) {}
-                }
-            }
-        })
-        .collect();
-
-    quote! {
-        /// Dispatch trait turning the cycle's depth recursion into trait calls (implemented by each
-        /// root's depth chain and by each terminator).
-        pub trait VisitRec< #(#g_params,)* __V > {
-            fn visit_rec(&self, v: &mut __V);
-        }
-
-        /// Depth-generic visitor over the `#[recurse]` cycle. Implement the `visit_*` methods (each
-        /// generic over the remaining depth `__R…`); call the free `visit_*` to descend.
-        pub trait Visit< #(#g_params),* > {
-            #(for c in &infos) {
-                fn #{&c.vm}< #(for d in &dps) { #d: VisitRec< #(#g_args,)* Self >, } >(
-                    &mut self,
-                    i: & #{&c.node} < #(for a in &c.own_args) { #a, } #(#dps),* >,
-                ) where Self: ::core::marker::Sized {
-                    #{&c.vm}(self, i)
-                }
-            }
-        }
-
-        #(for c in &infos) {
-            pub fn #{&c.vm}<
-                #(#g_params,)*
-                __V: Visit< #(#g_args),* >,
-                #(for d in &dps) { #d: VisitRec< #(#g_args,)* __V >, }
-            >(
-                v: &mut __V,
-                i: & #{&c.node} < #(for a in &c.own_args) { #a, } #(#dps),* >,
-            ) {
-                #{&c.body}
-            }
-        }
-
-        #(#node_aliases)*
-        #(#root_impls)*
-        #(#term_impls)*
-    }
-}
-
-/// Phase 1b: a `visitor!()` that **mixes** acyclic types and `#[recurse]` cycle types (one cycle) in
-/// one call. Emits ONE `Visit<union>` trait carrying fixed `visit_X(&X)` methods for acyclic types AND
-/// depth-generic `visit_Y<R…>(&__YRec<…>)` methods for recurse types, the shared `VisitRec` dispatch
-/// (+ root-node / terminator impls), free fns, `XNode` aliases, the `IntoVisitor` identity, and
-/// inherent `.visit()` per type. An acyclic body that follows a recurse field lowers (via `Lower`) to
-/// `this.visit_Y(field)`, which type-checks because the public alias `Y<…> = __YRec<…, default>` infers
-/// `R = default` — so one `Visit` impl + one `.visit()` crosses the boundary automatically. No
-/// closures and no `visit_mut` for recurse types yet (struct visitors only).
+/// A `visitor!()` listing one or more `#[recurse]` cycle types (one cycle), optionally **mixed** with
+/// acyclic types. Emits, for **both** sides (`Visit`/`visit_*` and `VisitMut`/`visit_*_mut`): a
+/// `VisitRec`/`VisitRecMut` dispatch trait, the unified `Visit`/`VisitMut` trait (fixed `visit_X(&X)`
+/// for acyclic targets + depth-generic `visit_Y<R…>(&YNode<…>)` for recurse targets), free fns,
+/// `VisitRec`/`VisitRecMut` impls (each root's node → its `visit_*`, each terminator → no-op), `XNode`
+/// aliases, and inherent `.visit()`/`.visit_mut()`. An acyclic body that follows a recurse field lowers
+/// (via `Lower`) to `this.visit_Y(field)`, which type-checks because the public alias
+/// `Y<…> = __YRec<…, default>` infers `R = default` — so one impl + one `.visit()` crosses the boundary
+/// automatically. Struct/`&mut`-visitors only (depth-generic methods can't back a closure `Driver`).
 fn generate_module_mixed(
     targets: &[&DoneType],
     method_set: &HashSet<String>,
@@ -1689,12 +1557,15 @@ fn generate_module_mixed(
         .collect();
     let uw = where_clause(&union_where);
 
+    // Per recurse target: both sides' method names + bodies; `is_root` selects the `VisitRec` impls.
     struct Rec {
-        vm: Ident,
         node: Path,
         own_args: Vec<TokenStream>,
-        body: TokenStream,
         is_root: bool,
+        vm: Ident,
+        vm_mut: Ident,
+        body: TokenStream,
+        body_mut: TokenStream,
     }
     let recs: Vec<Rec> = rec
         .iter()
@@ -1702,25 +1573,26 @@ fn generate_module_mixed(
             let id = item_ident(&d.def).unwrap();
             let r = d.recurse.as_ref().unwrap();
             Rec {
-                vm: method_ident_m(id, false),
                 node: r.node.clone(),
                 own_args: gargs(item_generics(&d.def).unwrap()),
-                body: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set),
                 is_root: roots.iter().any(|rr| rr == id),
+                vm: method_ident_m(id, false),
+                vm_mut: method_ident_m(id, true),
+                body: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set, false),
+                body_mut: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set, true),
             }
         })
         .collect();
 
-    let lower = Lower {
-        method_set,
-        done_by_path,
-        mutable: false,
-    };
+    let lower = Lower { method_set, done_by_path, mutable: false };
+    let lower_mut = Lower { method_set, done_by_path, mutable: true };
     struct Acy {
-        vm: Ident,
         path: TokenStream,
         own_use: TokenStream,
+        vm: Ident,
+        vm_mut: Ident,
         body: TokenStream,
+        body_mut: TokenStream,
     }
     let acys: Vec<Acy> = targets
         .iter()
@@ -1728,12 +1600,50 @@ fn generate_module_mixed(
         .map(|d| {
             let id = item_ident(&d.def).unwrap();
             let scrut: &Path = path_of.get(&id.to_string()).copied().unwrap_or(&d.path);
-            let mut stack = Vec::new();
+            let mut s0 = Vec::new();
+            let mut s1 = Vec::new();
             Acy {
-                vm: method_ident_m(id, false),
                 path: quote!(#scrut),
                 own_use: angle(&gargs(item_generics(&d.def).unwrap())),
-                body: lower.destructure(&d.def, &d.subast, scrut, &quote!(i), 0, &mut stack),
+                vm: method_ident_m(id, false),
+                vm_mut: method_ident_m(id, true),
+                body: lower.destructure(&d.def, &d.subast, scrut, &quote!(i), 0, &mut s0),
+                body_mut: lower_mut.destructure(&d.def, &d.subast, scrut, &quote!(i), 0, &mut s1),
+            }
+        })
+        .collect();
+
+    // Inherent `.visit()`/`.visit_mut()` per type (acyclic + recurse alike): a recurse alias `Y<…>`
+    // infers the depth default, so `v.visit_Y(self)` works the same as for an acyclic type.
+    struct Inh {
+        scrut: TokenStream,
+        own_def: TokenStream,
+        own_use: TokenStream,
+        own_w: TokenStream,
+        extra: Vec<GenericParam>,
+        vm: Ident,
+        vm_mut: Ident,
+    }
+    let inhs: Vec<Inh> = targets
+        .iter()
+        .map(|d| {
+            let id = item_ident(&d.def).unwrap();
+            let scrut: &Path = path_of.get(&id.to_string()).copied().unwrap_or(&d.path);
+            let own_params = gparams(item_generics(&d.def).unwrap());
+            let own_names: HashSet<String> = own_params.iter().map(param_name).collect();
+            let extra: Vec<GenericParam> = g_params
+                .iter()
+                .filter(|p| !own_names.contains(&param_name(p)))
+                .cloned()
+                .collect();
+            Inh {
+                scrut: quote!(#scrut),
+                own_def: angle(&own_params),
+                own_use: angle(&gargs(item_generics(&d.def).unwrap())),
+                own_w: where_clause(&item_where_preds(&d.def)),
+                extra,
+                vm: method_ident_m(id, false),
+                vm_mut: method_ident_m(id, true),
             }
         })
         .collect();
@@ -1747,121 +1657,112 @@ fn generate_module_mixed(
             quote!( #[doc = "Depth-generic node type for the visitor."] pub use #node as #alias; )
         })
         .collect();
-    let root_impls: Vec<TokenStream> = recs
-        .iter()
-        .filter(|c| c.is_root)
-        .map(|c| {
-            let (node, own, vm) = (&c.node, &c.own_args, &c.vm);
-            quote! {
-                impl< #(#g_params,)* #(for d in &dps) { #d: VisitRec< #(#g_args,)* __V >, } __V: Visit #g_use_angle >
-                    VisitRec< #(#g_args,)* __V > for #node < #(#own,)* #(#dps),* >
-                {
-                    fn visit_rec(&self, v: &mut __V) {
-                        <__V as Visit #g_use_angle>::#vm(v, self);
+
+    // Emit one mutability side (shared `false` / mutable `true`): the dispatch trait, the unified
+    // visitor trait, free fns, the dispatch impls (root nodes + terminators), and inherent entries.
+    let emit_side = |mutable: bool| -> TokenStream {
+        let visit_tr = Ident::new(if mutable { "VisitMut" } else { "Visit" }, Span::call_site());
+        let rec_tr = Ident::new(
+            if mutable { "VisitRecMut" } else { "VisitRec" },
+            Span::call_site(),
+        );
+        let rec_fn = Ident::new(
+            if mutable { "visit_rec_mut" } else { "visit_rec" },
+            Span::call_site(),
+        );
+        let amp = if mutable { quote!(&mut) } else { quote!(&) };
+        let inh_fn = Ident::new(if mutable { "visit_mut" } else { "visit" }, Span::call_site());
+        let inh_recv = if mutable { quote!(&mut self) } else { quote!(&self) };
+        let inh_ret = if mutable { quote!(&mut Self) } else { quote!(&Self) };
+        quote! {
+            /// Dispatch trait turning the cycle's depth recursion into trait calls.
+            pub trait #rec_tr < #(#g_params,)* __V > {
+                fn #rec_fn(#amp self, v: &mut __V);
+            }
+
+            /// Unified depth-aware visitor: fixed methods for acyclic types, depth-generic for
+            /// `#[recurse]` cycle types. One impl walks both; a field crossing into the cycle is
+            /// dispatched automatically.
+            pub trait #visit_tr < #(#g_params),* > #uw {
+                #(for a in &acys) {
+                    fn #{ if mutable { &a.vm_mut } else { &a.vm } }(&mut self, i: #amp #{&a.path} #{&a.own_use})
+                    where Self: ::core::marker::Sized {
+                        #{ if mutable { &a.vm_mut } else { &a.vm } }(self, i)
+                    }
+                }
+                #(for c in &recs) {
+                    fn #{ if mutable { &c.vm_mut } else { &c.vm } }< #(for d in &dps) { #d: #rec_tr < #(#g_args,)* Self >, } >(
+                        &mut self,
+                        i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(#dps),* >,
+                    ) where Self: ::core::marker::Sized {
+                        #{ if mutable { &c.vm_mut } else { &c.vm } }(self, i)
                     }
                 }
             }
-        })
-        .collect();
-    let term_impls: Vec<TokenStream> = terms
-        .iter()
-        .map(|t| {
-            quote! {
-                impl< #(#g_params,)* __V: Visit #g_use_angle > VisitRec< #(#g_args,)* __V >
-                    for #t #g_use_angle
-                {
-                    fn visit_rec(&self, _v: &mut __V) {}
+
+            #(for a in &acys) {
+                // No `?Sized`: an acyclic body may cross into the cycle via `this.visit_<rec>(…)`,
+                // whose method requires `Self: Sized`.
+                pub fn #{ if mutable { &a.vm_mut } else { &a.vm } }< #(#g_params,)* __V: #visit_tr #g_use_angle >(
+                    this: &mut __V,
+                    i: #amp #{&a.path} #{&a.own_use},
+                ) #uw {
+                    #{ if mutable { &a.body_mut } else { &a.body } }
                 }
             }
-        })
-        .collect();
+            #(for c in &recs) {
+                pub fn #{ if mutable { &c.vm_mut } else { &c.vm } }<
+                    #(#g_params,)*
+                    __V: #visit_tr #g_use_angle,
+                    #(for d in &dps) { #d: #rec_tr < #(#g_args,)* __V >, }
+                >(
+                    v: &mut __V,
+                    i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(#dps),* >,
+                ) {
+                    #{ if mutable { &c.body_mut } else { &c.body } }
+                }
+            }
 
-    // Inherent `.visit()` per type (acyclic + recurse alike): a recurse alias `Y<…>` infers the depth
-    // default, so `v.visit_Y(self)` works the same as for an acyclic type.
-    let inherent: Vec<TokenStream> = targets
-        .iter()
-        .map(|d| {
-            let id = item_ident(&d.def).unwrap();
-            let scrut: &Path = path_of.get(&id.to_string()).copied().unwrap_or(&d.path);
-            let own_params = gparams(item_generics(&d.def).unwrap());
-            let own_names: HashSet<String> = own_params.iter().map(param_name).collect();
-            let extra: Vec<&GenericParam> = g_params
-                .iter()
-                .filter(|p| !own_names.contains(&param_name(p)))
-                .collect();
-            let own_def = angle(&own_params);
-            let own_use = angle(&gargs(item_generics(&d.def).unwrap()));
-            let own_w = where_clause(&item_where_preds(&d.def));
-            let vm = method_ident_m(id, false);
-            // Take `&mut impl Visit` directly: the unified `Visit` trait has depth-generic methods, so
-            // there is no blanket `impl Visit for &mut V` / closure `IntoVisitor` to route through
-            // (those can't satisfy the `R: VisitRec<.., Self>` bound). Struct visitors by `&mut` only.
-            quote! {
-                impl #own_def #scrut #own_use #own_w {
-                    pub fn visit< #(#extra,)* __W: Visit #g_use_angle >(
-                        &self,
+            // One dispatch impl per ROOT node (drives its visit) + one per terminator (no-op).
+            #(for c in &recs) {
+                #(if c.is_root) {
+                    impl< #(#g_params,)* #(for d in &dps) { #d: #rec_tr < #(#g_args,)* __V >, } __V: #visit_tr #g_use_angle >
+                        #rec_tr < #(#g_args,)* __V > for #{&c.node} < #(for x in &c.own_args) { #x, } #(#dps),* >
+                    {
+                        fn #rec_fn(#amp self, v: &mut __V) {
+                            <__V as #visit_tr #g_use_angle>::#{ if mutable { &c.vm_mut } else { &c.vm } }(v, self);
+                        }
+                    }
+                }
+            }
+            #(for t in terms) {
+                impl< #(#g_params,)* __V: #visit_tr #g_use_angle > #rec_tr < #(#g_args,)* __V >
+                    for #t #g_use_angle
+                {
+                    fn #rec_fn(#amp self, _v: &mut __V) {}
+                }
+            }
+
+            #(for h in &inhs) {
+                impl #{&h.own_def} #{&h.scrut} #{&h.own_use} #{&h.own_w} {
+                    pub fn #inh_fn < #(for e in &h.extra) { #e, } __W: #visit_tr #g_use_angle >(
+                        #inh_recv,
                         visitor: &mut __W,
-                    ) -> &Self {
-                        visitor.#vm(self);
+                    ) -> #inh_ret {
+                        visitor.#{ if mutable { &h.vm_mut } else { &h.vm } }(self);
                         self
                     }
                 }
             }
-        })
-        .collect();
+        }
+    };
 
+    let shared = emit_side(false);
+    let mutable = emit_side(true);
     quote! {
-        pub trait VisitRec< #(#g_params,)* __V > {
-            fn visit_rec(&self, v: &mut __V);
-        }
-
-        /// Unified depth-aware visitor: fixed `visit_*` for acyclic types, depth-generic `visit_*<R…>`
-        /// for `#[recurse]` cycle types. One impl walks both; a field crossing into the cycle is
-        /// dispatched automatically.
-        pub trait Visit< #(#g_params),* > #uw {
-            #(for a in &acys) {
-                fn #{&a.vm}(&mut self, i: & #{&a.path} #{&a.own_use})
-                where Self: ::core::marker::Sized {
-                    #{&a.vm}(self, i)
-                }
-            }
-            #(for c in &recs) {
-                fn #{&c.vm}< #(for d in &dps) { #d: VisitRec< #(#g_args,)* Self >, } >(
-                    &mut self,
-                    i: & #{&c.node} < #(for x in &c.own_args) { #x, } #(#dps),* >,
-                ) where Self: ::core::marker::Sized {
-                    #{&c.vm}(self, i)
-                }
-            }
-        }
-
-        #(for a in &acys) {
-            // No `?Sized` here (unlike the pure-acyclic path): an acyclic body may cross into the
-            // cycle via `this.visit_<rec>(…)`, whose method requires `Self: Sized`.
-            pub fn #{&a.vm}< #(#g_params,)* __V: Visit #g_use_angle >(
-                this: &mut __V,
-                i: & #{&a.path} #{&a.own_use},
-            ) #uw {
-                #{&a.body}
-            }
-        }
-        #(for c in &recs) {
-            pub fn #{&c.vm}<
-                #(#g_params,)*
-                __V: Visit #g_use_angle,
-                #(for d in &dps) { #d: VisitRec< #(#g_args,)* __V >, }
-            >(
-                v: &mut __V,
-                i: & #{&c.node} < #(for x in &c.own_args) { #x, } #(#dps),* >,
-            ) {
-                #{&c.body}
-            }
-        }
-
         #(#node_aliases)*
-        #(#root_impls)*
-        #(#term_impls)*
-        #(#inherent)*
+        #shared
+        #mutable
     }
 }
 
@@ -1928,11 +1829,9 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 "visitor!(base => …) inheritance over `#[recurse]` cycle types is not yet supported"
             );
         }
-        if recurse_targets == targets.len() {
-            // All-recurse, single cycle: the lean recurse-only path.
-            return generate_recurse_module(&targets, &method_set);
-        }
-        // Mixed acyclic + recurse cycle types: one unified `Visit` trait, boundary auto-crossed.
+        // Recurse cycle types present (all-recurse or mixed with acyclic types): one unified
+        // depth-aware `Visit` trait, with any outer→inner boundary auto-crossed. (`generate_module_mixed`
+        // handles zero acyclic targets fine, so the all-recurse case routes here too.)
         return generate_module_mixed(&targets, &method_set, &done_by_path, &path_of);
     }
 

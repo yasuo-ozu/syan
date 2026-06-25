@@ -70,3 +70,26 @@ fn leaf_only() {
     v::Visit::visit_expr(&mut c, &e);
     assert_eq!((c.e, c.s), (1, 0));
 }
+
+// The visitor also generates the mutable mirror: VisitMut / VisitRecMut / visit_*_mut + inherent
+// .visit_mut(), all depth-generic over the recurse cycle.
+impl<S> v::VisitMut<S> for Counter {
+    fn visit_expr_mut<R: v::VisitRecMut<S, Self>>(&mut self, i: &mut v::ExprNode<S, R>) {
+        self.e += 1;
+        v::visit_expr_mut(self, i);
+    }
+    fn visit_stmt_mut<R: v::VisitRecMut<S, Self>>(&mut self, i: &mut v::StmtNode<S, R>) {
+        self.s += 1;
+        v::visit_stmt_mut(self, i);
+    }
+}
+
+#[test]
+fn walks_the_cycle_mut() {
+    let mut e: ast::Expr<()> = ast::Expr::Stmt(Box::new(v::StmtNode::Expr(Box::new(
+        v::ExprNode::Lit(PhantomData),
+    ))));
+    let mut c = Counter::default();
+    e.visit_mut(&mut c); // inherent .visit_mut(), depth-generic mutable traversal
+    assert_eq!((c.e, c.s), (2, 1), "same shape as the shared walk, via &mut");
+}
