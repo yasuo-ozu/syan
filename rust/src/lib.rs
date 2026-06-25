@@ -29,6 +29,30 @@ pub mod visit {
     syan::visit::visitor!(crate::ast::Expr, crate::ast::Stmt);
 }
 
+/// A `#[recurse]` cycle defined upstream with **no in-crate visitor** — a downstream crate builds the
+/// (depth-generic) visitor with `visitor!(syan_rust::recursed::Expr, …)`. Exercises the cross-crate
+/// `@recurse` metadata: the `$crate`-rooted `@node`/`@terms` paths resolve back to this crate.
+/// See `tests/cross_crate_recurse.rs`.
+#[syan::parse::recurse]
+pub mod recursed {
+    use core::marker::PhantomData;
+    use syan::visit::Ast;
+
+    #[derive(Ast)]
+    #[subast(crate::recursed::Stmt)]
+    pub enum Expr<S> {
+        Stmt(Box<Stmt<S>>),
+        Lit(PhantomData<S>),
+    }
+
+    #[derive(Ast)]
+    #[subast(crate::recursed::Expr)]
+    pub enum Stmt<S> {
+        Expr(Box<Expr<S>>),
+        Nop(PhantomData<S>),
+    }
+}
+
 /// Base AST + a base **visitor**, generated in this crate, for cross-crate *inheritance*: a
 /// downstream crate writes `visitor!(syan_rust::inherit::base => NewType)` to extend this visitor
 /// (supertrait) and add a method for its own type. The base exports its `Visit` trait, free

@@ -349,6 +349,20 @@ fn emit_ancestors(anc: &[AncIn]) -> TokenStream {
 /// body it resolves only for fetch/macro-invocation paths, **not** for the trait path re-emitted
 /// into the new `Driver`'s supertrait impl — so multi-level cross-crate `base => mid => new` with an
 /// *upstream* `mid` needs this concrete requalification instead.)
+/// Whether a path is rooted in the *current* crate (`crate::` / `self::` / `super::`). A foreign path
+/// (an external crate name, or a leading `::`) is not — an inherent `impl` for such a type would be
+/// E0116 (inherent impls must live in the type's defining crate), so the recurse path skips inherent
+/// `.visit()`/`.visit_mut()` for them and the trait method (`Visit::visit_*`) is used instead.
+fn path_is_crate_local(p: &Path) -> bool {
+    if p.leading_colon.is_some() {
+        return false;
+    }
+    matches!(
+        p.segments.first().map(|s| s.ident.to_string()).as_deref(),
+        Some("crate") | Some("self") | Some("super")
+    )
+}
+
 fn base_host_crate(base: &Path) -> Option<Ident> {
     if base.leading_colon.is_some() {
         return None;
@@ -1617,7 +1631,9 @@ fn generate_module_mixed(
         .collect();
 
     // Inherent `.visit()`/`.visit_mut()` per type (acyclic + recurse alike): a recurse alias `Y<…>`
-    // infers the depth default, so `v.visit_Y(self)` works the same as for an acyclic type.
+    // infers the depth default, so `v.visit_Y(self)` works the same as for an acyclic type. Skipped for
+    // a **foreign** target (defined in another crate) — an inherent impl there is E0116, so a
+    // cross-crate `visitor!(upstream::Expr, …)` uses the `Visit::visit_*` trait method instead.
     struct Inh {
         scrut: TokenStream,
         own_def: TokenStream,
@@ -1629,9 +1645,12 @@ fn generate_module_mixed(
     }
     let inhs: Vec<Inh> = targets
         .iter()
-        .map(|d| {
+        .filter_map(|d| {
             let id = item_ident(&d.def).unwrap();
             let scrut: &Path = path_of.get(&id.to_string()).copied().unwrap_or(&d.path);
+            if !path_is_crate_local(scrut) {
+                return None;
+            }
             let own_params = gparams(item_generics(&d.def).unwrap());
             let own_names: HashSet<String> = own_params.iter().map(param_name).collect();
             let extra: Vec<GenericParam> = g_params
@@ -1639,7 +1658,7 @@ fn generate_module_mixed(
                 .filter(|p| !own_names.contains(&param_name(p)))
                 .cloned()
                 .collect();
-            Inh {
+            Some(Inh {
                 scrut: quote!(#scrut),
                 own_def: angle(&own_params),
                 own_use: angle(&gargs(item_generics(&d.def).unwrap())),
@@ -1647,7 +1666,7 @@ fn generate_module_mixed(
                 extra,
                 vm: method_ident_m(id, false),
                 vm_mut: method_ident_m(id, true),
-            }
+            })
         })
         .collect();
 

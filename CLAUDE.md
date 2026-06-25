@@ -71,9 +71,13 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `generate_module_mixed` (acyclic-only visitors keep the original `gen_side` path). One `visitor!()`
   can **mix** acyclic + recurse types (the outer→inner boundary auto-crosses), span **several
   independent cycles** (each recurse target carries its own cycle's roots/depth), handle **multi-root**
-  cycles (one depth param per root), and emits both the **shared and `&mut`** sides. Tests:
-  `visitor_recurse_via_visitor.rs` (incl. `visit_mut`), `visitor_recurse_mixed.rs`,
-  `visitor_recurse_multiroot_via_visitor.rs`, `visitor_recurse_multicycle_via_visitor.rs`. See the
+  cycles (one depth param per root), and emits both the **shared and `&mut`** sides. Works
+  **cross-crate** too — a downstream `visitor!(upstream::Expr, …)` over an upstream `#[recurse]` cycle
+  resolves the `$crate`-rooted `@node`/`@terms` back to the defining crate; inherent `.visit()` is
+  skipped for a *foreign* target (an inherent impl there is E0116 — use the `Visit::visit_*` trait
+  method), via `path_is_crate_local`. Tests: `visitor_recurse_via_visitor.rs` (incl. `visit_mut`),
+  `visitor_recurse_mixed.rs`, `visitor_recurse_multiroot_via_visitor.rs`,
+  `visitor_recurse_multicycle_via_visitor.rs`, `rust/tests/cross_crate_recurse.rs`. See the
   "`#[recurse]` expansion & how `visitor!()` consumes it" section for the contract and current limits.
 
 ## Known gaps / limitations
