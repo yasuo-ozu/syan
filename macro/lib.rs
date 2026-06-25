@@ -106,6 +106,16 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// non-root cycle type (`Box<Stmt<S, u8>>` — `u8` fills `Stmt`'s own param) and on **non-cycle** types
 /// (`Vec<S>`, `Option<S>`). Workaround for the rejected case: move the differing part into its own
 /// `#[derive(Ast)]` type.
+///
+/// # Visiting & limitations
+///
+/// A depth-generic visitor over the cycle is generated either by `#[recurse(visit)]` or by
+/// `syan::visit::visitor!(<cycle types>)` (the latter can also span acyclic/outer types in one
+/// `Visit` trait). Such a recurse visitor is **trait/struct-based only** — its `visit_*<R>` methods are
+/// generic over the remaining depth, which a closure cannot be — and **cannot be inherited**:
+/// `visitor!(base => New)` where `base`/`New` cover `#[recurse]` cycle types is not supported (the
+/// inheritance supertrait machinery does not interop with the depth-generic methods). Build the
+/// recurse visitor directly with `visitor!(<cycle types>)` instead of via `base => …`.
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {

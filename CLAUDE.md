@@ -85,13 +85,48 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **`visitor!(…)` over `#[recurse]` — remaining limits** (the capability is shipped; see "Shipped &
   tested" + the expansion section): no inheritance (`base => …`) over recurse; no closures (depth-generic
   methods can't back a closure `Driver`, so it's struct/`&mut`-visitor only); an *unlisted* recurse
-  cross-edge must be listed (no inline drill). All are clean `abort!`s. (Drill-in over *acyclic* types
-  in a `#[recurse]` module does work — `visitor_recurse_drill.rs`.)
+  cross-edge must be listed (no inline drill). All are clean `abort!`s, with fix approaches in the "Fix
+  plan" below. (Drill-in over *acyclic* types in a `#[recurse]` module does work —
+  `visitor_recurse_drill.rs`.)
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.
 - **Nested containers** (`Vec<Option<T>>`) are unsupported on both the `visitor!()` and
   `#[recurse(visit)]` paths (clear build error); wrap the inner part in its own `#[derive(Ast)]` type.
+
+## Fix plan — `visitor!()`-over-`#[recurse]` remaining limits
+
+Concrete approaches for the limits above (all in `macro/visitor.rs` unless noted), ordered by
+value/tractability:
+
+1. **Drill an *unlisted* recurse cross-edge** (highest value, moderate effort). Today
+   `recurse_lower_field` `abort!`s when a field head is in the cycle but not in `method_set`. Fix:
+   inline-drill instead — the unlisted type is already fetched (it's a `#[subast]` head, so
+   `followed_intermediates` enqueues it; its def + `@recurse` land in `done_by_path`), so destructure
+   its node (`__YRec<S, dps>`, the **same** depth params — it's the same cycle) and recurse into its
+   fields, dispatching back-edges through the in-scope `dps` exactly as for the listed types. Carry a
+   stack of in-progress unlisted heads and reject a *cycle of unlisted* intermediates (mirrors the
+   acyclic `Lower::visit_value` drill guard). `visit_Y` is still emitted only for listed `Y`.
+2. **Inheritance (`base => …`) over recurse** (niche, larger effort). Restrict to the trait path (the
+   `Driver`/closure side is already off for recurse). In `generate_module_mixed`, when `st.base` is a
+   recurse visitor: add `base::Visit`/`VisitMut`/`VisitRec` as **supertraits** of the new traits (reuse
+   the existing ancestor/`@an` requalification machinery — `base_host_crate`/`requalify_ancestor`),
+   keep the inherited recurse types in `method_set` without re-emitting their bodies (their `VisitRec`
+   impls come from `base`), and let the new types' bodies cross into them via `this.visit_<inherited>`.
+   Requires the new union params ⊇ the base's, and the base's depth params to line up — feasible since
+   `VisitRec`'s `visit_rec` signature is uniform.
+3. **Collapse `#[recurse(visit)]` into sugar** (cleanup; large + breaking-risk). Make it expand to
+   `#[recurse]` + an auto-`visitor!(<cycle types>)`, then delete `recurse.rs`'s
+   `generate_recurse_visitor`/`generate_multiroot_visitor`. **Blocker:** `#[recurse(visit)]` keys its
+   `Visit` trait on the *root's* params (a non-root's extras → method generics, e.g. the heterogeneous
+   `recurse_generics.rs` case `Visit<S>` + `visit_stmt<T, R>`), while `generate_module_mixed` keys on
+   the *union* (`Visit<S, T>`). To avoid changing the API (and breaking those tests), first switch the
+   recurse path to **root-params keying** (union → roots' params; each recurse type's params beyond
+   the roots' become `visit_*` method generics), then route both through one generator.
+4. **Closures over recurse — won't fix (fundamental).** A `visit_*<R: VisitRec>` method is generic
+   over the remaining depth; a closure is one concrete `FnMut` and can't be depth-generic, so the
+   `Driver`/`Hook`/`Chain` machinery cannot implement the unified `Visit` trait. This is inherent (the
+   same reason `#[recurse(visit)]` was always trait-only) — document it, don't track it as a TODO.
 
 ---
 
