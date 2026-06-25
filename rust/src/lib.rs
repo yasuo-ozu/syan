@@ -111,6 +111,23 @@ pub mod inherit {
     pub mod upper {
         syan::visit::visitor!(crate::inherit::mid => crate::inherit::Block);
     }
+
+    /// A *mid* variant that records its `base` ancestor via a **`super::`-relative** path (instead of
+    /// the `crate::inherit::base` that [`mid`] uses). It builds fine upstream, but a downstream
+    /// `visitor!(<path>::mid_ss => T)` receives the ancestor as `super::base` — relative to the
+    /// *downstream* module, where it's unresolvable (a proc-macro can't requalify `super`/`self` like
+    /// it does a leading `crate::`). This is the residual cross-crate hole; the fix is to use a
+    /// `crate::`-rooted entry path (as `mid` does). Realized by `tests/ui/cross_crate_super_self.rs`.
+    /// (Its own `ItemSs` — not `Item` — to avoid colliding with `mid` on the inherent `visit`.)
+    #[derive(Debug, Ast)]
+    #[subast(crate::inherit::Expr)]
+    pub enum ItemSs<S> {
+        Ex(Box<Expr<S>>),
+        NoExpr(PhantomData<S>),
+    }
+    pub mod mid_ss {
+        syan::visit::visitor!(super::base => crate::inherit::ItemSs);
+    }
 }
 
 /// Acyclic types whose `#[subast]` paths are `crate::`-rooted, so a *downstream* crate can build a

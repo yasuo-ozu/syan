@@ -1,0 +1,105 @@
+error[E0432]: unresolved import `super::base`
+  --> tests/ui/cross_crate_super_self.rs:28:5
+   |
+28 |     syan::visit::visitor!(syan_rust::inherit::mid_ss => crate::Down);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     unresolved import
+   |     help: a similar path exists: `syan_rust::inherit::base`
+   |
+   = note: this error originates in the macro `syan_rust::inherit::mid_ss::__syan_visited` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0433]: failed to resolve: unresolved import
+  --> tests/ui/cross_crate_super_self.rs:28:5
+   |
+28 |     syan::visit::visitor!(syan_rust::inherit::mid_ss => crate::Down);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unresolved import
+   |
+   = note: this error originates in the macro `syan_rust::inherit::mid_ss::__syan_visited` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: a similar path exists
+  --> src/lib.rs
+   |
+   |         syan::visit::visitor!(super::syan_rust::inherit::base => crate::inherit::ItemSs);
+   |                                      ++++++++++++++++++++
+help: consider importing this module
+   |
+28 +     use syan_rust::inherit::base;
+   |
+
+error[E0277]: the trait bound `nv::Driver<__H>: syan_rust::inherit::base::Visit<S>` is not satisfied
+  --> tests/ui/cross_crate_super_self.rs:28:5
+   |
+28 |     syan::visit::visitor!(syan_rust::inherit::mid_ss => crate::Down);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `syan_rust::inherit::base::Visit<S>` is not implemented for `nv::Driver<__H>`
+   |
+   = help: the following other types implement trait `syan_rust::inherit::base::Visit<S>`:
+             &mut __V
+             syan_rust::inherit::base::Driver<__H>
+             syan_rust::inherit::mid::Driver<__H>
+             syan_rust::inherit::mid_ss::Driver<__H>
+             syan_rust::inherit::upper::Driver<__H>
+   = note: required for `nv::Driver<__H>` to implement `syan_rust::inherit::mid_ss::Visit<S>`
+note: required by a bound in `nv::Visit`
+  --> tests/ui/cross_crate_super_self.rs:28:5
+   |
+28 |     syan::visit::visitor!(syan_rust::inherit::mid_ss => crate::Down);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Visit`
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `nv::Driver<__H>: syan_rust::inherit::base::Visit<S>` is not satisfied
+  --> tests/ui/cross_crate_super_self.rs:28:5
+   |
+28 |     syan::visit::visitor!(syan_rust::inherit::mid_ss => crate::Down);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `syan_rust::inherit::base::Visit<S>` is not implemented for `nv::Driver<__H>`
+   |
+   = help: the following other types implement trait `syan_rust::inherit::base::Visit<S>`:
+             &mut __V
+             syan_rust::inherit::base::Driver<__H>
+             syan_rust::inherit::mid::Driver<__H>
+             syan_rust::inherit::mid_ss::Driver<__H>
+             syan_rust::inherit::upper::Driver<__H>
+note: required by a bound in `syan_rust::inherit::mid_ss::Visit`
+  --> src/lib.rs
+   |
+   |         syan::visit::visitor!(super::base => crate::inherit::ItemSs);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Visit`
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `nv::DriverMut<__H>: syan_rust::inherit::base::VisitMut<S>` is not satisfied
+  --> tests/ui/cross_crate_super_self.rs:28:5
+   |
+28 |     syan::visit::visitor!(syan_rust::inherit::mid_ss => crate::Down);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `syan_rust::inherit::base::VisitMut<S>` is not implemented for `nv::DriverMut<__H>`
+   |
+   = help: the following other types implement trait `syan_rust::inherit::base::VisitMut<S>`:
+             &mut __V
+             syan_rust::inherit::base::DriverMut<__H>
+             syan_rust::inherit::mid::DriverMut<__H>
+             syan_rust::inherit::mid_ss::DriverMut<__H>
+             syan_rust::inherit::upper::DriverMut<__H>
+   = note: required for `nv::DriverMut<__H>` to implement `syan_rust::inherit::mid_ss::VisitMut<S>`
+note: required by a bound in `nv::VisitMut`
+  --> tests/ui/cross_crate_super_self.rs:28:5
+   |
+28 |     syan::visit::visitor!(syan_rust::inherit::mid_ss => crate::Down);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `VisitMut`
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `nv::DriverMut<__H>: syan_rust::inherit::base::VisitMut<S>` is not satisfied
+  --> tests/ui/cross_crate_super_self.rs:28:5
+   |
+28 |     syan::visit::visitor!(syan_rust::inherit::mid_ss => crate::Down);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `syan_rust::inherit::base::VisitMut<S>` is not implemented for `nv::DriverMut<__H>`
+   |
+   = help: the following other types implement trait `syan_rust::inherit::base::VisitMut<S>`:
+             &mut __V
+             syan_rust::inherit::base::DriverMut<__H>
+             syan_rust::inherit::mid::DriverMut<__H>
+             syan_rust::inherit::mid_ss::DriverMut<__H>
+             syan_rust::inherit::upper::DriverMut<__H>
+note: required by a bound in `syan_rust::inherit::mid_ss::VisitMut`
+  --> src/lib.rs
+   |
+   |         syan::visit::visitor!(super::base => crate::inherit::ItemSs);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `VisitMut`
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
