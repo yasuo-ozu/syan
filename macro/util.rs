@@ -99,6 +99,35 @@ pub(crate) fn first_ty_arg(seg: &PathSegment) -> Option<&Type> {
     }
 }
 
+/// The element list of a tuple type, seeing through transparent `Group`/`Paren` wrappers; `None` if
+/// `ty` is not a tuple. (A visitor dispatches each followed element of a tuple field.)
+pub(crate) fn as_tuple(ty: &Type) -> Option<&punctuated::Punctuated<Type, Token![,]>> {
+    match ty {
+        Type::Tuple(t) => Some(&t.elems),
+        Type::Group(g) => as_tuple(&g.elem),
+        Type::Paren(p) => as_tuple(&p.elem),
+        _ => None,
+    }
+}
+
+/// The identifier of an enum/struct item (`None` for anything else).
+pub(crate) fn item_ident(item: &Item) -> Option<&Ident> {
+    match item {
+        Item::Enum(e) => Some(&e.ident),
+        Item::Struct(s) => Some(&s.ident),
+        _ => None,
+    }
+}
+
+/// The generics of an enum/struct item (`None` for anything else).
+pub(crate) fn item_generics(item: &Item) -> Option<&Generics> {
+    match item {
+        Item::Enum(e) => Some(&e.generics),
+        Item::Struct(s) => Some(&s.generics),
+        _ => None,
+    }
+}
+
 /// How a field type wraps its (visitable) head: a single value, a sequence (`Vec`/`VecDeque`/slice/
 /// array/`Punctuated`), or an `Option`. `Box` is transparent (tracked as box-depth).
 #[derive(Clone, Copy, PartialEq)]

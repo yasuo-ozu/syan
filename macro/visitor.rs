@@ -1,4 +1,7 @@
-use crate::util::{angle, gargs, gparams, param_name, param_use, peel, to_snake, Container};
+use crate::util::{
+    angle, as_tuple, gargs, gparams, item_generics, item_ident, param_name, param_use, peel,
+    to_snake, Container,
+};
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
 use std::collections::{HashMap, HashSet};
@@ -716,15 +719,6 @@ fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
 
 /// See through transparent wrappers (`Group`/`Paren`) to a tuple type's element list. `None` if `ty`
 /// is not a tuple. Mirrors `recurse::as_tuple` so the `visitor!()` path traverses tuple fields too.
-fn as_tuple(ty: &Type) -> Option<&Punctuated<Type, Token![,]>> {
-    match ty {
-        Type::Tuple(t) => Some(&t.elems),
-        Type::Group(g) => as_tuple(&g.elem),
-        Type::Paren(p) => as_tuple(&p.elem),
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Module generation
 // ---------------------------------------------------------------------------
@@ -1097,22 +1091,6 @@ fn self_and_subast_keys(self_ident: Option<&Ident>, subast: &[SubEntry]) -> Hash
         s.insert(id.to_string());
     }
     s
-}
-
-fn item_ident(item: &Item) -> Option<&Ident> {
-    match item {
-        Item::Enum(e) => Some(&e.ident),
-        Item::Struct(s) => Some(&s.ident),
-        _ => None,
-    }
-}
-
-fn item_generics(item: &Item) -> Option<&Generics> {
-    match item {
-        Item::Enum(e) => Some(&e.generics),
-        Item::Struct(s) => Some(&s.generics),
-        _ => None,
-    }
 }
 
 /// A visited type's `where`-clause predicates (e.g. `S: Bound`), or empty when it has none. These

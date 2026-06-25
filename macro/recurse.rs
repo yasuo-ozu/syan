@@ -1,5 +1,5 @@
 use crate::ast::{cleaned_item, crate_rooted_tokens, parse_subast, subast_tokens};
-use crate::util::{peel, to_snake, Container};
+use crate::util::{as_tuple, item_generics, peel, to_snake, Container};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::{abort, set_dummy};
@@ -309,14 +309,6 @@ fn transform_fields(fields: &mut Fields, ctx: &TransformCtx) {
     }
 }
 
-fn item_generics(it: &Item) -> Option<&Generics> {
-    match it {
-        Item::Enum(e) => Some(&e.generics),
-        Item::Struct(s) => Some(&s.generics),
-        _ => None,
-    }
-}
-
 /// A stable identity for a generic param (kind + name + const type), used to compare a cycle type's
 /// params against the root's.
 fn param_key(p: &GenericParam) -> String {
@@ -500,15 +492,6 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
 
 /// See through transparent wrappers to a tuple type's element list (a bare tuple, or one behind
 /// `Type::Group`/`Type::Paren`). `None` if `ty` is not a tuple.
-fn as_tuple(ty: &Type) -> Option<&Punctuated<Type, Token![,]>> {
-    match ty {
-        Type::Tuple(t) => Some(&t.elems),
-        Type::Group(g) => as_tuple(&g.elem),
-        Type::Paren(p) => as_tuple(&p.elem),
-        _ => None,
-    }
-}
-
 /// Dispatch one field of a cycle type: a back-edge to a **root** drives via that root's depth param
 /// (`root_depth[head]::visit_rec`); a cross-edge to another cycle type calls that type's visit method;
 /// anything else is a leaf (`None`, caller binds `_`). `binding` is the destructured field (`&Field`).
