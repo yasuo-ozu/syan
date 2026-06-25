@@ -105,14 +105,25 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 Concrete approaches for the limits above (all in `macro/visitor.rs` unless noted), ordered by
 value/tractability:
 
-1. **Inheritance (`base => …`) over recurse** (niche, larger effort). Restrict to the trait path (the
-   `Driver`/closure side is already off for recurse). In `generate_module_mixed`, when `st.base` is a
-   recurse visitor: add `base::Visit`/`VisitMut`/`VisitRec` as **supertraits** of the new traits (reuse
-   the existing ancestor/`@an` requalification machinery — `base_host_crate`/`requalify_ancestor`),
-   keep the inherited recurse types in `method_set` without re-emitting their bodies (their `VisitRec`
-   impls come from `base`), and let the new types' bodies cross into them via `this.visit_<inherited>`.
-   Requires the new union params ⊇ the base's, and the base's depth params to line up — feasible since
-   `VisitRec`'s `visit_rec` signature is uniform.
+1. **Inheritance (`base => …`) over recurse** (niche — no current user — and the largest remaining
+   piece: a metadata-protocol change **plus** a new struct-only codegen mode). Validated scope:
+   - **Prerequisite (both sub-cases):** `generate_module_mixed` must *export* `__syan_visited`
+     (it doesn't today) — `@inh {recurse target idents}` `@bg {roots' params}` `@an {…}` **plus** a new
+     `@recbase {}` marker so the consumer knows the base is recurse. `build` parses `@recbase` →
+     `BuildInput.base_is_recurse`.
+   - **Sub-case (a) `New(acyclic) => base(recurse)`** (the common/valuable one; routes through
+     `generate_module`, reusing its existing supertrait/ancestor machinery): when `base_is_recurse`,
+     `gen_side` must go **struct-only** — skip `Driver`/`Hook`/`Chain`/`IntoVisitor`/tuple-impls/the
+     `FnMut` impls **and** the `&mut V` blanket `Visit` impl (each would have to satisfy the
+     `base::Visit` supertrait, whose `visit_*<R>` methods are depth-generic — impossible for a closure,
+     and the recurse path emits no `&mut V` blanket to lean on). Keep the trait + `base::Visit`
+     supertrait + free fns + inherent `.visit()`; the new acyclic body crosses into the inherited
+     depth-generic `visit_*` via the supertrait (method resolution infers `R`).
+   - **Sub-case (b) `New(recurse) => base(recurse)`:** add the same supertrait wiring *inside*
+     `generate_module_mixed` (which has no inheritance code today), emitting `VisitRec` only for New's
+     own cycles and keeping inherited recurse types in `method_set` without re-emitting them.
+   - Requires the new union params ⊇ the base's. Closures over a recurse-inheriting `New` are out (same
+     fundamental reason as #2).
 2. **Closures over recurse — won't fix (fundamental).** A `visit_*<R: VisitRec>` method is generic
    over the remaining depth; a closure is one concrete `FnMut` and can't be depth-generic, so the
    `Driver`/`Hook`/`Chain` machinery cannot implement the unified `Visit` trait. This is inherent (the
