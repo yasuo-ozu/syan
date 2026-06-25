@@ -1,6 +1,6 @@
 use crate::util::{
     angle, as_tuple, gargs, gparams, item_generics, item_ident, method_ident_m, mt, param_name,
-    param_tokens, param_use, peel, recurse_lower_body, to_snake, Container,
+    param_tokens, param_use, peel, recurse_lower_body, to_snake, Container, RecLower,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -1488,6 +1488,16 @@ fn generate_module_mixed(
         body: TokenStream,
         body_mut: TokenStream,
     }
+    // Every fetched cycle type (listed or not): ident → (def, `__*Rec` node path), so an unlisted
+    // cross-edge can be inline-drilled by `recurse_lower_*`.
+    let cycle_defs: HashMap<String, (Item, Path)> = done_by_path
+        .values()
+        .filter_map(|d| {
+            let r = d.recurse.as_ref()?;
+            let id = item_ident(&d.def)?;
+            Some((id.to_string(), (d.def.clone(), r.node.clone())))
+        })
+        .collect();
     let recs: Vec<Rec> = rec
         .iter()
         .map(|d| {
@@ -1517,8 +1527,28 @@ fn generate_module_mixed(
                 is_root: r.roots.iter().any(|rr| rr == id),
                 vm: method_ident_m(id, false),
                 vm_mut: method_ident_m(id, true),
-                body: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set, false),
-                body_mut: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set, true),
+                body: recurse_lower_body(
+                    &RecLower {
+                        method_set,
+                        root_dp: &root_dp,
+                        cycle: &cycle_set,
+                        cycle_defs: &cycle_defs,
+                        mutable: false,
+                    },
+                    &d.def,
+                    &r.node,
+                ),
+                body_mut: recurse_lower_body(
+                    &RecLower {
+                        method_set,
+                        root_dp: &root_dp,
+                        cycle: &cycle_set,
+                        cycle_defs: &cycle_defs,
+                        mutable: true,
+                    },
+                    &d.def,
+                    &r.node,
+                ),
                 dps,
             }
         })
@@ -1804,6 +1834,10 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             g_params.push(bp.clone());
         }
     }
+    // Lifetimes must precede type/const params in every generated generic list, but the union (and the
+    // base's params) can interleave them. Normalize lifetime-first — a stable partition; reordering
+    // generic params is semantics-preserving (`by_name`/`g_args`/`g_def`/`g_use` all follow this order).
+    g_params.sort_by_key(|p| !matches!(p, GenericParam::Lifetime(_)));
     let by_name: HashMap<String, TokenStream> =
         g_params.iter().map(|p| (param_name(p), param_use(p))).collect();
     let by_name_param: HashMap<String, GenericParam> =

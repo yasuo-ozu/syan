@@ -73,7 +73,9 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   a clear `abort!` — `ui/visitor_recurse_mixed_acyclic_extra_param.rs`), span **several independent
   cycles** (one unified `Visit`; each target carries its cycle's roots/depth), handle **multi-root**
   cycles (one depth param per root), traverse `Vec`/`Option`/`Box` (incl. `Box`-around-`Option`) +
-  **tuples**, and emit both the **shared and `&mut`** sides. Works **cross-crate** — a downstream
+  **tuples**, **drill** an *unlisted* cross-edge cycle type inline (no `visit_*` for it; back-edges
+  still via the depth params — `visitor_recurse_drill_unlisted.rs`), and emit both the **shared and
+  `&mut`** sides. Works **cross-crate** — a downstream
   `visitor!(upstream::Expr, …)` resolves the `$crate`-rooted `@node`/`@terms` to the defining crate;
   inherent `.visit()` is skipped for a *foreign* target (E0116 — use the `Visit::visit_*` trait
   method), via `path_is_crate_local`. Nested containers (`Vec<Option<T>>`) get a clean `abort!`. Tests:
@@ -86,11 +88,13 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 ## Known gaps / limitations
 
 - **`visitor!(…)` over `#[recurse]` — remaining limits** (the capability is shipped; see "Shipped &
-  tested" + the expansion section): no inheritance (`base => …`) over recurse; no closures (depth-generic
-  methods can't back a closure `Driver`, so it's struct/`&mut`-visitor only); an *unlisted* recurse
-  cross-edge must be listed (no inline drill). All are clean `abort!`s, with fix approaches in the "Fix
-  plan" below. (Drill-in over *acyclic* types in a `#[recurse]` module does work —
-  `visitor_recurse_drill.rs`.)
+  tested" + the expansion section): no inheritance (`base => …`) over recurse (a clean `abort!`; fix
+  approach in the "Fix plan" below), and no closures (depth-generic methods can't back a closure
+  `Driver`, so it's struct/`&mut`-visitor only — fundamental). An *unlisted* recurse cross-edge is now
+  **drilled inline** (`visitor_recurse_drill_unlisted.rs`) — like drill-in over *acyclic* types in a
+  `#[recurse]` module (`visitor_recurse_drill.rs`); back-edges still dispatch through the depth params,
+  and a *cycle of unlisted* intermediates is guarded (unreachable in practice — the type-level
+  rootless-sub-cycle guard already rejects it).
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.
@@ -102,15 +106,7 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 Concrete approaches for the limits above (all in `macro/visitor.rs` unless noted), ordered by
 value/tractability:
 
-1. **Drill an *unlisted* recurse cross-edge** (highest value, moderate effort). Today
-   `recurse_lower_field` `abort!`s when a field head is in the cycle but not in `method_set`. Fix:
-   inline-drill instead — the unlisted type is already fetched (it's a `#[subast]` head, so
-   `followed_intermediates` enqueues it; its def + `@recurse` land in `done_by_path`), so destructure
-   its node (`__YRec<S, dps>`, the **same** depth params — it's the same cycle) and recurse into its
-   fields, dispatching back-edges through the in-scope `dps` exactly as for the listed types. Carry a
-   stack of in-progress unlisted heads and reject a *cycle of unlisted* intermediates (mirrors the
-   acyclic `Lower::visit_value` drill guard). `visit_Y` is still emitted only for listed `Y`.
-2. **Inheritance (`base => …`) over recurse** (niche, larger effort). Restrict to the trait path (the
+1. **Inheritance (`base => …`) over recurse** (niche, larger effort). Restrict to the trait path (the
    `Driver`/closure side is already off for recurse). In `generate_module_mixed`, when `st.base` is a
    recurse visitor: add `base::Visit`/`VisitMut`/`VisitRec` as **supertraits** of the new traits (reuse
    the existing ancestor/`@an` requalification machinery — `base_host_crate`/`requalify_ancestor`),
@@ -118,7 +114,7 @@ value/tractability:
    impls come from `base`), and let the new types' bodies cross into them via `this.visit_<inherited>`.
    Requires the new union params ⊇ the base's, and the base's depth params to line up — feasible since
    `VisitRec`'s `visit_rec` signature is uniform.
-3. **Closures over recurse — won't fix (fundamental).** A `visit_*<R: VisitRec>` method is generic
+2. **Closures over recurse — won't fix (fundamental).** A `visit_*<R: VisitRec>` method is generic
    over the remaining depth; a closure is one concrete `FnMut` and can't be depth-generic, so the
    `Driver`/`Hook`/`Chain` machinery cannot implement the unified `Visit` trait. This is inherent (the
    reason a recurse visitor has always been trait-only) — document it, don't track it as a TODO.
