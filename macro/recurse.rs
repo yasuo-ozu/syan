@@ -650,136 +650,6 @@ fn recurse_visit_body(
     }
 }
 
-/// Generate the depth-generic visitor for a single-root cycle. `gen_decl` / `gen_use` are the ROOT's
-/// generic params in declaration / use form (they coincide except for const params) — the `Visit` /
-/// `VisitRec` traits are keyed on them. A cycle type may carry params beyond the root's: those become
-/// generics on its `visit_*` method (`extra_decl`), and its node type is spelled with its *own* full
-/// params (`own_use`). `root_keys` identifies which of a type's params are the root's (shared).
-#[allow(clippy::too_many_arguments)]
-fn generate_recurse_visitor(
-    items: &[Item],
-    cycle_types: &std::collections::HashSet<String>,
-    root_name: &str,
-    internal_names: &HashMap<String, Ident>,
-    term_ident: &Ident,
-    term_args: &TokenStream,
-    gen_decl: &[TokenStream],
-    gen_use: &[TokenStream],
-    root_keys: &HashSet<String>,
-    // `None` for a lone cycle → the legacy trait names `Visit` / `VisitRec`. `Some(root)` when the
-    // module holds several independent cycles → per-root names `<Root>Visit` / `<Root>VisitRec`, so
-    // the cycles' visitors don't collide. The free `visit_*` fns and `XxxNode` aliases are already
-    // per-type-unique, so only the two trait names need disambiguating.
-    trait_prefix: Option<&str>,
-) -> TokenStream {
-    let root_internal = &internal_names[root_name];
-    let visit_t = Ident::new(
-        &format!("{}Visit", trait_prefix.unwrap_or("")),
-        Span::call_site(),
-    );
-    let visit_rec_t = Ident::new(
-        &format!("{}VisitRec", trait_prefix.unwrap_or("")),
-        Span::call_site(),
-    );
-    let visit_root = Ident::new(
-        &format!(
-            "visit_{}",
-            to_snake(&Ident::new(root_name, Span::call_site()))
-        ),
-        Span::call_site(),
-    );
-    // Single root → its back-edge drives via the lone depth param `__R`.
-    let root_depth: HashMap<String, Ident> = std::iter::once((
-        root_name.to_string(),
-        Ident::new("__R", Span::call_site()),
-    ))
-    .collect();
-
-    // Per cycle type, the data the generated items need — computed here in Rust, emitted by the
-    // `#(for …)` templates below. `own_use` spells the type's `__*Rec` node; `extra_decl` are its
-    // params beyond the root's (made generic on its `visit_*`); `body` drives its followed fields.
-    struct CycInfo {
-        vm: Ident,
-        node: Ident,
-        internal: Ident,
-        own_use: Vec<TokenStream>,
-        extra_decl: Vec<TokenStream>,
-        body: TokenStream,
-    }
-    let infos: Vec<CycInfo> = items
-        .iter()
-        .filter_map(|it| {
-            let orig = match it {
-                Item::Enum(e) => &e.ident,
-                Item::Struct(s) => &s.ident,
-                _ => return None,
-            };
-            if !cycle_types.contains(&orig.to_string()) {
-                return None;
-            }
-            let internal = internal_names[&orig.to_string()].clone();
-            let (own_use, extra_decl) =
-                type_param_tokens(item_generics(it).expect("cycle item"), root_keys);
-            Some(CycInfo {
-                vm: Ident::new(&format!("visit_{}", to_snake(orig)), Span::call_site()),
-                node: Ident::new(&format!("{orig}Node"), Span::call_site()),
-                body: recurse_visit_body(it, &internal, cycle_types, &root_depth),
-                internal,
-                own_use,
-                extra_decl,
-            })
-        })
-        .collect();
-
-    quote! {
-        /// Dispatch trait turning the cycle's depth recursion into trait calls: implemented by the
-        /// root's depth chain (drives the root visit) and by the terminator (no-op).
-        pub trait #visit_rec_t < #(#gen_decl,)* __V > {
-            fn visit_rec(&self, v: &mut __V);
-        }
-
-        /// Depth-generic visitor over the `#[recurse]` cycle. Implement the `visit_*` methods
-        /// (each generic over the remaining depth `__R`); call the free `visit_*` to descend.
-        pub trait #visit_t < #(#gen_decl),* > {
-            #(for info in &infos) {
-                fn #{&info.vm}< #(for e in &info.extra_decl) { #e, } __R: #visit_rec_t < #(#gen_use,)* Self > >(
-                    &mut self,
-                    i: & #{&info.internal} < #(for u in &info.own_use) { #u, } __R >,
-                ) where Self: ::core::marker::Sized {
-                    #{&info.vm}(self, i)
-                }
-            }
-        }
-
-        #(for info in &infos) {
-            pub fn #{&info.vm}< #(#gen_decl,)* #(for e in &info.extra_decl) { #e, } __V: #visit_t < #(#gen_use),* >, __R: #visit_rec_t < #(#gen_use,)* __V > >(
-                v: &mut __V,
-                i: & #{&info.internal} < #(for u in &info.own_use) { #u, } __R >,
-            ) {
-                #{&info.body}
-            }
-        }
-
-        #(for info in &infos) {
-            #[doc = "Depth-generic node type for the visitor (an alias of the internal recurse type)."]
-            pub use #{&info.internal} as #{&info.node};
-        }
-
-        impl< #(#gen_decl,)* __V: #visit_t < #(#gen_use),* >, __R: #visit_rec_t < #(#gen_use,)* __V > >
-            #visit_rec_t < #(#gen_use,)* __V > for #root_internal < #(#gen_use,)* __R >
-        {
-            fn visit_rec(&self, v: &mut __V) {
-                <__V as #visit_t < #(#gen_use),* >>::#visit_root(v, self);
-            }
-        }
-        impl< #(#gen_decl,)* __V: #visit_t < #(#gen_use),* > >
-            #visit_rec_t < #(#gen_use,)* __V > for #term_ident #term_args
-        {
-            fn visit_rec(&self, _v: &mut __V) {}
-        }
-    }
-}
-
 /// Is the subgraph induced by the cycle's **non-root** types cyclic? Used as the multi-root soundness
 /// guard: the depth only decrements at a self-referential root, so a cycle running entirely through
 /// non-root types would never terminate. Built and tested with `safegraph` (same `u32`-keyed graph as
@@ -816,13 +686,14 @@ fn subgraph_is_cyclic(
     is_cyclic_directed(&g)
 }
 
-/// The depth-generic visitor for a cycle with **several roots**. Mirrors `generate_recurse_visitor`
-/// but threads one depth parameter per root (`__R0, __R1, …`, in `roots_sorted` order): every visit
-/// method is generic over all of them, a back-edge to root `i` drives via `__Ri::visit_rec`, and each
-/// root's depth chain plus each terminator implements `VisitRec`. `trait_prefix` root-prefixes the
-/// trait names when the module holds other cycles too.
+/// The depth-generic visitor for a `#[recurse]` cycle, keyed on `roots_sorted` (one or more roots).
+/// Threads one depth parameter per root (`__R0, __R1, …`, in `roots_sorted` order): every visit method
+/// is generic over all of them, a back-edge to root `i` drives via `__Ri::visit_rec`, and each root's
+/// depth chain plus each terminator implements `VisitRec`. A cycle type may carry params beyond the
+/// roots' — those become generics on its `visit_*` method (`extra_decl`). `trait_prefix` root-prefixes
+/// the trait names when the module holds other cycles too. (A single root is just the one-element case.)
 #[allow(clippy::too_many_arguments)]
-fn generate_multiroot_visitor(
+fn generate_recurse_visitor(
     items: &[Item],
     cycle_types: &HashSet<String>,
     roots_sorted: &[String],
@@ -1355,16 +1226,19 @@ fn build_scc(
 
         let visitor_ts = if want_visit {
             let prefix = if multi_scc { Some(root_name.as_str()) } else { None };
+            // A single-root cycle is the one-root case of the general generator.
+            let term_for_root: HashMap<String, Ident> =
+                std::iter::once((root_name.clone(), term_ident.clone())).collect();
             generate_recurse_visitor(
                 items,
                 scc,
-                root_name.as_str(),
+                std::slice::from_ref(&root_name),
                 &internal_names,
-                &term_ident,
-                &term_args,
+                &term_for_root,
                 gen_decl,
                 gen_use,
                 &root_keys,
+                &term_args,
                 prefix,
             )
         } else {
@@ -1655,7 +1529,7 @@ fn build_multiroot_tail(
         } else {
             None
         };
-        generate_multiroot_visitor(
+        generate_recurse_visitor(
             items,
             scc,
             roots_sorted,
