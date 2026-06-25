@@ -26,7 +26,10 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   section below).
 - **Containers**: `Box` (deref), `Vec`/`VecDeque`/slice/array/`Punctuated` (`for …iter()/iter_mut()`),
   `Option` (`if let Some`), dereffing through a wrapping `Box`. **Nested** (`Vec<Option<T>>`,
-  `Option<Vec<T>>`, …) traversed via a peeled container chain (`visitor_nested_containers.rs`).
+  `Option<Vec<T>>`, …) traversed via a peeled container chain (`visitor_nested_containers.rs`). A
+  **tuple** at the peeled position — top-level *or* nested behind containers/boxes (`Vec<(A,B)>`,
+  `Box<(A,B)>`) — is destructured + each element lowered (`peel`'s `Head::{Path,Tuple}`;
+  `visitor_container_of_tuple.rs`, recurse: `visitor_recurse_container_of_tuple.rs`).
 - **Inputs**: struct visitors (`&mut`), single closures, and **tuples of closures** (2..=8) in **one**
   pass (`Hook` + `Driver` + `Chain`).
 - **`visit_mut`**: full in-place mirror. Reduce/append by overriding the *parent*'s `visit_*_mut`
@@ -83,7 +86,9 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `visitor!(base => New)` over a recurse base works (struct-only — the base's `Visit`/`VisitMut` become
   supertraits; a recurse base exports `__syan_visited` with a `@recbase` marker → the consumer drops the
   closure `Driver`): both `New(acyclic) => base(recurse)` and `New(recurse) => base(recurse)`
-  (`visitor_inherit_recurse.rs`). Tests:
+  (`visitor_inherit_recurse.rs`). The `@recbase` taint propagates through an **acyclic intermediate**
+  too (`recurse-base => acyclic-mid => new` — each link re-exports `@recbase` iff `base_is_recurse`;
+  `visitor_inherit_recurse_acyclic_mid.rs`). Tests:
   `visitor_recurse_via_visitor.rs` (incl. `visit_mut`), `visitor_recurse_heterogeneous.rs`,
   `visitor_recurse_mixed.rs`, `visitor_recurse_containers.rs`, `visitor_recurse_cycle.rs`,
   `recurse_generics.rs`, `visitor_recurse_multiroot_via_visitor.rs`,
@@ -104,6 +109,10 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names (the alias is one keyword — won't fix).
+- **Clean `abort!`s for footguns** (all `visitor_diagnostics.rs`): an **unlisted co-root** of a
+  multi-root recurse cycle (a root defines a depth dimension, can't be drilled → must be listed); a
+  **`where`-bounded param not shared by all visited types** (the bound would be undischargeable on a
+  type lacking it — an *unbounded* unshared param is fine); the mixed acyclic-param-not-a-root wall.
 
 ## Closures over `#[recurse]` — implementation sketches
 
