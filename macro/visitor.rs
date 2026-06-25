@@ -1491,6 +1491,29 @@ fn generate_module_mixed(
         }
     }
 
+    // Every root of a (multi-root) cycle must be listed. A root defines its own depth dimension
+    // (`__ARec<S, __R0, __R1>` with each `__Ri: VisitRec`), but a `VisitRec` impl is emitted only for a
+    // *listed* root's node — so an omitted co-root leaves the other roots' `VisitRec` bound
+    // unsatisfiable (a cryptic `VisitRec not implemented for __BRec<…>` wall). Unlike a non-root
+    // cross-edge (drilled inline when unlisted), a root cannot be drilled — it must be listed.
+    for d in &rec {
+        let owner = item_ident(&d.def).unwrap();
+        for root in &d.recurse.as_ref().unwrap().roots {
+            if !method_set.contains(&root.to_string()) {
+                abort!(
+                    Span::call_site(),
+                    "visitor!() over a multi-root `#[recurse]` cycle: root `{}` of the cycle \
+                     containing `{}` is not listed. Every root of a multi-root cycle defines its own \
+                     depth dimension and cannot be drilled, so all roots must be listed in \
+                     `visitor!(...)`. Add `{}` to the visitor.",
+                    root,
+                    owner,
+                    root
+                );
+            }
+        }
+    }
+
     // Mixed-visitor guard: an acyclic target's params must be ⊆ the roots' params. The depth-generic
     // `VisitRec` impls are keyed on the roots' params only, so an acyclic-only param would be
     // unconstrained there (E0207). Pure-recurse heterogeneity is supported; only an acyclic type that

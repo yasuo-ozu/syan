@@ -10,4 +10,7 @@ fn visitor_diagnostics() {
     // `visitor!()` over a `#[recurse]` cycle mixed with an acyclic type carrying a param no cycle
     // root has (would make the depth-generic `VisitRec` impls' param unconstrained — E0207).
     t.compile_fail("tests/ui/visitor_recurse_mixed_acyclic_extra_param.rs");
+    // `visitor!()` over a MULTI-ROOT `#[recurse]` cycle that omits a co-root (a root defines a depth
+    // dimension and can't be drilled, so every root must be listed).
+    t.compile_fail("tests/ui/visitor_recurse_unlisted_coroot.rs");
 }
