@@ -1,5 +1,5 @@
 use crate::ast::{cleaned_item, crate_rooted_tokens, parse_subast, subast_tokens};
-use crate::util::{as_tuple, item_generics, peel, to_snake, Container};
+use crate::util::{item_generics, recurse_lower_body, to_snake};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::{abort, set_dummy};
@@ -485,170 +485,11 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
 //
 // `#[recurse]` rewrites the cycle's back-edges to the root into the generic `__Rec` param and each
 // nesting level into a distinct concrete type, so a fixed-type visitor cannot traverse it. Instead
-// we generate visit methods generic over the depth (`__R`) plus a `VisitRec` dispatch trait that the
-// root's depth chain (`__RootRec<.., __R>`) and the terminator implement, turning the depth recursion
-// into trait dispatch. Single-root cycles only.
+// we generate visit methods generic over the depth (one `__R` per root) plus a `VisitRec` dispatch
+// trait that each root's depth chain and the terminators implement, turning the depth recursion into
+// trait dispatch. `generate_recurse_visitor` handles one or several roots; the per-field body lowering
+// is shared with `visitor!()`'s recurse path via `util::recurse_lower_body`.
 // ---------------------------------------------------------------------------
-
-/// See through transparent wrappers to a tuple type's element list (a bare tuple, or one behind
-/// `Type::Group`/`Type::Paren`). `None` if `ty` is not a tuple.
-/// Dispatch one field of a cycle type: a back-edge to a **root** drives via that root's depth param
-/// (`root_depth[head]::visit_rec`); a cross-edge to another cycle type calls that type's visit method;
-/// anything else is a leaf (`None`, caller binds `_`). `binding` is the destructured field (`&Field`).
-/// `root_depth` maps each root's name to the depth-param ident in scope (one root → `{root: __R}`;
-/// several roots → `{A: __R0, B: __R1, …}`).
-fn recurse_dispatch_field(
-    ty: &Type,
-    binding: &TokenStream,
-    cycle_types: &std::collections::HashSet<String>,
-    root_depth: &HashMap<String, Ident>,
-) -> Option<TokenStream> {
-    // A tuple field: destructure it and dispatch each element (an element may itself be a cycle
-    // ref, a container of one, or a nested tuple). Leaf elements bind `_`; if no element is
-    // followed the whole tuple is a leaf.
-    if let Some(elems) = as_tuple(ty) {
-        let mut pats = Vec::new();
-        let mut stmts = Vec::new();
-        for (i, elem) in elems.iter().enumerate() {
-            let bi = Ident::new(&format!("__t{i}"), Span::call_site());
-            if let Some(stmt) = recurse_dispatch_field(elem, &quote!(#bi), cycle_types, root_depth) {
-                pats.push(quote!(#bi));
-                stmts.push(stmt);
-            } else {
-                pats.push(quote!(_));
-            }
-        }
-        if stmts.is_empty() {
-            return None; // tuple of only leaves → leaf
-        }
-        return Some(quote!( { let ( #(#pats,)* ) = #binding; #(#stmts)* } ));
-    }
-
-    let p = peel(ty, &std::collections::HashSet::new())?;
-    // Cycle membership keys on the FIRST path segment: a same-module cycle reference is always a
-    // bare single-segment ident, so a foreign multi-segment path (`super::other::Stmt`) whose LAST
-    // segment merely equals a cycle type name is correctly a leaf (transform_type, keyed on the
-    // first segment, would not rename it). For a real bare cycle ref `head_lead == head`, so the
-    // visit method (`visit_<snake(head)>`) is unchanged.
-    let hs = p.head_lead.to_string();
-    let depth = root_depth.get(&hs);
-    if depth.is_none() && !cycle_types.contains(&hs) {
-        return None; // leaf
-    }
-    // Nested containers (e.g. `Vec<Option<_>>`) cannot be traversed — reject cleanly, matching the
-    // `visitor!()` builder, rather than emitting mistyped traversal code.
-    if p.nested {
-        abort!(
-            ty,
-            "#[recurse(visit)] cannot traverse a nested container (e.g. `Vec<Option<_>>`); wrap the \
-             inner part in its own #[derive(Ast)] type"
-        );
-    }
-    // A followed field's head is a bare single-segment cycle ref, so `head_lead == head` here; key
-    // the visit-method name on `head_lead` for consistency with the membership decision above.
-    let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
-    Some(match p.container {
-        Container::Direct => recurse_visit_one(depth, &p.head_lead, &stars, binding),
-        Container::Seq => {
-            // `.iter()` auto-derefs through any `Box` around the sequence (`cont_box`).
-            let inner = recurse_visit_one(depth, &p.head_lead, &stars, &quote!(__x));
-            quote!( for __x in #binding.iter() { #inner } )
-        }
-        Container::Opt => {
-            // Patterns do not auto-deref `Box`, so deref through any `Box` around the `Option`
-            // (`cont_box`) before matching; the leading `*` also derefs the `&Field` binding.
-            let cont_stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
-            let inner = recurse_visit_one(depth, &p.head_lead, &stars, &quote!(__x));
-            quote!( if let ::core::option::Option::Some(__x) = & #cont_stars #binding { #inner } )
-        }
-    })
-}
-
-/// Emit the visit of a single value `acc` (a `&Box^n<head>`): drive via the root's depth param
-/// (`depth = Some`) or call `v.visit_<head>` for a cross-edge (`depth = None`); `stars` derefs
-/// through any `Box` to a `&head`.
-fn recurse_visit_one(
-    depth: Option<&Ident>,
-    head: &Ident,
-    stars: &TokenStream,
-    acc: &TokenStream,
-) -> TokenStream {
-    if let Some(r) = depth {
-        quote!( #r::visit_rec(& #stars #acc, v); )
-    } else {
-        let m = Ident::new(&format!("visit_{}", to_snake(head)), Span::call_site());
-        quote!( v.#m(& #stars #acc); )
-    }
-}
-
-/// `(pattern, statements)` for a cycle type's fields, dispatching followed fields.
-fn recurse_visit_fields(
-    fields: &Fields,
-    cycle_types: &std::collections::HashSet<String>,
-    root_depth: &HashMap<String, Ident>,
-) -> (TokenStream, TokenStream) {
-    match fields {
-        Fields::Named(named) => {
-            let mut binds = Vec::new();
-            let mut stmts = Vec::new();
-            for f in &named.named {
-                let name = f.ident.clone().unwrap();
-                if let Some(stmt) =
-                    recurse_dispatch_field(&f.ty, &quote!(#name), cycle_types, root_depth)
-                {
-                    binds.push(quote!(#name));
-                    stmts.push(stmt);
-                }
-            }
-            (quote!( { #(#binds,)* .. } ), quote!( #(#stmts)* ))
-        }
-        Fields::Unnamed(unnamed) => {
-            let mut pats = Vec::new();
-            let mut stmts = Vec::new();
-            for (i, f) in unnamed.unnamed.iter().enumerate() {
-                let b = Ident::new(&format!("__f{i}"), Span::call_site());
-                if let Some(stmt) =
-                    recurse_dispatch_field(&f.ty, &quote!(#b), cycle_types, root_depth)
-                {
-                    pats.push(quote!(#b));
-                    stmts.push(stmt);
-                } else {
-                    pats.push(quote!(_));
-                }
-            }
-            (quote!( ( #(#pats),* ) ), quote!( #(#stmts)* ))
-        }
-        Fields::Unit => (quote!(), quote!()),
-    }
-}
-
-/// Body of a cycle type's `visit_*` drive fn: destructure `i` (the internal `__XxxRec` type) and
-/// dispatch followed fields.
-fn recurse_visit_body(
-    orig: &Item,
-    internal: &Ident,
-    cycle_types: &std::collections::HashSet<String>,
-    root_depth: &HashMap<String, Ident>,
-) -> TokenStream {
-    match orig {
-        Item::Enum(e) => {
-            let arms = e.variants.iter().map(|v| {
-                let (pat, stmts) = recurse_visit_fields(&v.fields, cycle_types, root_depth);
-                let vid = &v.ident;
-                quote!( #internal::#vid #pat => { #stmts } )
-            });
-            quote!( match i { #(#arms)* } )
-        }
-        Item::Struct(s) => {
-            let (pat, stmts) = recurse_visit_fields(&s.fields, cycle_types, root_depth);
-            match &s.fields {
-                Fields::Unit => quote!(),
-                _ => quote!( let #internal #pat = i; #stmts ),
-            }
-        }
-        _ => quote!(),
-    }
-}
 
 /// Is the subgraph induced by the cycle's **non-root** types cyclic? Used as the multi-root soundness
 /// guard: the depth only decrements at a self-referential root, so a cycle running entirely through
@@ -748,7 +589,9 @@ fn generate_recurse_visitor(
             Some(CycInfo {
                 vm: Ident::new(&format!("visit_{}", to_snake(orig)), Span::call_site()),
                 node: Ident::new(&format!("{orig}Node"), Span::call_site()),
-                body: recurse_visit_body(it, &internal, cycle_types, &root_depth),
+                // `#[recurse(visit)]` lists every cycle type, so `method_set == cycle == cycle_types`,
+                // immutable (`mutable = false`). Shared with `visitor!()`'s recurse path.
+                body: recurse_lower_body(it, &internal, cycle_types, &root_depth, cycle_types, false),
                 internal,
                 own_use,
                 extra_decl,

@@ -1,6 +1,6 @@
 use crate::util::{
-    angle, as_tuple, gargs, gparams, item_generics, item_ident, param_name, param_use, peel,
-    to_snake, Container,
+    angle, as_tuple, gargs, gparams, item_generics, item_ident, method_ident_m, mt, param_name,
+    param_use, peel, recurse_lower_body, to_snake, Container,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -723,22 +723,6 @@ fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
 // Module generation
 // ---------------------------------------------------------------------------
 
-/// `_mut` suffix for the mutable traversal variant.
-fn mt(mutable: bool) -> &'static str {
-    if mutable {
-        "_mut"
-    } else {
-        ""
-    }
-}
-
-fn method_ident_m(head: &Ident, mutable: bool) -> Ident {
-    Ident::new(
-        &format!("visit_{}{}", to_snake(head), mt(mutable)),
-        Span::call_site(),
-    )
-}
-
 /// Mint a generated helper param ident whose name avoids every name in `reserved` (the visited
 /// types' generic params), appending `_` until free. Rust rejects two generic params with the same
 /// name string in one item regardless of hygiene, so this — not just `mixed_site` — is what lets a
@@ -1332,160 +1316,6 @@ fn gen_side(
 
         // Inherent entry points (no trait import needed at the call site).
         #(for imp in &inherent) { #imp }
-    }
-}
-
-/// Lower one field of a `#[recurse]` cycle type for the unified `visitor!()` path. A back-edge to a
-/// root → that root's depth param `::visit_rec`; a cross-edge to a *listed* cycle type → `v.visit_<head>`;
-/// an unlisted cycle type → aborts (inline drill of recurse types is a later phase); anything else is a
-/// leaf. Mirrors `recurse.rs`'s `recurse_dispatch_field`, keyed on `root_dp` (root ident → depth param).
-fn recurse_lower_field(
-    ty: &Type,
-    binding: &TokenStream,
-    method_set: &HashSet<String>,
-    root_dp: &HashMap<String, Ident>,
-    cycle: &HashSet<String>,
-    mutable: bool,
-) -> Option<TokenStream> {
-    if let Some(elems) = as_tuple(ty) {
-        let mut pats = Vec::new();
-        let mut stmts = Vec::new();
-        for (i, elem) in elems.iter().enumerate() {
-            let bi = Ident::new(&format!("__t{i}"), Span::call_site());
-            if let Some(s) = recurse_lower_field(elem, &quote!(#bi), method_set, root_dp, cycle, mutable) {
-                pats.push(quote!(#bi));
-                stmts.push(s);
-            } else {
-                pats.push(quote!(_));
-            }
-        }
-        if stmts.is_empty() {
-            return None;
-        }
-        return Some(quote!( { let ( #(#pats,)* ) = #binding; #(#stmts)* } ));
-    }
-    let p = peel(ty, &HashSet::new())?;
-    let hs = p.head_lead.to_string();
-    let dp = root_dp.get(&hs);
-    let listed = method_set.contains(&hs);
-    if dp.is_none() && !listed {
-        if cycle.contains(&hs) {
-            abort!(
-                ty,
-                "visitor!() over `#[recurse]`: cross-edge to cycle type `{}` is not listed in \
-                 visitor!(...); list it (inline drilling of unlisted recurse types is not yet supported)",
-                hs
-            );
-        }
-        return None; // leaf
-    }
-    if p.nested {
-        abort!(
-            ty,
-            "visitor!() over `#[recurse]` cannot traverse a nested container (e.g. `Vec<Option<_>>`)"
-        );
-    }
-    let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
-    let amp = if mutable { quote!(&mut) } else { quote!(&) };
-    let visit_rec_fn = if mutable {
-        quote!(visit_rec_mut)
-    } else {
-        quote!(visit_rec)
-    };
-    let one = |acc: &TokenStream| -> TokenStream {
-        match dp {
-            Some(d) => quote!( #d::#visit_rec_fn(#amp #stars #acc, v); ),
-            None => {
-                let m = method_ident_m(&p.head_lead, mutable);
-                quote!( v.#m(#amp #stars #acc); )
-            }
-        }
-    };
-    Some(match p.container {
-        Container::Direct => one(binding),
-        Container::Seq => {
-            let iter = if mutable { quote!(iter_mut) } else { quote!(iter) };
-            let inner = one(&quote!(__x));
-            quote!( for __x in #binding.#iter() { #inner } )
-        }
-        Container::Opt => {
-            let cont_stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
-            let inner = one(&quote!(__x));
-            quote!( if let ::core::option::Option::Some(__x) = #amp #cont_stars #binding { #inner } )
-        }
-    })
-}
-
-/// `(pattern, statements)` for a recurse cycle type's fields.
-fn recurse_lower_fields(
-    fields: &Fields,
-    method_set: &HashSet<String>,
-    root_dp: &HashMap<String, Ident>,
-    cycle: &HashSet<String>,
-    mutable: bool,
-) -> (TokenStream, TokenStream) {
-    match fields {
-        Fields::Named(named) => {
-            let mut binds = Vec::new();
-            let mut stmts = Vec::new();
-            for f in &named.named {
-                let name = f.ident.clone().unwrap();
-                if let Some(s) =
-                    recurse_lower_field(&f.ty, &quote!(#name), method_set, root_dp, cycle, mutable)
-                {
-                    binds.push(quote!(#name));
-                    stmts.push(s);
-                }
-            }
-            (quote!( { #(#binds,)* .. } ), quote!( #(#stmts)* ))
-        }
-        Fields::Unnamed(unnamed) => {
-            let mut pats = Vec::new();
-            let mut stmts = Vec::new();
-            for (i, f) in unnamed.unnamed.iter().enumerate() {
-                let b = Ident::new(&format!("__f{i}"), Span::call_site());
-                if let Some(s) =
-                    recurse_lower_field(&f.ty, &quote!(#b), method_set, root_dp, cycle, mutable)
-                {
-                    pats.push(quote!(#b));
-                    stmts.push(s);
-                } else {
-                    pats.push(quote!(_));
-                }
-            }
-            (quote!( ( #(#pats),* ) ), quote!( #(#stmts)* ))
-        }
-        Fields::Unit => (quote!(), quote!()),
-    }
-}
-
-/// Body of a recurse cycle type's `visit_*`/`visit_*_mut` drive fn: destructure `i` (a `&__XRec<…>` /
-/// `&mut __XRec<…>`, matched via the `node` path) and dispatch followed fields.
-fn recurse_lower_body(
-    def: &Item,
-    node: &Path,
-    method_set: &HashSet<String>,
-    root_dp: &HashMap<String, Ident>,
-    cycle: &HashSet<String>,
-    mutable: bool,
-) -> TokenStream {
-    match def {
-        Item::Enum(e) => {
-            let arms = e.variants.iter().map(|v| {
-                let (pat, stmts) = recurse_lower_fields(&v.fields, method_set, root_dp, cycle, mutable);
-                let vid = &v.ident;
-                quote!( #node::#vid #pat => { #stmts } )
-            });
-            quote!( match i { #(#arms)* } )
-        }
-        Item::Struct(s) => {
-            let (pat, stmts) = recurse_lower_fields(&s.fields, method_set, root_dp, cycle, mutable);
-            match &s.fields {
-                Fields::Unit => quote!(),
-                _ => quote!( let #node #pat = i; #stmts ),
-            }
-        }
-        _ => quote!(),
     }
 }
 
