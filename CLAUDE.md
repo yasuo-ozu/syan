@@ -9,152 +9,77 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 
 ## Shipped & tested
 
-- **`#[derive(Ast)]`**: empty `Ast` marker impl + a `#[macro_export]` callback "metadata" macro
-  carrying a cleaned copy of the definition (re-parsed downstream as a `syn::Item`), re-exported
-  under the type's own name so it's reachable as `path::to::T!{..}` (type vs. macro namespaces
-  coexist). Also emits one `::syan::visit::Repeater<N>` impl **on the type itself** per
-  context-dependent field type (`<T as Repeater<N>>::Type`; external-metadata fallback). `crate::`-
-  rooted `#[subast]` paths are emitted `$crate`-rooted so they resolve downstream.
-- **`visitor!([base =>] T, …)`** invoked **inside** an (otherwise empty) `mod` (function-like; a
-  `macro_rules!` shim in `syan` captures `$crate` and forwards the syan path to `__visitor_entry`,
-  so no `#[syan(..)]` needed). A metadata ping-pong through `__visitor_build` generates, per visited
-  type: a `Visit`/`VisitMut` trait method, a free `visit_*`/`visit_*_mut` traversal fn, and
-  **inherent** `visit`/`visit_mut` methods on the type (no trait import at the call site; the
-  visitor must be generated in the types' crate). Type args are paths resolvable from inside the
-  visitor module (`super::Expr`, `crate::ast::Expr`).
-- **`#[subast(<path> [as Alias])]` + drill-in** (shipped): `#[derive(Ast)]` takes a type-level
-  `#[subast]` allowlist of the type's Ast children (+ resolvable paths), carried in the metadata as
-  `@subast { path as matchkey, … }`. A field is *followed* iff its container-peeled head is a
-  `#[subast]` matchkey or the type's own ident (self-recursion implicit); everything else is a leaf.
-  `visit_*` is generated **only** for `visitor!(…)`-listed types; a followed field whose head is
-  listed lowers to `this.visit_<head>(…)`, a followed **unlisted intermediate** is **drilled through
-  inline** (its def destructured, recursing into *its* `#[subast]` fields) and gets no `visit_*`. A
-  cycle of unlisted intermediates is a build error; a finite dead-end is a no-op. Tests:
-  `visitor_drill*.rs`. (See "Drill-in — as implemented" below.) Diagnostics: a same-last-segment
-  `#[subast]` collision is a derive error; an `unused entry` warning fires for a matchkey matching no
-  field; a **"follows nothing" lint** warns when a type with no `#[subast]` has an AST-looking field
-  (heuristic; `#[subast()]` opts out). Like all syan derive warnings these are visible on nightly,
-  silent on stable.
-- **Containers** (shipped): `Box` (transparent; tracked as box-depth for `&**` drill deref), `Vec` /
-  `VecDeque` / slice / array / `Punctuated` (`for x in …iter()/iter_mut()`), `Option`
-  (`if let Some(x) = …`, dereffing through any wrapping `Box`). Nested containers (`Vec<Option<T>>`)
-  are unsupported and rejected with a clear error.
-- **Inputs** (`IntoVisitor`/`IntoVisitorMut` selector design): struct visitors (via `&mut`), single
-  closures, and **tuples of closures** (arity 2..=8) running in **one** traversal via a shallow
-  `Hook` + single-pass `Driver` + `Chain`.
-- **`visit_mut`** full mirror (in-place mutation). **Reduce/append**: override the *parent* node's
-  `visit_*_mut` (it owns the `&mut Vec`/`&mut Option`), then descend — see `visitor_reduce.rs`.
-- **Inheritance** `visitor!(base => New)` for new→base reference DAGs (base exports a
-  `__syan_visited` list macro carrying its visited idents, its generic-param union `@bg`, and its
-  full ancestor chain `@an`; the new trait extends it via supertrait, referencing `base::Visit<…>`
-  with the base's own arity — so a wider new union works (`visitor_inherit_arity.rs`), and
-  **multi-level chains** `base => mid => New` work: `New`'s `Driver` satisfies every transitive
-  supertrait (`visitor_inherit_multilevel.rs`)).
-- **Generics**: the trait is parameterized by the **union** of visited types' generic params
-  (`Visit<S, Tokens>`); each type uses its own subset, so mixed arities work (`visitor_generics.rs`).
-  Caveat: `.visit()` on a root that doesn't use every union param may need a turbofish. Generated
-  helper params avoid the visited types' param names, so a visited type may declare a param literally
-  named `__V`/`__T`/`__H`/`__F`/`__A`/`__B` (`visitor_hygiene.rs`).
-- **Cross-crate** validated: visited types are named by the full path given to `visitor!(...)`, so a
-  downstream crate needs no import (`rust/tests/cross_crate.rs`); a downstream-built visitor can also
-  drill through an upstream crate's types (`$crate`-rooted `#[subast]`; `rust/tests/cross_crate_drill.rs`).
-  **Cross-crate inheritance** also works: a downstream `visitor!(upstream::base => New)` inherits an
-  upstream base visitor — everything is keyed on the base **path** (supertrait `New: base::Visit`, the
-  inherited `base::visit_*` fns, and the base's `#[macro_export]`+`pub use`'d `__syan_visited` macro),
-  so the new visitor descends into the inherited (upstream) types. Single-level and a wider-arity
-  `Visit<S>`→`Visit<S, T>` case: `rust/tests/cross_crate_inherit.rs`. Multi-level `base => mid => New`
-  works **including with an upstream intermediate** (base + mid both in the library, New downstream):
-  `rust/tests/cross_crate_inherit_multilevel.rs`. The subtlety there is that `mid` records its
-  ancestor `base` as the `crate::inherit::base` path *relative to `mid`'s own crate*; `$crate` can't
-  fix this (emitted by a proc-macro into a generated `macro_rules`, `$crate` resolves only for
-  fetch/macro-invocation paths — like the `#[subast]` drill — **not** for the `base::Visit` trait path
-  re-emitted into New's `Driver` supertrait impl). Instead `__visitor_build` **requalifies** a
-  `crate::`-relative `@an` ancestor against the direct base's host crate — taken from the concrete
-  `syan_rust::inherit::mid` path New was given (`base_host_crate` + `requalify_ancestor` in
-  `macro/visitor.rs`) — making it concrete and downstream-resolvable. Same-crate and already-concrete
-  ancestor chains (e.g. a downstream intermediate naming `base` by its full cross-crate path) are
-  untouched. Coverage: a 4-level all-upstream chain `base => mid => upper => New` (requalify loop runs
-  for **both** transitive ancestors) is `rust/tests/cross_crate_inherit_4level.rs`; the complementary
-  *downstream*-intermediate shape (the requalify no-op branch — ancestor already concrete) is
-  `rust/tests/cross_crate_inherit_downstream_mid.rs`; multi-level **+ arity widening** at the leaf is a
-  second test in `cross_crate_inherit_multilevel.rs`. Residual hole: a `super::`/`self::`-relative
-  ancestor recorded by an *upstream* intermediate is not requalified (use `crate::`-rooted entry paths).
-- **`#[recurse(visit)]`** (shipped): a **depth-generic** visitor over a `#[recurse]` *cycle*.
-  `#[recurse]` rewrites the cycle's back-edges to the root into the generic `__Rec` param and each
-  nesting level into a distinct type, so the visitor is parameterized by the remaining depth: a
-  `Visit<S…>` trait with `visit_*<R>` methods (+ free `visit_*` drive fns), and a `VisitRec<S…, V>`
-  dispatch trait implemented by the root's depth chain (drives the root visit) and by the terminator
-  (no-op) — turning the depth recursion into trait dispatch on the back-edge. `XxxNode` aliases name
-  the depth-generic node types. Trait-based only (a closure can't be generic over the depth).
-  Single-root cycles use one depth param `__Rec`; **multi-root cycles** (several independent cycles, or
-  several self-referential roots in one SCC) are also supported — see the "Multiple … cycles" bullets
-  below. Followed fields traverse through `Vec`/`Option`/`Box` (incl. a `Box`
-  *around* an `Option`, via `cont_box`) and **tuples** (each element dispatched). Cycle types may
-  carry **lifetime / type / const generic params**, and the types in a cycle may have *different*
-  params (heterogeneous): each keeps its own params (threaded into its `__*Rec` node + public alias),
-  the `Visit`/`VisitRec` traits are keyed on the root's params, and a type's extra params become
-  generics on its `visit_*` method. The one requirement is that every cycle type declare all of the
-  **root's** params (so the `__Rec` default `__RootDefault<root params>` is spellable), and that every
-  **back-edge to the root repeat the root's params verbatim** (identity) — a root reference collapses
-  to the single depth param `__Rec`, so a non-identity argument like `Expr<Vec<S>>` (a *non-regular*
-  recursion whose param grows per level) cannot be threaded. Unsupported shapes are rejected with a
-  clear `abort!` (not cryptic generated-code errors): a nested container (`Vec<Option<_>>`), a cycle
-  type missing a root param, a multi-root cycle whose roots aren't a feedback vertex set (a sub-cycle
-  avoids every self-referential type), and a non-identity arg on a back-edge to the root
-  (was silently *dropped* → miscompile; both `#[recurse]` and `#[recurse(visit)]`). Tests:
-  `visitor_recurse_cycle.rs` (root / cross-edge / back-edge /
-  self-recursive root), `visitor_recurse_containers.rs` (container + tuple traversal),
-  `recurse_generics.rs` (lifetime / type / const / heterogeneous params), `recurse_audit_test.rs` +
-  `ui/recurse_*.rs` (the rejections; `ui/recurse_complex_root_param.rs` is the non-identity-arg case;
-  `limit = 0` still panics).
-- **Multiple independent cycles in one `#[recurse]` module** (shipped): the cycle types are
-  partitioned into strongly-connected components (`find_cycle_sccs`, via `safegraph`'s Tarjan SCC);
-  each *independent* cycle (a non-trivial SCC, or a singleton with a self-loop) is processed on its own
-  by `build_scc` — its own root, depth chain, `XxxTerm`, public aliases, and (under `visit`) its own
-  visitor. A field referencing another cycle's type is left as that cycle's public alias (cross-cycle
-  fields are *leaves* in the visitor). When the module holds **several** cycles the visitor trait names
-  are root-prefixed (`ExprVisit`/`ExprVisitRec`, `TypeVisit`/`TypeVisitRec`; the `visit_*` fns and
-  `XxxNode` aliases are already per-type-unique); a **lone** cycle keeps the legacy unprefixed
-  `Visit`/`VisitRec` (byte-compatible). This also fixed a latent miscompile where plain `#[recurse]`
-  collapsed independent cycles into one `__Rec`. Tests: `recurse_multi_cycle.rs`.
-- **Multiple self-referential roots *within one* cycle** (shipped): an SCC where several types each
-  self-reference (mutually-recursive `A`/`B` that *both* `Box<Self>`). Each root keeps its **own depth
-  dimension** — every cycle type carries one depth param per root (`__RecA`, `__RecB`, …; `__R0`/`__R1`
-  in the visitor), a back-edge to root `i` is that root's param, the per-root depth chains are unrolled
-  **mutually** (level `k` of each root embeds level `k-1` of *all* roots), and each root gets its own
-  `XxxTerm`. The visitor (`build_multiroot_tail` + `generate_multiroot_visitor`) gives each cycle type
-  a `visit_*` generic over *all* roots' remaining depth, and `VisitRec` is implemented by every root's
-  depth chain (driving its own visit) + every terminator. Soundness guard: the depth only decrements at
-  a root, so every cycle must pass through one — the SCC with the roots removed must be acyclic
-  (`subgraph_is_cyclic`, via `safegraph`'s `is_cyclic_directed`), else a clear `abort!`
-  (`ui/recurse_multiroot_rootless_subcycle.rs`). Roots must all declare the same generic params (extras
-  allowed on non-root cycle types). Tests: `recurse_multiroot.rs`. The transform is generalized over
-  the root count (`TransformCtx::{rec_params, root_rec, rec_decls}`); a single root reduces to the
-  original `__Rec` machinery.
+- **`#[derive(Ast)]`**: empty `Ast` impl + a `#[macro_export]` metadata macro carrying a cleaned def
+  (re-parsed downstream as a `syn::Item`), re-exported under the type's own name (`path::to::T!{..}`;
+  type/macro namespaces coexist). Plus one `Repeater<N>` impl **on the type itself** per context-
+  dependent field type. `crate::`-rooted `#[subast]` paths are emitted `$crate`-rooted for downstream.
+- **`visitor!([base =>] T, …)`**: invoked **inside** an (empty) `mod`; a `macro_rules!` shim captures
+  `$crate`. A metadata ping-pong (`__visitor_build`) emits, per visited type, a `Visit`/`VisitMut`
+  trait method, a free `visit_*`/`visit_*_mut` fn, and **inherent** `visit`/`visit_mut`. Type args are
+  paths resolvable from inside the visitor module (`super::Expr`, `crate::ast::Expr`).
+- **`#[subast(<path> [as Alias])]` + drill-in**: a type-level allowlist of a type's Ast children
+  (carried as `@subast{path as key}`); a field is *followed* iff its peeled head is a matchkey or the
+  type's own ident, else a leaf. `visit_*` is generated **only** for `visitor!(…)`-listed types; a
+  followed *unlisted* intermediate is **drilled inline** (no `visit_*`); a cycle of unlisted
+  intermediates errors, a finite dead-end is a no-op. Diagnostics: same-last-segment collision (error),
+  `unused entry` warning, "follows nothing" lint (nightly). Tests: `visitor_drill*.rs` (+ "Drill-in"
+  section below).
+- **Containers**: `Box` (deref), `Vec`/`VecDeque`/slice/array/`Punctuated` (`for …iter()/iter_mut()`),
+  `Option` (`if let Some`), dereffing through a wrapping `Box`. Nested (`Vec<Option<T>>`) rejected.
+- **Inputs**: struct visitors (`&mut`), single closures, and **tuples of closures** (2..=8) in **one**
+  pass (`Hook` + `Driver` + `Chain`).
+- **`visit_mut`**: full in-place mirror. Reduce/append by overriding the *parent*'s `visit_*_mut`
+  (it owns the `&mut Vec`/`&mut Option`) — `visitor_reduce.rs`.
+- **Inheritance `visitor!(base => New)`**: base exports a `__syan_visited` macro (visited idents +
+  param union `@bg` + ancestor chain `@an`); New extends it via supertrait at the base's own arity.
+  Wider new union and multi-level `base => mid => New` chains work — `visitor_inherit_arity.rs`,
+  `visitor_inherit_multilevel.rs`.
+- **Generics**: the trait is keyed on the **union** of visited types' params; each type uses its subset
+  (`visitor_generics.rs`). Generated helper params avoid visited types' param names
+  (`visitor_hygiene.rs`). Caveat: `.visit()` on a root that omits a union param may need a turbofish.
+- **Cross-crate**: visited types named by full path → no downstream import (`cross_crate.rs`);
+  downstream drill through upstream types via `$crate`-rooted `#[subast]` (`cross_crate_drill.rs`).
+  Cross-crate **inheritance** is keyed on the base **path** (supertrait, inherited `base::visit_*`, the
+  `pub use`'d `__syan_visited`); multi-level incl. an *upstream* intermediate works because
+  `__visitor_build` **requalifies** a `crate::`-relative ancestor against the base's host crate
+  (`base_host_crate`/`requalify_ancestor`). Tests: `cross_crate_inherit{,_multilevel,_4level,_downstream_mid}.rs`.
+  Residual hole: a `super::`/`self::`-relative ancestor from an upstream intermediate isn't requalified
+  (use `crate::`-rooted entry paths).
+- **`#[recurse(visit)]`**: a **depth-generic** visitor over a `#[recurse]` *cycle* — a `Visit<S…>` with
+  `visit_*<R>` methods, a `VisitRec<S…,V>` dispatch (root's depth chain drives, terminator is a no-op),
+  and `XxxNode` aliases. Trait-based only. Traverses `Vec`/`Option`/`Box` (incl. `Box`-around-`Option`)
+  and **tuples**; cycle types may carry lifetime/type/const params, possibly heterogeneous (extras
+  become `visit_*` method generics). Requirements: every cycle type declares the root's params, and a
+  back-edge to the root repeats them **verbatim** (a non-identity arg like `Expr<Vec<S>>` is rejected).
+  Clean `abort!`s for nested containers, a missing root param, and a non-identity root arg. Tests:
+  `visitor_recurse_cycle.rs`, `visitor_recurse_containers.rs`, `recurse_generics.rs`,
+  `recurse_audit_test.rs` + `ui/recurse_*.rs` (`limit = 0` still panics).
+- **Multiple independent cycles in one `#[recurse]` module**: cycle types are partitioned into SCCs
+  (`find_cycle_sccs`, via `safegraph` Tarjan); each cycle gets its own root/chain/`XxxTerm`/aliases/
+  visitor (`build_scc`). Several cycles → root-prefixed visitor trait names (`ExprVisit`, …); a lone
+  cycle keeps `Visit`/`VisitRec`. Fixed a latent collapse-into-one-`__Rec` miscompile.
+  `recurse_multi_cycle.rs`.
+- **Multiple self-referential roots within one cycle**: each root keeps its own depth dimension (one
+  depth param per root, depth chains unrolled mutually, per-root `XxxTerm`) — `build_multiroot_tail` /
+  `generate_multiroot_visitor`. Soundness guard: the SCC minus its roots must be acyclic
+  (`subgraph_is_cyclic`, via `safegraph` `is_cyclic_directed`) else a clear `abort!`
+  (`ui/recurse_multiroot_rootless_subcycle.rs`). Roots share params. `recurse_multiroot.rs`.
+- **`visitor!(…)` over a `#[recurse]` cycle**: `#[recurse]` emits `@recurse` metadata under each cycle
+  type's original name, and `visitor!()` consumes it to generate the depth-generic visitor keyed on its
+  own `Visit` trait (`generate_recurse_module`). One `visitor!()` can also **mix** acyclic + recurse
+  types: one `Visit` trait with fixed `visit_X(&X)` and depth-generic `visit_Y<R>(&YNode<…>)`, and the
+  boundary auto-crosses (`generate_module_mixed`). Tests: `visitor_recurse_via_visitor.rs`,
+  `visitor_recurse_mixed.rs`. See the "`#[recurse]` expansion & how `visitor!()` consumes it" section
+  for the contract and current limits.
 
 ## Known gaps / limitations
 
-- **`visitor!(…)` over a `#[recurse]` cycle** (Phase 1a, shipped): `#[recurse]` emits `@recurse`
-  metadata under each cycle type's original name (`crate::ast::Expr!` now resolves), and `visitor!()`
-  consumes it to generate a **depth-generic** visitor keyed on its own `Visit` trait — see the
-  "`#[recurse]` expansion & how `visitor!()` consumes it" design section. So `visitor!(crate::ast::Expr,
-  crate::ast::Stmt)` over a recurse cycle now works (no `#[recurse(visit)]` needed):
-  `generate_recurse_module` emits `VisitRec` + `visit_*<R…>` + node aliases + the `VisitRec` impls
-  (root node → its visit, terminator → no-op); a back-edge drives via the depth param, a cross-edge to
-  a listed type calls `this.visit_*`. Test: `visitor_recurse_via_visitor.rs`.
-  **Mixed outer+inner in one `visitor!()`** (Phase 1b, shipped): one call can list both acyclic types
-  and a recurse cycle (`visitor!(crate::Program, crate::ast::Expr, crate::ast::Stmt)`), producing ONE
-  `Visit<…>` trait with fixed `visit_program(&Program)` *and* depth-generic `visit_expr<R>(&ExprNode<…>)`
-  methods (`generate_module_mixed`). An acyclic body that follows a recurse field lowers (via the
-  existing `Lower`) to `this.visit_expr(field)`, which type-checks because the public alias
-  `Expr<…> = __ExprRec<…, default>` infers `R = default` — so **one `Visit` impl + one `.visit()` crosses
-  the boundary automatically** (no manual `rec::Visit::visit_*` hand-off as in `visitor_mixed_recurse.rs`).
-  Test: `visitor_recurse_mixed.rs`. **Current limits** (clean `abort!`s, later phases): one cycle per
-  call; no inheritance (`base => …`) over recurse; no closures (depth-generic methods can't back a
-  closure `Driver`, so a recurse-listing visitor is struct/`&mut`-visitor only) and no `visit_mut` for
-  recurse types yet; drilling an *unlisted* recurse cross-edge isn't supported (list it).
-  `#[recurse(visit)]` still works (and `#[derive(Ast)]`'s own `__XRec!` metadata is untouched).
-  **Drill-in over *acyclic* types in a `#[recurse]` module** also works (`visitor_recurse_drill.rs`).
+- **`visitor!(…)` over `#[recurse]` — remaining limits** (the capability is shipped; see "Shipped &
+  tested" + the expansion section): one cycle per call; no inheritance (`base => …`) over recurse; no
+  closures (depth-generic methods can't back a closure `Driver`, so it's struct/`&mut`-visitor only)
+  and no `visit_mut` for recurse types yet; an *unlisted* recurse cross-edge must be listed (no inline
+  drill). All are clean `abort!`s. (Drill-in over *acyclic* types in a `#[recurse]` module does work —
+  `visitor_recurse_drill.rs`.)
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.
