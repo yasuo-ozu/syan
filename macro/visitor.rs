@@ -182,16 +182,22 @@ struct RecurseMeta {
     cycle: Vec<Ident>,
 }
 
-/// Parse comma-separated paths (for `@terms`).
+/// Parse whitespace-separated paths (for `@terms`); each `Path` ends where the next segment lacks a
+/// leading `::`, so `crate::a::ATerm crate::a::BTerm` parses as two paths.
 fn parse_paths(ts: TokenStream) -> Result<Vec<Path>> {
-    Ok(Punctuated::<Path, Token![,]>::parse_terminated
-        .parse2(ts)?
-        .into_iter()
-        .collect())
+    let parser = |input: ParseStream| {
+        let mut out = Vec::new();
+        while !input.is_empty() {
+            out.push(input.parse::<Path>()?);
+        }
+        Ok(out)
+    };
+    parser.parse2(ts)
 }
 
-/// Parse a `@recurse` body: `@node {PATH} @roots {idents} @depth {idents} @terms {paths,} @cycle {idents}`.
-/// `@roots`/`@depth`/`@cycle` are space-separated idents; `@terms` is comma-separated paths.
+/// Parse a `@recurse` body: `@node {PATH} @roots {idents} @depth {idents} @terms {paths} @cycle {idents}`.
+/// `@roots`/`@depth`/`@cycle` are whitespace-separated idents; `@terms` whitespace-separated paths
+/// (all parallel to `@roots`). Matches what `#[recurse]` emits (see `macro/recurse.rs`).
 fn parse_recurse(ts: TokenStream) -> Result<RecurseMeta> {
     let parser = |input: ParseStream| {
         let (mut node, mut roots, mut depth, mut terms, mut cycle) =
@@ -228,7 +234,7 @@ fn emit_recurse(r: &RecurseMeta) -> TokenStream {
         @node { #node }
         @roots { #(#roots)* }
         @depth { #(#depth)* }
-        @terms { #(#terms),* }
+        @terms { #(#terms)* }
         @cycle { #(#cycle)* }
     }
 }
@@ -1337,6 +1343,293 @@ fn gen_side(
     }
 }
 
+/// Lower one field of a `#[recurse]` cycle type for the unified `visitor!()` path. A back-edge to a
+/// root → that root's depth param `::visit_rec`; a cross-edge to a *listed* cycle type → `v.visit_<head>`;
+/// an unlisted cycle type → aborts (inline drill of recurse types is a later phase); anything else is a
+/// leaf. Mirrors `recurse.rs`'s `recurse_dispatch_field`, keyed on `root_dp` (root ident → depth param).
+fn recurse_lower_field(
+    ty: &Type,
+    binding: &TokenStream,
+    method_set: &HashSet<String>,
+    root_dp: &HashMap<String, Ident>,
+    cycle: &HashSet<String>,
+) -> Option<TokenStream> {
+    if let Some(elems) = as_tuple(ty) {
+        let mut pats = Vec::new();
+        let mut stmts = Vec::new();
+        for (i, elem) in elems.iter().enumerate() {
+            let bi = Ident::new(&format!("__t{i}"), Span::call_site());
+            if let Some(s) = recurse_lower_field(elem, &quote!(#bi), method_set, root_dp, cycle) {
+                pats.push(quote!(#bi));
+                stmts.push(s);
+            } else {
+                pats.push(quote!(_));
+            }
+        }
+        if stmts.is_empty() {
+            return None;
+        }
+        return Some(quote!( { let ( #(#pats,)* ) = #binding; #(#stmts)* } ));
+    }
+    let p = peel(ty, &HashSet::new())?;
+    let hs = p.head_lead.to_string();
+    let dp = root_dp.get(&hs);
+    let listed = method_set.contains(&hs);
+    if dp.is_none() && !listed {
+        if cycle.contains(&hs) {
+            abort!(
+                ty,
+                "visitor!() over `#[recurse]`: cross-edge to cycle type `{}` is not listed in \
+                 visitor!(...); list it (inline drilling of unlisted recurse types is not yet supported)",
+                hs
+            );
+        }
+        return None; // leaf
+    }
+    if p.nested {
+        abort!(
+            ty,
+            "visitor!() over `#[recurse]` cannot traverse a nested container (e.g. `Vec<Option<_>>`)"
+        );
+    }
+    let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
+    let one = |acc: &TokenStream| -> TokenStream {
+        match dp {
+            Some(d) => quote!( #d::visit_rec(& #stars #acc, v); ),
+            None => {
+                let m = method_ident_m(&p.head_lead, false);
+                quote!( v.#m(& #stars #acc); )
+            }
+        }
+    };
+    Some(match p.container {
+        Container::Direct => one(binding),
+        Container::Seq => {
+            let inner = one(&quote!(__x));
+            quote!( for __x in #binding.iter() { #inner } )
+        }
+        Container::Opt => {
+            let cont_stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
+            let inner = one(&quote!(__x));
+            quote!( if let ::core::option::Option::Some(__x) = & #cont_stars #binding { #inner } )
+        }
+    })
+}
+
+/// `(pattern, statements)` for a recurse cycle type's fields.
+fn recurse_lower_fields(
+    fields: &Fields,
+    method_set: &HashSet<String>,
+    root_dp: &HashMap<String, Ident>,
+    cycle: &HashSet<String>,
+) -> (TokenStream, TokenStream) {
+    match fields {
+        Fields::Named(named) => {
+            let mut binds = Vec::new();
+            let mut stmts = Vec::new();
+            for f in &named.named {
+                let name = f.ident.clone().unwrap();
+                if let Some(s) = recurse_lower_field(&f.ty, &quote!(#name), method_set, root_dp, cycle)
+                {
+                    binds.push(quote!(#name));
+                    stmts.push(s);
+                }
+            }
+            (quote!( { #(#binds,)* .. } ), quote!( #(#stmts)* ))
+        }
+        Fields::Unnamed(unnamed) => {
+            let mut pats = Vec::new();
+            let mut stmts = Vec::new();
+            for (i, f) in unnamed.unnamed.iter().enumerate() {
+                let b = Ident::new(&format!("__f{i}"), Span::call_site());
+                if let Some(s) = recurse_lower_field(&f.ty, &quote!(#b), method_set, root_dp, cycle) {
+                    pats.push(quote!(#b));
+                    stmts.push(s);
+                } else {
+                    pats.push(quote!(_));
+                }
+            }
+            (quote!( ( #(#pats),* ) ), quote!( #(#stmts)* ))
+        }
+        Fields::Unit => (quote!(), quote!()),
+    }
+}
+
+/// Body of a recurse cycle type's `visit_*` drive fn: destructure `i` (a `&__XRec<…>`, matched via the
+/// `node` path) and dispatch followed fields.
+fn recurse_lower_body(
+    def: &Item,
+    node: &Path,
+    method_set: &HashSet<String>,
+    root_dp: &HashMap<String, Ident>,
+    cycle: &HashSet<String>,
+) -> TokenStream {
+    match def {
+        Item::Enum(e) => {
+            let arms = e.variants.iter().map(|v| {
+                let (pat, stmts) = recurse_lower_fields(&v.fields, method_set, root_dp, cycle);
+                let vid = &v.ident;
+                quote!( #node::#vid #pat => { #stmts } )
+            });
+            quote!( match i { #(#arms)* } )
+        }
+        Item::Struct(s) => {
+            let (pat, stmts) = recurse_lower_fields(&s.fields, method_set, root_dp, cycle);
+            match &s.fields {
+                Fields::Unit => quote!(),
+                _ => quote!( let #node #pat = i; #stmts ),
+            }
+        }
+        _ => quote!(),
+    }
+}
+
+/// Phase 1a: a `visitor!()` whose targets are ALL `#[recurse]` cycle types of a single cycle. Emits a
+/// depth-generic visitor keyed on THIS module's `Visit` trait (so it unifies with `visitor!()`): a
+/// `VisitRec<…, V>` dispatch trait, a `Visit<…>` trait with `visit_*<R…>` methods, free `visit_*` fns,
+/// `XNode` aliases, and `VisitRec` impls for each root's node (→ its `visit_*`) and each terminator
+/// (no-op). No closures/`visit_mut`/inherent `.visit()` yet (the recurse methods are depth-generic, so
+/// a closure `Driver` can't implement them). The user implements `Visit` and calls `Visit::visit_x`.
+fn generate_recurse_module(targets: &[&DoneType], method_set: &HashSet<String>) -> TokenStream {
+    let metas: Vec<&RecurseMeta> = targets.iter().map(|d| d.recurse.as_ref().unwrap()).collect();
+    let cycle_set: HashSet<String> = metas[0].cycle.iter().map(|i| i.to_string()).collect();
+    for m in &metas {
+        let cs: HashSet<String> = m.cycle.iter().map(|i| i.to_string()).collect();
+        if cs != cycle_set {
+            abort!(
+                Span::call_site(),
+                "visitor!() over `#[recurse]` currently supports a single cycle per visitor!() call"
+            );
+        }
+    }
+    let roots = &metas[0].roots;
+    let terms = &metas[0].terms;
+    let dps: Vec<Ident> = (0..roots.len())
+        .map(|i| Ident::new(&format!("__R{i}"), Span::call_site()))
+        .collect();
+    let root_dp: HashMap<String, Ident> = roots
+        .iter()
+        .map(|r| r.to_string())
+        .zip(dps.iter().cloned())
+        .collect();
+
+    // Union of the targets' generic params (Phase 1a assumes they coincide; first declaration wins).
+    let mut seen = HashSet::new();
+    let mut g_params: Vec<GenericParam> = Vec::new();
+    for d in targets {
+        for p in gparams(item_generics(&d.def).unwrap()) {
+            if seen.insert(param_name(&p)) {
+                g_params.push(p);
+            }
+        }
+    }
+    let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
+    let g_use_angle: TokenStream = if g_args.is_empty() {
+        quote!()
+    } else {
+        quote!( < #(#g_args),* > )
+    };
+
+    struct CycInfo {
+        vm: Ident,
+        node: Path,
+        own_args: Vec<TokenStream>,
+        body: TokenStream,
+        is_root: bool,
+    }
+    let infos: Vec<CycInfo> = targets
+        .iter()
+        .map(|d| {
+            let id = item_ident(&d.def).unwrap();
+            let r = d.recurse.as_ref().unwrap();
+            CycInfo {
+                vm: method_ident_m(id, false),
+                node: r.node.clone(),
+                own_args: gargs(item_generics(&d.def).unwrap()),
+                body: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set),
+                is_root: roots.iter().any(|rr| rr == id),
+            }
+        })
+        .collect();
+
+    let node_aliases: Vec<TokenStream> = targets
+        .iter()
+        .map(|d| {
+            let id = item_ident(&d.def).unwrap();
+            let node = &d.recurse.as_ref().unwrap().node;
+            let alias = Ident::new(&format!("{id}Node"), Span::call_site());
+            quote!( #[doc = "Depth-generic node type for the visitor."] pub use #node as #alias; )
+        })
+        .collect();
+
+    let root_impls: Vec<TokenStream> = infos
+        .iter()
+        .filter(|c| c.is_root)
+        .map(|c| {
+            let (node, own, vm) = (&c.node, &c.own_args, &c.vm);
+            quote! {
+                impl< #(#g_params,)* #(for d in &dps) { #d: VisitRec< #(#g_args,)* __V >, } __V: Visit #g_use_angle >
+                    VisitRec< #(#g_args,)* __V > for #node < #(#own,)* #(#dps),* >
+                {
+                    fn visit_rec(&self, v: &mut __V) {
+                        <__V as Visit #g_use_angle>::#vm(v, self);
+                    }
+                }
+            }
+        })
+        .collect();
+    let term_impls: Vec<TokenStream> = terms
+        .iter()
+        .map(|t| {
+            quote! {
+                impl< #(#g_params,)* __V: Visit #g_use_angle > VisitRec< #(#g_args,)* __V >
+                    for #t #g_use_angle
+                {
+                    fn visit_rec(&self, _v: &mut __V) {}
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        /// Dispatch trait turning the cycle's depth recursion into trait calls (implemented by each
+        /// root's depth chain and by each terminator).
+        pub trait VisitRec< #(#g_params,)* __V > {
+            fn visit_rec(&self, v: &mut __V);
+        }
+
+        /// Depth-generic visitor over the `#[recurse]` cycle. Implement the `visit_*` methods (each
+        /// generic over the remaining depth `__R…`); call the free `visit_*` to descend.
+        pub trait Visit< #(#g_params),* > {
+            #(for c in &infos) {
+                fn #{&c.vm}< #(for d in &dps) { #d: VisitRec< #(#g_args,)* Self >, } >(
+                    &mut self,
+                    i: & #{&c.node} < #(for a in &c.own_args) { #a, } #(#dps),* >,
+                ) where Self: ::core::marker::Sized {
+                    #{&c.vm}(self, i)
+                }
+            }
+        }
+
+        #(for c in &infos) {
+            pub fn #{&c.vm}<
+                #(#g_params,)*
+                __V: Visit< #(#g_args),* >,
+                #(for d in &dps) { #d: VisitRec< #(#g_args,)* __V >, }
+            >(
+                v: &mut __V,
+                i: & #{&c.node} < #(for a in &c.own_args) { #a, } #(#dps),* >,
+            ) {
+                #{&c.body}
+            }
+        }
+
+        #(#node_aliases)*
+        #(#root_impls)*
+        #(#term_impls)*
+    }
+}
+
 fn generate_module(st: &BuildInput) -> TokenStream {
     // Every generated name (`visit_*`, `*Hook`, inherent methods) derives from a visited type's
     // last-segment ident, so two visited types sharing a last segment would collide. Catch it here
@@ -1386,6 +1679,28 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .collect();
     if targets.is_empty() {
         abort!(Span::call_site(), "no AST definitions resolved for the visitor");
+    }
+
+    // `#[recurse]` cycle types carry `@recurse`; they need a depth-generic visitor (Phase 1a). For
+    // now a single visitor!() is either all-recurse (one cycle) or all-acyclic; mixing is a later
+    // phase. An all-recurse visitor goes through `generate_recurse_module`; the acyclic path below is
+    // unchanged.
+    let recurse_targets = targets.iter().filter(|d| d.recurse.is_some()).count();
+    if recurse_targets > 0 {
+        if recurse_targets != targets.len() {
+            abort!(
+                Span::call_site(),
+                "visitor!() currently cannot mix `#[recurse]` cycle types and acyclic types in one \
+                 call; use separate visitor!() calls (unified outer+inner is a later phase)"
+            );
+        }
+        if st.base.is_some() {
+            abort!(
+                Span::call_site(),
+                "visitor!(base => …) inheritance over `#[recurse]` cycle types is not yet supported"
+            );
+        }
+        return generate_recurse_module(&targets, &method_set);
     }
 
     // The visitor trait is parameterized by the *union* of every visited type's generic params
@@ -1573,3 +1888,4 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         #mutable
     }
 }
+
