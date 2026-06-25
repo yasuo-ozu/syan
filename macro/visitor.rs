@@ -1129,6 +1129,23 @@ fn item_where_preds(item: &Item) -> Vec<WherePredicate> {
         .unwrap_or_default()
 }
 
+/// The bare generic-param ident a `where`-predicate bounds (`S` in `S: Bound`), or `None` for a
+/// predicate whose bounded type isn't a single bare param (`Vec<S>: Clone`, lifetime bounds, …).
+fn where_pred_param(p: &WherePredicate) -> Option<&Ident> {
+    if let WherePredicate::Type(pt) = p {
+        if let Type::Path(tp) = &pt.bounded_ty {
+            let seg = tp.path.segments.first()?;
+            if tp.qself.is_none()
+                && tp.path.segments.len() == 1
+                && matches!(seg.arguments, PathArguments::None)
+            {
+                return Some(&seg.ident);
+            }
+        }
+    }
+    None
+}
+
 /// Render `where p0, p1, …` (or nothing when empty) for the given predicates.
 fn where_clause(preds: &[WherePredicate]) -> TokenStream {
     if preds.is_empty() {
@@ -2062,6 +2079,37 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .flat_map(|vt| vt.own_where.iter().cloned())
         .filter(|p| seen_pred.insert(quote!(#p).to_string()))
         .collect();
+
+    // A `where`-BOUNDED generic param must be declared by EVERY visited type. The visitor trait is
+    // keyed on the param union, and `union_where` is applied to items quantified over that union (the
+    // inherent `.visit()`, `IntoVisitor`, the `&mut V` blanket, …). A visited type lacking a bounded
+    // param `P` would then be quantified over `P` carrying an undischargeable `P: Bound`, producing an
+    // opaque E0277/E0283 cascade at the `visitor!()` site. Reject cleanly. (An *unbounded* unshared
+    // param is fine — `visitor_generics.rs` exercises that; only a bounded one breaks.)
+    for pred in &union_where {
+        let Some(p) = where_pred_param(pred) else { continue };
+        let pname = p.to_string();
+        if !g_params.iter().any(|gp| param_name(gp) == pname) {
+            continue; // not a union param (e.g. a bound on a concrete type) — irrelevant
+        }
+        if let Some(vt) =
+            vtypes.iter().find(|vt| !vt.own_params.iter().any(|op| param_name(op) == pname))
+        {
+            abort!(
+                Span::call_site(),
+                "visitor!(...): visited type `{}` does not declare the `where`-bounded generic param \
+                 `{}` (bound `{}`). The visitor trait is keyed on the param union and applies the \
+                 bound to items quantified over it, so `{}` would carry an undischargeable bound. \
+                 Give every visited type the param `{}`, or visit `{}` from a separate `visitor!()`.",
+                vt.ident,
+                pname,
+                quote!(#pred),
+                vt.ident,
+                pname,
+                vt.ident
+            );
+        }
+    }
 
     let shared = gen_side(
         false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
