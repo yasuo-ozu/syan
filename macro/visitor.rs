@@ -349,6 +349,40 @@ fn emit_ancestors(anc: &[AncIn]) -> TokenStream {
     quote!( #(#blocks)* )
 }
 
+/// The `__syan_visited` export — a `#[macro_export]` muncher that, when a downstream `visitor!(self =>
+/// New)` invokes it, appends this visitor's visited+inherited idents (`@inh`), param union (`@bg`),
+/// ancestor chain (`@an`), and — for a recurse visitor — the `@recbase {}` marker (telling the consumer
+/// the base is recurse, so it must go struct-only). Shared by the acyclic (`generate_module`) and
+/// recurse (`generate_module_mixed`) paths.
+fn emit_visited_macro(
+    st: &BuildInput,
+    g_params: &[GenericParam],
+    anc_export: TokenStream,
+    recbase: bool,
+) -> TokenStream {
+    let all_visible: Vec<Ident> = st
+        .visited
+        .iter()
+        .map(|p| last_ident(p).clone())
+        .chain(st.inherited.iter().cloned())
+        .collect();
+    let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
+    quote! {
+        #[macro_export]
+        #[doc(hidden)]
+        macro_rules! #vmacro {
+            (@visited $cb:path { $($pre:tt)* }) => {
+                $cb ! {
+                    $($pre)* @inh { #(#all_visible)* } @bg { #(#g_params),* } @an { #anc_export }
+                    #(if recbase) { @recbase {} }
+                }
+            };
+        }
+        #[doc(hidden)]
+        pub use #vmacro as __syan_visited;
+    }
+}
+
 /// The host crate of a direct-base path: `Some(ident)` when it is rooted at an *external* crate
 /// (e.g. `syan_rust::inherit::mid`), `None` for same-crate roots (`crate`/`super`/`self`) or a
 /// leading-`::` absolute path. Used to requalify a transitive ancestor that an *upstream*
@@ -1762,30 +1796,13 @@ fn generate_module_mixed(
     // Export `__syan_visited` so this recurse visitor can serve as a base for `visitor!(self => New)`.
     // The `@recbase {}` marker tells the consumer the base is a recurse visitor (depth-generic methods
     // ⇒ struct-only inheritance). `@an {}` is empty: a recurse base does not itself inherit (yet).
-    let all_visible: Vec<Ident> = st
-        .visited
-        .iter()
-        .map(|p| last_ident(p).clone())
-        .chain(st.inherited.iter().cloned())
-        .collect();
-    let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
+    let visited_macro = emit_visited_macro(st, &g_params, quote!(), true);
 
     quote! {
         #(#node_aliases)*
         #shared
         #mutable
-
-        #[macro_export]
-        #[doc(hidden)]
-        macro_rules! #vmacro {
-            (@visited $cb:path { $($pre:tt)* }) => {
-                $cb ! {
-                    $($pre)* @inh { #(#all_visible)* } @bg { #(#g_params),* } @an {} @recbase {}
-                }
-            };
-        }
-        #[doc(hidden)]
-        pub use #vmacro as __syan_visited;
+        #visited_macro
     }
 }
 
@@ -2007,28 +2024,12 @@ fn generate_module(st: &BuildInput) -> TokenStream {
 
     // Every visitor module exports its full visited-type set (idents), its generic-param union
     // (`@bg`), and its full ancestor chain (`@an`) so another visitor can inherit it (transitively).
-    let all_visible: Vec<Ident> = st
-        .visited
-        .iter()
-        .map(|p| last_ident(p).clone())
-        .chain(st.inherited.iter().cloned())
-        .collect();
     let anc_export = emit_ancestors(&chain);
-    let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
+    let visited_macro = emit_visited_macro(st, &g_params, anc_export, false);
 
     // Items are emitted directly into the enclosing module (where `visitor!(...)` was invoked).
     quote! {
-        #[macro_export]
-        #[doc(hidden)]
-        macro_rules! #vmacro {
-            (@visited $cb:path { $($pre:tt)* }) => {
-                $cb ! {
-                    $($pre)* @inh { #(#all_visible)* } @bg { #(#g_params),* } @an { #anc_export }
-                }
-            };
-        }
-        #[doc(hidden)]
-        pub use #vmacro as __syan_visited;
+        #visited_macro
 
         // Bring every ancestor's traits in scope so the generated `Driver` impls / method calls
         // resolve (transitive supertraits included).
