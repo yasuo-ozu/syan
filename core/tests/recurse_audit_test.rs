@@ -17,9 +17,8 @@ fn recurse_audit_compile_fail() {
     //    (Left as a panic on purpose; the smallest sound limit is 1.)
     t.compile_fail("tests/ui/recurse_limit_zero.rs");
 
-    // 2. A nested container (`Vec<Option<Expr>>`) in a `#[recurse]` cycle cannot be traversed by a
-    //    `visitor!()` over it — rejected with a clear message (the shared body-lowering guard).
-    t.compile_fail("tests/ui/recurse_visit_nested_container.rs");
+    // (2. nested containers in a `#[recurse]` cycle are now traversed — see
+    //  `visitor_nested_containers.rs`.)
 
     // 4. A cycle type may carry *extra* generic params, but must declare all of the ROOT's params
     //    (so the depth default is spellable). One that's missing a root param is rejected, naming it.

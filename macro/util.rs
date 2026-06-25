@@ -149,33 +149,35 @@ pub(crate) fn item_generics(item: &Item) -> Option<&Generics> {
     }
 }
 
-/// How a field type wraps its (visitable) head: a single value, a sequence (`Vec`/`VecDeque`/slice/
-/// array/`Punctuated`), or an `Option`. `Box` is transparent (tracked as box-depth).
+/// A container layer wrapping the head: a sequence (`Vec`/`VecDeque`/slice/array/`Punctuated`) or an
+/// `Option`. `Box` is transparent (tracked as box-depth).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Container {
-    Direct,
     Seq,
     Opt,
 }
 
+/// One container layer + the `Box` layers wrapping THIS container (the `Opt` `if let` derefs through
+/// them; a `Seq`'s `.iter()`/`.iter_mut()` auto-derefs, so it ignores them).
+#[derive(Clone, Copy)]
+pub(crate) struct ContLayer {
+    pub kind: Container,
+    pub boxes: usize,
+}
+
 /// The result of peeling a field type to its visitable head.
 pub(crate) struct Peeled {
-    pub container: Container,
+    /// Container layers wrapping the head, OUTER→INNER. Empty ⇒ a direct (single-value) head; a chain
+    /// of length > 1 is a nested container (`Vec<Option<T>>` ⇒ `[Seq, Opt]`).
+    pub conts: Vec<ContLayer>,
     pub head: Ident,
     /// The FIRST path segment ident of the innermost peeled path (for a single-segment path
     /// `head_lead == head`). A same-module cycle reference is always a bare single-segment ident, so
     /// a caller deciding cycle membership (e.g. `recurse`) keys on this to reject a foreign
     /// multi-segment path whose last segment merely happens to equal a cycle type name.
     pub head_lead: Ident,
-    /// `Box` layers between the container (or the top, for `Direct`) and the head; a drill derefs
-    /// through these (`&**…`) to reach a `&head` scrutinee.
+    /// `Box` layers directly around the head; a dispatch derefs through these (`&**…`) to reach `&head`.
     pub head_box: usize,
-    /// `Box` layers around the container itself; the `Opt` `if let` must deref through these (the
-    /// `Seq` `.iter()`/`.iter_mut()` already auto-derefs them).
-    pub cont_box: usize,
-    /// A second container layer was found nested inside the first (e.g. `Vec<Option<T>>`); such a
-    /// field is unsupported and the caller turns this into a clear error.
-    pub nested: bool,
     /// The head sits behind a shared reference (`&T`, `&[T]`, …) — peeled transparently. Such a field
     /// can be visited on the shared side but NOT on the `&mut` side (no `&mut head` through a `&`), so
     /// the mut side treats it as a leaf. (A `&mut T` field is owned-enough to mutate, so it is *not*
@@ -183,35 +185,20 @@ pub(crate) struct Peeled {
     pub shared_ref: bool,
 }
 
-/// Wrap a peeled element in an outer container, flagging nesting if the element already had one.
-fn container_of(c: Container, inner: Peeled) -> Peeled {
-    Peeled {
-        container: c,
-        head: inner.head,
-        head_lead: inner.head_lead,
-        head_box: inner.head_box,
-        cont_box: 0,
-        nested: inner.nested || inner.container != Container::Direct,
-        shared_ref: inner.shared_ref,
-    }
+/// Wrap a peeled head in an outer container layer (prepended — `conts` is outer→inner).
+fn container_of(c: Container, mut inner: Peeled) -> Peeled {
+    inner.conts.insert(0, ContLayer { kind: c, boxes: 0 });
+    inner
 }
 
 fn direct(head: Ident, head_lead: Ident) -> Peeled {
-    Peeled {
-        container: Container::Direct,
-        head,
-        head_lead,
-        head_box: 0,
-        cont_box: 0,
-        nested: false,
-        shared_ref: false,
-    }
+    Peeled { conts: Vec::new(), head, head_lead, head_box: 0, shared_ref: false }
 }
 
-/// Peel a field type to its visitable head. A path head listed in `user_types` (e.g. a type's
-/// `#[subast]` matchkeys plus its own ident) is always a `Direct` head, so a user AST type named
-/// like a container keyword (`Option`, `Vec`, …) wins over the built-in container handling. `None`
-/// for a non-path leaf. The caller decides whether `head` is actually followed.
+/// Peel a field type to its visitable head + its container chain. A path head listed in `user_types`
+/// (e.g. a type's `#[subast]` matchkeys plus its own ident) is always a direct head, so a user AST
+/// type named like a container keyword (`Option`, `Vec`, …) wins over the built-in container handling.
+/// `None` for a non-path leaf. The caller decides whether `head` is actually followed.
 pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
     match ty {
         // A shared `&` makes the head unmutable-through; flag it (the mut side will treat it as a
@@ -234,19 +221,14 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
             }
             match name.as_str() {
                 "Box" => {
-                    let inner = peel(first_ty_arg(seg)?, user_types)?;
-                    Some(match inner.container {
-                        // Box directly around the head: deepen so a drill derefs through it.
-                        Container::Direct => Peeled {
-                            head_box: inner.head_box + 1,
-                            ..inner
-                        },
-                        // Box around a container: the Opt `if let` derefs through it (Seq auto-derefs).
-                        _ => Peeled {
-                            cont_box: inner.cont_box + 1,
-                            ..inner
-                        },
-                    })
+                    let mut inner = peel(first_ty_arg(seg)?, user_types)?;
+                    match inner.conts.first_mut() {
+                        // Box around the outermost container: that layer derefs through it.
+                        Some(layer) => layer.boxes += 1,
+                        // Box directly around the head.
+                        None => inner.head_box += 1,
+                    }
+                    Some(inner)
                 }
                 "Vec" | "VecDeque" | "Punctuated" => {
                     Some(container_of(Container::Seq, peel(first_ty_arg(seg)?, user_types)?))
@@ -257,6 +239,50 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
         }
         _ => None,
     }
+}
+
+/// The accessor for the head after peeling all `conts`: the field `binding` itself for a direct head,
+/// else the innermost loop / `if let` var that `fold_containers` introduces.
+pub(crate) fn innermost_acc(conts: &[ContLayer], binding: &TokenStream) -> TokenStream {
+    if conts.is_empty() {
+        binding.clone()
+    } else {
+        let e = Ident::new(&format!("__nc{}", conts.len()), Span::call_site());
+        quote!(#e)
+    }
+}
+
+/// Wrap an already-lowered `body` (which dispatches at `innermost_acc(conts, binding)`) in the
+/// container layers `conts` (outer→inner): `Seq` ⇒ a `for` over `.iter()`/`.iter_mut()`, `Opt` ⇒ an
+/// `if let Some(..)` (dereffing the layer's `Box`es). Layer `i` (outer→inner) binds `__nc{i+1}`,
+/// iterating `__nc{i}` (or `binding` at `i == 0`) — so nested containers nest the loops/ifs.
+pub(crate) fn fold_containers(
+    conts: &[ContLayer],
+    binding: &TokenStream,
+    mut body: TokenStream,
+    mutable: bool,
+) -> TokenStream {
+    for (i, layer) in conts.iter().enumerate().rev() {
+        let bind = if i == 0 {
+            binding.clone()
+        } else {
+            let e = Ident::new(&format!("__nc{i}"), Span::call_site());
+            quote!(#e)
+        };
+        let elem = Ident::new(&format!("__nc{}", i + 1), Span::call_site());
+        body = match layer.kind {
+            Container::Seq => {
+                let iter = if mutable { quote!(iter_mut) } else { quote!(iter) };
+                quote!( for #elem in #bind.#iter() { #body } )
+            }
+            Container::Opt => {
+                let amp = if mutable { quote!(&mut) } else { quote!(&) };
+                let stars: TokenStream = (0..=layer.boxes).map(|_| quote!(*)).collect();
+                quote!( if let ::core::option::Option::Some(#elem) = #amp #stars #bind { #body } )
+            }
+        };
+    }
+    body
 }
 
 /// `"_mut"` for the mutable visitor side, `""` for the shared side — the `visit_*` / `visit_*_mut`
@@ -335,13 +361,6 @@ pub(crate) fn recurse_lower_field(
     if dp.is_none() && !listed && !ctx.cycle.contains(&hs) {
         return None; // leaf (not a followed cycle type)
     }
-    if p.nested {
-        abort!(
-            ty,
-            "`#[recurse]` visitor cannot traverse a nested container (e.g. `Vec<Option<_>>`); wrap the \
-             inner part in its own `#[derive(Ast)]` type"
-        );
-    }
     let stars: TokenStream = (0..=p.head_box).map(|_| quote!(*)).collect();
     let amp = if ctx.mutable { quote!(&mut) } else { quote!(&) };
     let visit_rec_fn = if ctx.mutable {
@@ -382,19 +401,9 @@ pub(crate) fn recurse_lower_field(
             body
         }
     };
-    Some(match p.container {
-        Container::Direct => one(binding, stack),
-        Container::Seq => {
-            let iter = if ctx.mutable { quote!(iter_mut) } else { quote!(iter) };
-            let inner = one(&quote!(__x), stack);
-            quote!( for __x in #binding.#iter() { #inner } )
-        }
-        Container::Opt => {
-            let cont_stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
-            let inner = one(&quote!(__x), stack);
-            quote!( if let ::core::option::Option::Some(__x) = #amp #cont_stars #binding { #inner } )
-        }
-    })
+    let acc = innermost_acc(&p.conts, binding);
+    let body = one(&acc, stack);
+    Some(fold_containers(&p.conts, binding, body, ctx.mutable))
 }
 
 /// `(pattern, statements)` for a recurse cycle type's fields.

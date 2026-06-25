@@ -1,6 +1,7 @@
 use crate::util::{
-    angle, as_tuple, gargs, gparams, item_generics, item_ident, method_ident_m, mt, param_name,
-    param_tokens, param_use, peel, recurse_lower_body, to_snake, Container, RecLower,
+    angle, as_tuple, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
+    method_ident_m, mt, param_name, param_tokens, param_use, peel, recurse_lower_body, to_snake,
+    RecLower,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -821,10 +822,6 @@ struct Lower<'a> {
 }
 
 impl<'a> Lower<'a> {
-    fn iter_fn(&self) -> Ident {
-        Ident::new(if self.mutable { "iter_mut" } else { "iter" }, Span::call_site())
-    }
-
     fn amp(&self) -> TokenStream {
         if self.mutable {
             quote!(&mut)
@@ -1018,14 +1015,6 @@ impl<'a> Lower<'a> {
 
         let user_types = self_and_subast_keys(self_ident, subast);
         let p = peel(ty, &user_types)?;
-        if p.nested {
-            abort!(
-                Span::call_site(),
-                "field type `{}` uses nested containers (e.g. `Vec<Option<_>>`), which the visitor \
-                 does not support; flatten it or wrap the inner part in its own `#[derive(Ast)]` type",
-                quote!(#ty)
-            );
-        }
         // A field behind a shared reference (`&T`/`&[T]`) is visitable on the shared side but a leaf
         // for `visit_mut` — there is no `&mut head` reachable through a `&`.
         if self.mutable && p.shared_ref {
@@ -1041,32 +1030,12 @@ impl<'a> Lower<'a> {
         } else {
             return None; // leaf
         };
-        match p.container {
-            Container::Direct => {
-                let s = self.visit_value(binding, &head, &drill_path, p.head_box, depth, stack);
-                (!s.is_empty()).then_some(s)
-            }
-            Container::Seq => {
-                let elem = Ident::new(&format!("__e{depth}_{idx}"), Span::call_site());
-                let inner =
-                    self.visit_value(&quote!(#elem), &head, &drill_path, p.head_box, depth, stack);
-                (!inner.is_empty()).then(|| {
-                    let iter = self.iter_fn();
-                    quote!( for #elem in #binding.#iter() { #inner } )
-                })
-            }
-            Container::Opt => {
-                let elem = Ident::new(&format!("__e{depth}_{idx}"), Span::call_site());
-                let inner =
-                    self.visit_value(&quote!(#elem), &head, &drill_path, p.head_box, depth, stack);
-                (!inner.is_empty()).then(|| {
-                    // Deref through any `Box` around the Option, then match-ergonomics binds `&elem`.
-                    let amp = self.amp();
-                    let stars: TokenStream = (0..=p.cont_box).map(|_| quote!(*)).collect();
-                    quote!( if let Some(#elem) = #amp #stars #binding { #inner } )
-                })
-            }
-        }
+        // Dispatch at the innermost (container-peeled) accessor, then wrap the container chain
+        // (handles nested containers like `Vec<Option<T>>`). An empty body (head drills to nothing)
+        // ⇒ the whole field is a leaf.
+        let acc = innermost_acc(&p.conts, binding);
+        let body = self.visit_value(&acc, &head, &drill_path, p.head_box, depth, stack);
+        (!body.is_empty()).then(|| fold_containers(&p.conts, binding, body, self.mutable))
     }
 }
 

@@ -25,7 +25,8 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `unused entry` warning, "follows nothing" lint (nightly). Tests: `visitor_drill*.rs` (+ "Drill-in"
   section below).
 - **Containers**: `Box` (deref), `Vec`/`VecDeque`/slice/array/`Punctuated` (`for …iter()/iter_mut()`),
-  `Option` (`if let Some`), dereffing through a wrapping `Box`. Nested (`Vec<Option<T>>`) rejected.
+  `Option` (`if let Some`), dereffing through a wrapping `Box`. **Nested** (`Vec<Option<T>>`,
+  `Option<Vec<T>>`, …) traversed via a peeled container chain (`visitor_nested_containers.rs`).
 - **Inputs**: struct visitors (`&mut`), single closures, and **tuples of closures** (2..=8) in **one**
   pass (`Hook` + `Driver` + `Chain`).
 - **`visit_mut`**: full in-place mirror. Reduce/append by overriding the *parent*'s `visit_*_mut`
@@ -78,7 +79,7 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `&mut`** sides. Works **cross-crate** — a downstream
   `visitor!(upstream::Expr, …)` resolves the `$crate`-rooted `@node`/`@terms` to the defining crate;
   inherent `.visit()` is skipped for a *foreign* target (E0116 — use the `Visit::visit_*` trait
-  method), via `path_is_crate_local`. Nested containers (`Vec<Option<T>>`) get a clean `abort!`. Tests:
+  method), via `path_is_crate_local`. Nested containers (`Vec<Option<T>>`) are traversed. Tests:
   `visitor_recurse_via_visitor.rs` (incl. `visit_mut`), `visitor_recurse_heterogeneous.rs`,
   `visitor_recurse_mixed.rs`, `visitor_recurse_containers.rs`, `visitor_recurse_cycle.rs`,
   `recurse_generics.rs`, `visitor_recurse_multiroot_via_visitor.rs`,
@@ -97,9 +98,7 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   rootless-sub-cycle guard already rejects it).
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
-  coexistence would need full-path-disambiguated names.
-- **Nested containers** (`Vec<Option<T>>`) are unsupported on the `visitor!()` path (acyclic and over
-  a `#[recurse]` cycle alike — clear build error); wrap the inner part in its own `#[derive(Ast)]` type.
+  coexistence would need full-path-disambiguated names (the alias is one keyword — won't fix).
 
 ## Fix plan — `visitor!()`-over-`#[recurse]` remaining limits
 
@@ -129,10 +128,11 @@ implicit), else a leaf; the entry also gives the `$crate`-rooted path to that ch
 **`visitor!(T, …)`** is the *method-list*: a followed head that is listed lowers to
 `this.visit_<head>(field)`; a followed-but-*unlisted* head is **drilled inline** (recurse into its
 `#[subast]` fields, no `visit_*` emitted for it); a cycle of unlisted intermediates errors ("list
-one"). Containers (`Box`/`Vec`/`VecDeque`/`Option`/slice/array/`Punctuated`) are traversed; nested ones
-(`Vec<Option<_>>`) are rejected. Membership + method-name building live in `__visitor_build` (proc-
-macro), since `macro_rules!` can't compare or snake-case idents — the metadata ping-pong only supplies
-each type's structure. Code: `macro/ast.rs` + `macro/visitor.rs` (`Lower`); tests:
+one"). Containers (`Box`/`Vec`/`VecDeque`/`Option`/slice/array/`Punctuated`), incl. **nested** ones
+(`Vec<Option<_>>`), are traversed via a peeled container chain. Membership + method-name building live
+in `__visitor_build` (the proc-macro), since `macro_rules!` can't compare or snake-case idents — the
+metadata ping-pong only supplies each type's structure. Code: `macro/ast.rs` + `macro/visitor.rs`
+(`Lower`); tests:
 `core/tests/visitor_drill*.rs`, `visitor_diagnostics.rs`.
 
 ---
