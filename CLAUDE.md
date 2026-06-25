@@ -327,8 +327,8 @@ half makes it resolve same-crate and downstream. No module-prefix inference, no 
 missing/typo'd entry is a *silently ignored* field (the directive's accepted failure mode), caught
 only by the `unused entry` warning / "follows nothing" lint, not a mis-resolved path. Residual hole:
 naming a sub-AST *type* when the `visitor!(...)` *entry* path is itself a non-canonical re-export —
-closed by requiring canonical (`crate::`/`super::`-rooted) entry paths in `visitor!(...)` (which also
-lets the `Leaker` be dropped, per the standing TODO).
+closed by requiring canonical (`crate::`/`super::`-rooted) entry paths in `visitor!(...)`. (The
+`Leaker` marker has since been dropped: `Repeater` is implemented on the AST type itself.)
 
 ## Tests (`core/tests`)
 
@@ -352,12 +352,12 @@ lets the `Leaker` be dropped, per the standing TODO).
 
 ---
 
-# `#[recurse]` expansion & how `visitor!()` consumes it (design)
+# `#[recurse]` expansion & how `visitor!()` consumes it
 
-> Reference for splitting `#[recurse]` (type transformer + metadata) from `visitor!()` (the one
-> visitor generator). It explains what `#[recurse]` expands to and how a *unified* `visitor!()` builds
-> a depth-generic visitor over that output, so one `visitor!(…)` can span both **outer** (acyclic)
-> and **inner** (recurse-cycle) types in a single `Visit` trait.
+> How `#[recurse]` (type transformer + metadata) and `visitor!()` (the one visitor generator) split:
+> what `#[recurse]` expands to, and how a *unified* `visitor!()` builds a depth-generic visitor over
+> that output, so one `visitor!(…)` can span both **outer** (acyclic) and **inner** (recurse-cycle)
+> types in a single `Visit` trait. (Shipped — see the `visitor!()`-over-`#[recurse]` bullet above.)
 
 ## What `#[recurse]` expands to
 
@@ -482,30 +482,3 @@ metadata macro that answers the visitor's fetch `X! { @ast $cb { $pre } }` by ap
 An acyclic type emits **no** `@recurse` section (normal `#[derive(Ast)]` metadata). `visitor!()`'s
 `build` branches on `@recurse`: a recurse type gets the depth-generic `visit_*<R…>` + the shared
 `VisitRec` trait/impls above; an acyclic type is handled as today.
-
-# TODOs
-
-- [x] ~~Implement `Repeater` directly on the macro target (drop the leaker struct).~~ Done.
-- [x] ~~Inheritance: communicate the base's generic-param union (`@bg`) so `base => New` emits the
-      base supertrait with the base's arity (fixed the opaque `E0107`).~~ Done (`visitor_inherit_arity.rs`).
-- [x] ~~Hygiene: generated helper params (`__V`/`__T`/…) no longer collide with a visited type's
-      params (fresh-name + `mixed_site`).~~ Done (`visitor_hygiene.rs`).
-- [x] ~~`$crate`-root `crate::` `#[subast]` paths so a downstream crate can drill through an upstream
-      crate's types.~~ Done (`rust/tests/cross_crate_drill.rs`).
-- [x] ~~Multi-level inheritance `base => mid => New` (transitive supertrait obligations via `@an`).~~
-      Done (`visitor_inherit_multilevel.rs`).
-- [x] ~~"Follows nothing" lint.~~ Done — a heuristic warning (nightly-visible) when a type with no
-      `#[subast]` has an AST-looking field; `#[subast()]` opts out.
-- [x] ~~Visitor over a `#[recurse]` cycle.~~ Done — `#[recurse(visit)]` emits a depth-generic
-      visitor (`Visit`/`VisitRec`/`visit_*`/`XxxNode`); single-root cycles, trait-based
-      (`visitor_recurse_cycle.rs`). The `visitor!()` path over a recurse cycle remains unsupported
-      (see "Known gaps").
-- [x] ~~in recurse macro, support the case that one of the cycle type references root type giving
-      complex type params (not giving just the cycle type's type params, but giving `Vec<T>`,
-      `Option<T>`, ...).~~ Resolved by **rejection**, not support: a back-edge to the root collapses
-      to the single depth param `__Rec`, so a non-identity argument (`Expr<Vec<S>>`) is a *non-regular*
-      recursion the single-`__Rec` depth machinery cannot express. The argument used to be silently
-      dropped (miscompile); `transform_type` now compares a root reference's args against the root's
-      own params and `abort!`s with an actionable message (move the differing part into its own
-      `#[derive(Ast)]` type, or pass the params unchanged). Fires for both `#[recurse]` and
-      `#[recurse(visit)]`. Fixture: `ui/recurse_complex_root_param.rs` (in `recurse_audit_test.rs`).
