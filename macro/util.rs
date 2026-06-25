@@ -176,6 +176,11 @@ pub(crate) struct Peeled {
     /// A second container layer was found nested inside the first (e.g. `Vec<Option<T>>`); such a
     /// field is unsupported and the caller turns this into a clear error.
     pub nested: bool,
+    /// The head sits behind a shared reference (`&T`, `&[T]`, …) — peeled transparently. Such a field
+    /// can be visited on the shared side but NOT on the `&mut` side (no `&mut head` through a `&`), so
+    /// the mut side treats it as a leaf. (A `&mut T` field is owned-enough to mutate, so it is *not*
+    /// flagged.)
+    pub shared_ref: bool,
 }
 
 /// Wrap a peeled element in an outer container, flagging nesting if the element already had one.
@@ -187,6 +192,7 @@ fn container_of(c: Container, inner: Peeled) -> Peeled {
         head_box: inner.head_box,
         cont_box: 0,
         nested: inner.nested || inner.container != Container::Direct,
+        shared_ref: inner.shared_ref,
     }
 }
 
@@ -198,6 +204,7 @@ fn direct(head: Ident, head_lead: Ident) -> Peeled {
         head_box: 0,
         cont_box: 0,
         nested: false,
+        shared_ref: false,
     }
 }
 
@@ -207,7 +214,12 @@ fn direct(head: Ident, head_lead: Ident) -> Peeled {
 /// for a non-path leaf. The caller decides whether `head` is actually followed.
 pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
     match ty {
-        Type::Reference(r) => peel(&r.elem, user_types),
+        // A shared `&` makes the head unmutable-through; flag it (the mut side will treat it as a
+        // leaf). `&mut` is not flagged — it can be reborrowed mutably.
+        Type::Reference(r) => peel(&r.elem, user_types).map(|mut inner| {
+            inner.shared_ref |= r.mutability.is_none();
+            inner
+        }),
         Type::Group(g) => peel(&g.elem, user_types),
         Type::Paren(p) => peel(&p.elem, user_types),
         Type::Slice(s) => peel(&s.elem, user_types).map(|inner| container_of(Container::Seq, inner)),

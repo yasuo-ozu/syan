@@ -1,0 +1,7 @@
+error: visitor!() over `#[recurse]` cycles: independent cycles in one `visitor!()` must share identical root generic params, but root `Expr` declares a different set. Visit the cycles from separate `visitor!()` invocations.
+  --> tests/ui/audit_visitor_recurse_multicycle_disjoint_params.rs:34:5
+   |
+34 |     syan::visit::visitor!(crate::m::Expr, crate::m::Foo);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

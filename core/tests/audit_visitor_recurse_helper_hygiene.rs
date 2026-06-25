@@ -1,14 +1,16 @@
-//! AUDIT (hygiene, `visitor!()`-over-`#[recurse]`) — BULK compile test, RED until fixed.
+//! AUDIT A (hygiene, `visitor!()`-over-`#[recurse]`) — fixed → BULK regression test (compiling is the check).
 //!
-//! The depth-generic visitor (`generate_module_mixed`) emits its helper params (`__V`, `__W`,
-//! `__R0`/`__R1`) as literal idents and never fresh-names them, so a cycle/target type that declares a
-//! generic param named `__V` (or `__R0` / `__W`) collides → E0403. The acyclic-only path already mints
-//! collision-free helpers (`fresh_ident`, see `visitor_hygiene.rs`); the recurse/mixed path doesn't.
+//! The depth-generic visitor (`generate_module_mixed`) used to emit its helper params (`__V`, `__W`,
+//! `__R0`/`__R1`) as literal idents, so a cycle/target type declaring a generic param named `__V` (or
+//! `__R0` / `__W`) collided → E0403. The acyclic-only path already minted collision-free helpers
+//! (`fresh_ident`, see `visitor_hygiene.rs`).
 //!
-//! This file FAILS TO BUILD today — that compile error *is* the audit finding. It builds (and the
-//! trivial test below runs) once the recurse/mixed path fresh-names `__V`/`__W`/`__R{i}` against the
-//! visited types' param names.
+//! Fixed: the recurse/mixed path now fresh-names `__V`/`__W`/`__R{i}` against the visited types' param
+//! names, so this (whose cycle type declares a `__V` param) compiles. This test guards the fix.
 #![allow(dead_code)]
+// `visitor!()` fetching the `#[recurse]` module's metadata misattributes a spurious "unused import"
+// to the `use ... recurse;` line; the import is in fact used by `#[recurse]`. Cosmetic span artifact.
+#![allow(unused_imports)]
 
 use syan::parse::recurse;
 

@@ -1026,6 +1026,11 @@ impl<'a> Lower<'a> {
                 quote!(#ty)
             );
         }
+        // A field behind a shared reference (`&T`/`&[T]`) is visitable on the shared side but a leaf
+        // for `visit_mut` — there is no `&mut head` reachable through a `&`.
+        if self.mutable && p.shared_ref {
+            return None;
+        }
         // Followed iff the head is self (implicit) or listed in this type's `#[subast]`. The
         // *effective* head — the real type name + path — comes from the matched entry (so an
         // aliased entry `Real as Aliased` dispatches to `visit_real`, not `visit_aliased`).
@@ -1369,17 +1374,43 @@ fn generate_module_mixed(
         .flat_map(|d| gparams(item_generics(&d.def).unwrap()))
         .map(|p| param_name(&p))
         .collect();
-    let g_params: Vec<GenericParam> = union_params
+    let mut g_params: Vec<GenericParam> = union_params
         .iter()
         .filter(|p| root_key_names.contains(&param_name(p)))
         .cloned()
         .collect();
+    // Lifetimes must precede type/const params in every generated generic list, but the union above
+    // can interleave them (one cycle's lifetime after another's type param). Normalize lifetime-first
+    // — a stable partition; reordering generic params is semantics-preserving.
+    g_params.sort_by_key(|p| !matches!(p, GenericParam::Lifetime(_)));
     let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
     let g_use_angle: TokenStream = if g_args.is_empty() {
         quote!()
     } else {
         quote!( < #(#g_args),* > )
     };
+
+    // Independent cycles spanned by one `visitor!()` must share identical ROOT params: the depth
+    // dispatch trait is keyed on the union of all roots' params and each cycle's terminator implements
+    // it, so a root (hence its terminator) lacking a param another cycle contributes would be
+    // unconstrained (the E0107/E0277 cascade). Reject cleanly. A single cycle (incl. heterogeneous
+    // non-root extras) and same-param multi-cycle are unaffected.
+    for d in &rec {
+        let id = item_ident(&d.def).unwrap();
+        if d.recurse.as_ref().unwrap().roots.iter().any(|rr| rr == id) {
+            let names: HashSet<String> =
+                gparams(item_generics(&d.def).unwrap()).iter().map(param_name).collect();
+            if names != root_key_names {
+                abort!(
+                    Span::call_site(),
+                    "visitor!() over `#[recurse]` cycles: independent cycles in one `visitor!()` must \
+                     share identical root generic params, but root `{}` declares a different set. \
+                     Visit the cycles from separate `visitor!()` invocations.",
+                    id
+                );
+            }
+        }
+    }
 
     // Mixed-visitor guard: an acyclic target's params must be ⊆ the roots' params. The depth-generic
     // `VisitRec` impls are keyed on the roots' params only, so an acyclic-only param would be
@@ -1410,6 +1441,34 @@ fn generate_module_mixed(
         .collect();
     let uw = where_clause(&union_where);
 
+    // Fresh-name the generated helper idents — the visitor type param (`__V`/`__W`) and the per-root
+    // depth params (`__R{i}`) — against every target's param names, so a cycle/target type that
+    // declares a param literally named `__V` / `__R0` / `__W` doesn't collide (as the acyclic path
+    // already does via `fresh_ident`).
+    let reserved: HashSet<String> = targets
+        .iter()
+        .flat_map(|d| gparams(item_generics(&d.def).unwrap()))
+        .map(|p| param_name(&p))
+        .collect();
+    let p_v = fresh_ident("__V", &reserved);
+    let p_w = {
+        let mut r = reserved.clone();
+        r.insert(p_v.to_string());
+        fresh_ident("__W", &r)
+    };
+    let max_roots = rec
+        .iter()
+        .map(|d| d.recurse.as_ref().unwrap().roots.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let rpfx = {
+        let mut r = reserved.clone();
+        r.insert(p_v.to_string());
+        r.insert(p_w.to_string());
+        fresh_prefix("__R", &r, max_roots)
+    };
+
     // Per recurse target: its own cycle's depth params `dps` (`__R0…`, one per root of THAT cycle),
     // both sides' method names + bodies; `is_root` selects the `VisitRec` impls.
     struct Rec {
@@ -1417,7 +1476,11 @@ fn generate_module_mixed(
         own_args: Vec<TokenStream>,
         /// This cycle type's params beyond the roots' (decl form) — lowered to `visit_*` method
         /// generics, since the trait is keyed on the roots' params only. Empty for a root.
+        /// `extra_lts` / `extra_rest` are the same params split lifetime / non-lifetime, so the free
+        /// fn can emit all lifetimes before the root's type params (lifetimes-first rule).
         extra_decl: Vec<TokenStream>,
+        extra_lts: Vec<TokenStream>,
+        extra_rest: Vec<TokenStream>,
         dps: Vec<Ident>,
         is_root: bool,
         vm: Ident,
@@ -1431,7 +1494,7 @@ fn generate_module_mixed(
             let id = item_ident(&d.def).unwrap();
             let r = d.recurse.as_ref().unwrap();
             let dps: Vec<Ident> = (0..r.roots.len())
-                .map(|i| Ident::new(&format!("__R{i}"), Span::call_site()))
+                .map(|i| Ident::new(&format!("{rpfx}{i}"), Span::call_site()))
                 .collect();
             let root_dp: HashMap<String, Ident> = r
                 .roots
@@ -1440,14 +1503,17 @@ fn generate_module_mixed(
                 .zip(dps.iter().cloned())
                 .collect();
             let cycle_set: HashSet<String> = r.cycle.iter().map(|i| i.to_string()).collect();
+            let extra: Vec<GenericParam> = gparams(item_generics(&d.def).unwrap())
+                .into_iter()
+                .filter(|p| !root_key_names.contains(&param_name(p)))
+                .collect();
+            let is_lt = |p: &&GenericParam| matches!(p, GenericParam::Lifetime(_));
             Rec {
                 node: r.node.clone(),
                 own_args: gargs(item_generics(&d.def).unwrap()),
-                extra_decl: gparams(item_generics(&d.def).unwrap())
-                    .iter()
-                    .filter(|p| !root_key_names.contains(&param_name(p)))
-                    .map(|p| param_tokens(p).0)
-                    .collect(),
+                extra_decl: extra.iter().map(|p| param_tokens(p).0).collect(),
+                extra_lts: extra.iter().filter(is_lt).map(|p| param_tokens(p).0).collect(),
+                extra_rest: extra.iter().filter(|p| !is_lt(p)).map(|p| param_tokens(p).0).collect(),
                 is_root: r.roots.iter().any(|rr| rr == id),
                 vm: method_ident_m(id, false),
                 vm_mut: method_ident_m(id, true),
@@ -1555,8 +1621,8 @@ fn generate_module_mixed(
         let inh_ret = if mutable { quote!(&mut Self) } else { quote!(&Self) };
         quote! {
             /// Dispatch trait turning the cycle's depth recursion into trait calls.
-            pub trait #rec_tr < #(#g_params,)* __V > {
-                fn #rec_fn(#amp self, v: &mut __V);
+            pub trait #rec_tr < #(#g_params,)* #p_v > {
+                fn #rec_fn(#amp self, v: &mut #p_v);
             }
 
             /// Unified depth-aware visitor: fixed methods for acyclic types, depth-generic for
@@ -1582,8 +1648,8 @@ fn generate_module_mixed(
             #(for a in &acys) {
                 // No `?Sized`: an acyclic body may cross into the cycle via `this.visit_<rec>(…)`,
                 // whose method requires `Self: Sized`.
-                pub fn #{ if mutable { &a.vm_mut } else { &a.vm } }< #(#g_params,)* __V: #visit_tr #g_use_angle >(
-                    this: &mut __V,
+                pub fn #{ if mutable { &a.vm_mut } else { &a.vm } }< #(#g_params,)* #p_v: #visit_tr #g_use_angle >(
+                    this: &mut #p_v,
                     i: #amp #{&a.path} #{&a.own_use},
                 ) #uw {
                     #{ if mutable { &a.body_mut } else { &a.body } }
@@ -1591,12 +1657,14 @@ fn generate_module_mixed(
             }
             #(for c in &recs) {
                 pub fn #{ if mutable { &c.vm_mut } else { &c.vm } }<
+                    // lifetimes first (extra lifetimes, then the root's via `#g_params`), then types/consts
+                    #(for l in &c.extra_lts) { #l, }
                     #(#g_params,)*
-                    #(for e in &c.extra_decl) { #e, }
-                    __V: #visit_tr #g_use_angle,
-                    #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* __V >, }
+                    #(for r in &c.extra_rest) { #r, }
+                    #p_v: #visit_tr #g_use_angle,
+                    #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* #p_v >, }
                 >(
-                    v: &mut __V,
+                    v: &mut #p_v,
                     i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >,
                 ) {
                     #{ if mutable { &c.body_mut } else { &c.body } }
@@ -1606,28 +1674,28 @@ fn generate_module_mixed(
             // One dispatch impl per ROOT node (drives its visit) + one per terminator (no-op).
             #(for c in &recs) {
                 #(if c.is_root) {
-                    impl< #(#g_params,)* #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* __V >, } __V: #visit_tr #g_use_angle >
-                        #rec_tr < #(#g_args,)* __V > for #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >
+                    impl< #(#g_params,)* #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* #p_v >, } #p_v: #visit_tr #g_use_angle >
+                        #rec_tr < #(#g_args,)* #p_v > for #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >
                     {
-                        fn #rec_fn(#amp self, v: &mut __V) {
-                            <__V as #visit_tr #g_use_angle>::#{ if mutable { &c.vm_mut } else { &c.vm } }(v, self);
+                        fn #rec_fn(#amp self, v: &mut #p_v) {
+                            <#p_v as #visit_tr #g_use_angle>::#{ if mutable { &c.vm_mut } else { &c.vm } }(v, self);
                         }
                     }
                 }
             }
             #(for t in &all_terms) {
-                impl< #(#g_params,)* __V: #visit_tr #g_use_angle > #rec_tr < #(#g_args,)* __V >
+                impl< #(#g_params,)* #p_v: #visit_tr #g_use_angle > #rec_tr < #(#g_args,)* #p_v >
                     for #t #g_use_angle
                 {
-                    fn #rec_fn(#amp self, _v: &mut __V) {}
+                    fn #rec_fn(#amp self, _v: &mut #p_v) {}
                 }
             }
 
             #(for h in &inhs) {
                 impl #{&h.own_def} #{&h.scrut} #{&h.own_use} #{&h.own_w} {
-                    pub fn #inh_fn < #(for e in &h.extra) { #e, } __W: #visit_tr #g_use_angle >(
+                    pub fn #inh_fn < #(for e in &h.extra) { #e, } #p_w: #visit_tr #g_use_angle >(
                         #inh_recv,
-                        visitor: &mut __W,
+                        visitor: &mut #p_w,
                     ) -> #inh_ret {
                         visitor.#{ if mutable { &h.vm_mut } else { &h.vm } }(self);
                         self

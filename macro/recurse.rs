@@ -860,6 +860,22 @@ fn build_scc(
 
     let tail = if single_root {
         // ── single root: the original depth machinery ───────────────────────────────────────────
+        // Soundness: the depth decrements only at the root's back-edge, so a sub-cycle that never
+        // touches the root would never terminate. The multi-root path checks this; do it here too
+        // (it was previously skipped whenever ≤1 cycle type self-references, silently leaving such a
+        // sub-cycle un-depth-limited).
+        let root_set: HashSet<String> = ::std::iter::once(root_name.clone()).collect();
+        if subgraph_is_cyclic(scc, &root_set, type_refs) {
+            abort!(
+                mod_ident,
+                "#[recurse]: this cycle has a sub-cycle running entirely through non-root types, so \
+                 the depth recursion (which only decrements at the root `{}`) would not terminate. \
+                 Make a type on that sub-cycle directly self-referential, or split it into its own \
+                 `#[derive(Ast)]` type.",
+                root_name
+            );
+        }
+
         // Inner default: (recursion_depth - 1) levels of __ExprRec<P0, P1, …, depth_ty>. The public
         // Expr<…> alias adds one more layer so that matching Expr::Block { stmts } leaves
         // stmts: Vec<__StmtRec<…, __ExprDefault<…>>> which equals Vec<Stmt<…>>.

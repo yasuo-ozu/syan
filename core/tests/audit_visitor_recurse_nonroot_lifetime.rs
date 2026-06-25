@@ -1,14 +1,17 @@
-//! AUDIT (param ordering, `visitor!()`-over-`#[recurse]`) — BULK compile test, RED until fixed.
+//! AUDIT C (param ordering, `visitor!()`-over-`#[recurse]`) — fixed → BULK regression test.
 //!
 //! `generate_module_mixed` lowers a non-root cycle type's beyond-roots params to `visit_*` method
-//! generics (`extra_decl`) and emits them AFTER the root params (`#g_params`), so for root `Expr<S>` +
-//! non-root `Stmt<'a, S>` it produces `fn visit_stmt<S, 'a, __V, __R0>(…)` → "lifetime parameters must
-//! be declared prior to type and const parameters". An extra *type* or *const* param works (it may
-//! legally follow `S`); only an extra *lifetime* trips the ordering rule.
+//! generics and used to emit them AFTER the root params, so for root `Expr<S>` + non-root `Stmt<'a, S>`
+//! it produced `fn visit_stmt<S, 'a, __V, __R0>(…)` → "lifetime parameters must be declared prior to
+//! type and const parameters". (An extra *type* or *const* param was fine; only an extra *lifetime*
+//! tripped the rule.)
 //!
-//! This file FAILS TO BUILD today — that ordering error *is* the audit finding. It builds once
-//! `extra_decl` lifetimes are emitted lifetime-first (before the root's type params).
+//! Fixed: the free fn now emits extra lifetimes before the root's type params (lifetimes-first), so
+//! this compiles. This test guards the fix.
 #![allow(dead_code)]
+// `visitor!()` fetching the `#[recurse]` module's metadata misattributes a spurious "unused import"
+// to the `use ... recurse;` line; the import is in fact used by `#[recurse]`. Cosmetic span artifact.
+#![allow(unused_imports)]
 
 use syan::parse::recurse;
 

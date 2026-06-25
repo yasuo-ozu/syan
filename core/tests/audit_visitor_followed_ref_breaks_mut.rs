@@ -1,15 +1,14 @@
-//! AUDIT (visit_mut, acyclic `visitor!()`) — BULK compile test, RED until fixed.
+//! AUDIT E (visit_mut, acyclic `visitor!()`) — fixed → BULK regression test.
 //!
-//! A *followed* shared-reference field (`&'a T`, `T` a followed type) breaks the auto-generated mutable
-//! side, so the whole visitor fails to compile — even for shared-only use. `util::peel` sees through
-//! `Type::Reference` transparently and records nothing about the borrow; `visitor!()` always emits BOTH
-//! sides, and the mut side then emits `&mut **r` / `.iter_mut()` through a `&` → E0596 "cannot borrow
-//! `**r` as mutable, as it is behind a `&` reference". (A reference field whose head is NOT followed —
-//! e.g. `&str` — is a leaf and compiles fine; owned `Box<T>` works on both sides.)
+//! A *followed* shared-reference field (`&'a T`, `T` a followed type) used to break the auto-generated
+//! mutable side, failing the whole visitor even for shared-only use: `util::peel` saw through
+//! `Type::Reference` transparently, so the mut side emitted `&mut **r` through a `&` → E0596 "cannot
+//! borrow `**r` as mutable, as it is behind a `&` reference". (A reference field whose head is NOT
+//! followed — e.g. `&str` — is a leaf and compiled fine; owned `Box<T>` works on both sides.)
 //!
-//! This file FAILS TO BUILD today — that E0596 *is* the audit finding. It builds once the mut side
-//! treats a followed `&T`/`&[T]` as a shared-only leaf (`Holder` is listed first so the union params
-//! are lifetime-first, isolating this from the separate union-param ordering issue).
+//! Fixed: `peel` now flags a shared-ref head (`Peeled::shared_ref`) and the mut side treats it as a
+//! leaf (no `&mut head` through a `&`), while the shared side still visits it. This compiles. (`Holder`
+//! is listed first so the union params are lifetime-first, isolating this from the param-ordering fix.)
 #![allow(dead_code)]
 
 use syan::visit::Ast;

@@ -1,17 +1,15 @@
-// AUDIT (SOUNDNESS GAP — RED until fixed): a rootless sub-cycle with <=1 self-referential root is
-// silently accepted and is NOT depth-limited.
+// AUDIT D (SOUNDNESS GAP — fixed → regression): a rootless sub-cycle with <=1 self-referential root
+// is now rejected with a clean `abort!` instead of being silently accepted and un-depth-limited.
 //
-// `#[recurse]`'s soundness guard (`subgraph_is_cyclic`: the SCC minus its self-referential roots must
-// be acyclic, else the depth never terminates) is consulted ONLY on the multi-root path
-// (`build_multiroot_tail`, reached when >=2 cycle types self-reference). With <=1 self-referential
-// type, `build_scc` takes the single-root path and the guard is never run — so here `A` is the sole
-// (heuristic) root and the `C <-> D` sub-cycle, which never touches `A`, threads the depth param
-// `__Rec` undecremented and is silently un-depth-limited.
+// `#[recurse]`'s soundness guard (`subgraph_is_cyclic`: the SCC minus its roots must be acyclic, else
+// the depth never terminates) used to run ONLY on the multi-root path (`build_multiroot_tail`, reached
+// when >=2 cycle types self-reference). With <=1 self-referential type, `build_scc` took the
+// single-root path and the guard was skipped — so here `A` is the sole root and the `C <-> D`
+// sub-cycle, which never touches `A`, threaded the depth param undecremented (un-depth-limited).
 //
-// The two-self-ref-type version of this exact shape IS cleanly rejected
-// (`ui/recurse_multiroot_rootless_subcycle.rs`). This is a `compile_fail` test that is RED today
-// (the module wrongly COMPILES). EXPECTED (when fixed): `#[recurse]` runs the feedback-vertex-set
-// check on the single-root path too and aborts with the same clear message — then bless the `.stderr`.
+// The single-root path now runs the same feedback-vertex-set check (`scc \ {root}` must be acyclic),
+// so this aborts — matching the long-supported two-self-ref-type rejection
+// (`ui/recurse_multiroot_rootless_subcycle.rs`). This test guards that fix.
 
 use syan::parse::recurse;
 
