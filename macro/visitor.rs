@@ -1514,24 +1514,14 @@ fn generate_module_mixed(
 ) -> TokenStream {
     let rec: Vec<&DoneType> = targets.iter().copied().filter(|d| d.recurse.is_some()).collect();
     let metas: Vec<&RecurseMeta> = rec.iter().map(|d| d.recurse.as_ref().unwrap()).collect();
-    let cycle_set: HashSet<String> = metas[0].cycle.iter().map(|i| i.to_string()).collect();
-    for m in &metas {
-        if m.cycle.iter().map(|i| i.to_string()).collect::<HashSet<_>>() != cycle_set {
-            abort!(
-                Span::call_site(),
-                "visitor!() over `#[recurse]` currently supports a single cycle per visitor!() call"
-            );
-        }
-    }
-    let roots = &metas[0].roots;
-    let terms = &metas[0].terms;
-    let dps: Vec<Ident> = (0..roots.len())
-        .map(|i| Ident::new(&format!("__R{i}"), Span::call_site()))
-        .collect();
-    let root_dp: HashMap<String, Ident> = roots
+    // Each recurse target carries ITS cycle's roots/depth/terminators (a `visitor!()` may span several
+    // independent cycles); per-target depth info is computed in the `Rec` build below. Here we only
+    // need the union of every cycle's terminators (deduped by path) for the no-op dispatch impls.
+    let mut seen_t = HashSet::new();
+    let all_terms: Vec<Path> = metas
         .iter()
-        .map(|r| r.to_string())
-        .zip(dps.iter().cloned())
+        .flat_map(|m| m.terms.iter().cloned())
+        .filter(|p| seen_t.insert(quote!(#p).to_string()))
         .collect();
 
     let mut seen = HashSet::new();
@@ -1557,10 +1547,12 @@ fn generate_module_mixed(
         .collect();
     let uw = where_clause(&union_where);
 
-    // Per recurse target: both sides' method names + bodies; `is_root` selects the `VisitRec` impls.
+    // Per recurse target: its own cycle's depth params `dps` (`__R0…`, one per root of THAT cycle),
+    // both sides' method names + bodies; `is_root` selects the `VisitRec` impls.
     struct Rec {
         node: Path,
         own_args: Vec<TokenStream>,
+        dps: Vec<Ident>,
         is_root: bool,
         vm: Ident,
         vm_mut: Ident,
@@ -1572,14 +1564,25 @@ fn generate_module_mixed(
         .map(|d| {
             let id = item_ident(&d.def).unwrap();
             let r = d.recurse.as_ref().unwrap();
+            let dps: Vec<Ident> = (0..r.roots.len())
+                .map(|i| Ident::new(&format!("__R{i}"), Span::call_site()))
+                .collect();
+            let root_dp: HashMap<String, Ident> = r
+                .roots
+                .iter()
+                .map(|x| x.to_string())
+                .zip(dps.iter().cloned())
+                .collect();
+            let cycle_set: HashSet<String> = r.cycle.iter().map(|i| i.to_string()).collect();
             Rec {
                 node: r.node.clone(),
                 own_args: gargs(item_generics(&d.def).unwrap()),
-                is_root: roots.iter().any(|rr| rr == id),
+                is_root: r.roots.iter().any(|rr| rr == id),
                 vm: method_ident_m(id, false),
                 vm_mut: method_ident_m(id, true),
                 body: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set, false),
                 body_mut: recurse_lower_body(&d.def, &r.node, method_set, &root_dp, &cycle_set, true),
+                dps,
             }
         })
         .collect();
@@ -1691,9 +1694,9 @@ fn generate_module_mixed(
                     }
                 }
                 #(for c in &recs) {
-                    fn #{ if mutable { &c.vm_mut } else { &c.vm } }< #(for d in &dps) { #d: #rec_tr < #(#g_args,)* Self >, } >(
+                    fn #{ if mutable { &c.vm_mut } else { &c.vm } }< #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* Self >, } >(
                         &mut self,
-                        i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(#dps),* >,
+                        i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >,
                     ) where Self: ::core::marker::Sized {
                         #{ if mutable { &c.vm_mut } else { &c.vm } }(self, i)
                     }
@@ -1714,10 +1717,10 @@ fn generate_module_mixed(
                 pub fn #{ if mutable { &c.vm_mut } else { &c.vm } }<
                     #(#g_params,)*
                     __V: #visit_tr #g_use_angle,
-                    #(for d in &dps) { #d: #rec_tr < #(#g_args,)* __V >, }
+                    #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* __V >, }
                 >(
                     v: &mut __V,
-                    i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(#dps),* >,
+                    i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >,
                 ) {
                     #{ if mutable { &c.body_mut } else { &c.body } }
                 }
@@ -1726,8 +1729,8 @@ fn generate_module_mixed(
             // One dispatch impl per ROOT node (drives its visit) + one per terminator (no-op).
             #(for c in &recs) {
                 #(if c.is_root) {
-                    impl< #(#g_params,)* #(for d in &dps) { #d: #rec_tr < #(#g_args,)* __V >, } __V: #visit_tr #g_use_angle >
-                        #rec_tr < #(#g_args,)* __V > for #{&c.node} < #(for x in &c.own_args) { #x, } #(#dps),* >
+                    impl< #(#g_params,)* #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* __V >, } __V: #visit_tr #g_use_angle >
+                        #rec_tr < #(#g_args,)* __V > for #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >
                     {
                         fn #rec_fn(#amp self, v: &mut __V) {
                             <__V as #visit_tr #g_use_angle>::#{ if mutable { &c.vm_mut } else { &c.vm } }(v, self);
@@ -1735,7 +1738,7 @@ fn generate_module_mixed(
                     }
                 }
             }
-            #(for t in terms) {
+            #(for t in &all_terms) {
                 impl< #(#g_params,)* __V: #visit_tr #g_use_angle > #rec_tr < #(#g_args,)* __V >
                     for #t #g_use_angle
                 {

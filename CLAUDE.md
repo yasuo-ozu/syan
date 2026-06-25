@@ -69,19 +69,20 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   own `Visit`/`VisitMut` traits — fixed `visit_X(&X)` for acyclic targets, depth-generic
   `visit_Y<R…>(&YNode<…>)` for recurse targets, with `VisitRec`/`VisitRecMut` dispatch, in one unified
   `generate_module_mixed` (acyclic-only visitors keep the original `gen_side` path). One `visitor!()`
-  can **mix** acyclic + recurse types and the outer→inner boundary auto-crosses; **multi-root** cycles
-  give `visit_*` one depth param per root; both **shared and `&mut`** sides are emitted. Tests:
+  can **mix** acyclic + recurse types (the outer→inner boundary auto-crosses), span **several
+  independent cycles** (each recurse target carries its own cycle's roots/depth), handle **multi-root**
+  cycles (one depth param per root), and emits both the **shared and `&mut`** sides. Tests:
   `visitor_recurse_via_visitor.rs` (incl. `visit_mut`), `visitor_recurse_mixed.rs`,
-  `visitor_recurse_multiroot_via_visitor.rs`. See the "`#[recurse]` expansion & how `visitor!()` consumes
-  it" section for the contract and current limits.
+  `visitor_recurse_multiroot_via_visitor.rs`, `visitor_recurse_multicycle_via_visitor.rs`. See the
+  "`#[recurse]` expansion & how `visitor!()` consumes it" section for the contract and current limits.
 
 ## Known gaps / limitations
 
 - **`visitor!(…)` over `#[recurse]` — remaining limits** (the capability is shipped; see "Shipped &
-  tested" + the expansion section): one cycle per call; no inheritance (`base => …`) over recurse; no
-  closures (depth-generic methods can't back a closure `Driver`, so it's struct/`&mut`-visitor only);
-  an *unlisted* recurse cross-edge must be listed (no inline drill). All are clean `abort!`s. (Drill-in
-  over *acyclic* types in a `#[recurse]` module does work — `visitor_recurse_drill.rs`.)
+  tested" + the expansion section): no inheritance (`base => …`) over recurse; no closures (depth-generic
+  methods can't back a closure `Driver`, so it's struct/`&mut`-visitor only); an *unlisted* recurse
+  cross-edge must be listed (no inline drill). All are clean `abort!`s. (Drill-in over *acyclic* types
+  in a `#[recurse]` module does work — `visitor_recurse_drill.rs`.)
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names.
