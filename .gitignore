@@ -1,2 +1,5 @@
 /target
 Cargo.lock
+
+# Claude Code agent worktrees (transient)
+.claude/worktrees/
