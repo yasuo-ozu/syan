@@ -1146,6 +1146,35 @@ impl<'a> Lower<'a> {
     }
 }
 
+/// The deduped union of every target's generic params (first declaration wins), followed by the
+/// base's params (for inheritance — the new trait must declare them to name `base::Visit<base params>`
+/// as a supertrait, so the new union must ⊇ the base's). The caller normalizes order with
+/// `sort_lifetimes_first`; the recurse path additionally filters this to the cycle roots' params.
+fn param_union(targets: &[&DoneType], base_generics: &[GenericParam]) -> Vec<GenericParam> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for d in targets {
+        for p in gparams(item_generics(&d.def).unwrap()) {
+            if seen.insert(param_name(&p)) {
+                out.push(p);
+            }
+        }
+    }
+    for bp in base_generics {
+        if seen.insert(param_name(bp)) {
+            out.push(bp.clone());
+        }
+    }
+    out
+}
+
+/// Lifetimes must precede type/const params in every generated generic list, but a param union (and
+/// inherited base params) can interleave them. Normalize lifetime-first — a *stable* partition, so
+/// semantics are preserved and every `by_name`/`g_args`/`g_def`/`g_use` view shares this order.
+fn sort_lifetimes_first(params: &mut [GenericParam]) {
+    params.sort_by_key(|p| !matches!(p, GenericParam::Lifetime(_)));
+}
+
 /// The set of idents that count as user AST types when peeling a field of a type with the given
 /// `self_ident` and `#[subast]` entries: the type's own ident plus every `#[subast]` matchkey.
 fn self_and_subast_keys(self_ident: Option<&Ident>, subast: &[SubEntry]) -> HashSet<String> {
@@ -1477,22 +1506,9 @@ fn generate_module_mixed(
     // be expressed. Built as the union of every target's params (deduped, `targets` order) filtered to
     // those a root carries — so for a homogeneous cycle (every cycle type shares the roots' params,
     // acyclic params ⊆ roots') this equals the full union and the emitted code is unchanged.
-    let mut seen = HashSet::new();
-    let mut union_params: Vec<GenericParam> = Vec::new();
-    for d in targets {
-        for p in gparams(item_generics(&d.def).unwrap()) {
-            if seen.insert(param_name(&p)) {
-                union_params.push(p);
-            }
-        }
-    }
-    // Inheriting a recurse base: its params must be in the trait's params so `New::Visit` can name
-    // `base::Visit<base params>` as a supertrait (requires the new union ⊇ the base's).
-    for bp in &st.base_generics {
-        if seen.insert(param_name(bp)) {
-            union_params.push(bp.clone());
-        }
-    }
+    let union_params = param_union(targets, &st.base_generics);
+    // Trait keying filters the union to the cycle ROOTS' params (+ the inherited base's); a non-root's
+    // extra params become `visit_*` method generics rather than trait params.
     let mut root_key_names: HashSet<String> = rec
         .iter()
         .filter(|d| {
@@ -1508,10 +1524,7 @@ fn generate_module_mixed(
         .filter(|p| root_key_names.contains(&param_name(p)))
         .cloned()
         .collect();
-    // Lifetimes must precede type/const params in every generated generic list, but the union above
-    // can interleave them (one cycle's lifetime after another's type param). Normalize lifetime-first
-    // — a stable partition; reordering generic params is semantics-preserving.
-    g_params.sort_by_key(|p| !matches!(p, GenericParam::Lifetime(_)));
+    sort_lifetimes_first(&mut g_params);
     let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
     let g_use_angle: TokenStream = if g_args.is_empty() {
         quote!()
@@ -1972,31 +1985,12 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         return generate_module_mixed(st, &targets, &method_set, &done_by_path, &path_of);
     }
 
-    // The visitor trait is parameterized by the *union* of every visited type's generic params
-    // (by name, first declaration wins); each type is then referenced with its own subset. This
-    // lets one visitor span e.g. `Expr<S, Tokens>` and `BinOp<S>`.
-    let mut seen = HashSet::new();
-    let mut g_params: Vec<GenericParam> = Vec::new();
-    for d in &targets {
-        for p in gparams(item_generics(&d.def).unwrap()) {
-            if seen.insert(param_name(&p)) {
-                g_params.push(p);
-            }
-        }
-    }
-    // When inheriting, the union must also contain the base's generic params (so the new trait can
-    // declare them and reference `base::Visit<base params>`). `base_g_use` is the base's args named
-    // by the union's idents — used for every `base::Visit<..>` reference (its own arity, which may
-    // differ from the new union's).
-    for bp in &st.base_generics {
-        if seen.insert(param_name(bp)) {
-            g_params.push(bp.clone());
-        }
-    }
-    // Lifetimes must precede type/const params in every generated generic list, but the union (and the
-    // base's params) can interleave them. Normalize lifetime-first — a stable partition; reordering
-    // generic params is semantics-preserving (`by_name`/`g_args`/`g_def`/`g_use` all follow this order).
-    g_params.sort_by_key(|p| !matches!(p, GenericParam::Lifetime(_)));
+    // The visitor trait is parameterized by the *union* of every visited type's generic params (+ the
+    // base's, when inheriting), so one visitor can span e.g. `Expr<S, Tokens>` and `BinOp<S>`; each
+    // type is referenced with its own subset, and `base_g_use` (below) names the base's args by the
+    // union's idents for every `base::Visit<..>` reference.
+    let mut g_params = param_union(&targets, &st.base_generics);
+    sort_lifetimes_first(&mut g_params);
     let by_name: HashMap<String, TokenStream> =
         g_params.iter().map(|p| (param_name(p), param_use(p))).collect();
     let by_name_param: HashMap<String, GenericParam> =
