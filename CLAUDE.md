@@ -85,7 +85,7 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 
 - **`visitor!(…)` over `#[recurse]` — only limit: no closures** (struct/`&mut`-only; the depth-generic
   `visit_*<R>` would need type-level HRTB). **Deferred** — write a struct `impl Visit`; rationale +
-  five options in "Closures over `#[recurse]`" below. Everything else over recurse is supported (see
+  per-option implementation plans in "Closures over `#[recurse]`" below. Everything else over recurse is supported (see
   "Shipped & tested"): unlisted-cross-edge drill, nested containers + tuples, multi-root / multi-cycle /
   mixed, inheritance, cross-crate.
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
@@ -96,28 +96,96 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   **`where`-bounded param not shared by all visited types** (the bound would be undischargeable on a
   type lacking it — an *unbounded* unshared param is fine); the mixed acyclic-param-not-a-root wall.
 
-## Closures over `#[recurse]` — why not, and options (deferred)
+## Closures over `#[recurse]` — implementation plans (deferred)
 
-A depth-generic `visit_*<R>` runs at *every* depth (`R` shrinks per back-edge), so a closure driver
-would need `for<R> FnMut(&__XxxRec<S, R>)` — *type*-level HRTB, which Rust lacks (one `FnMut` is
-monomorphic over the full-depth alias: `(self.0)(i)` → "expected `&__XxxRec<S, default>`, found
-`&__XxxRec<S, R>`"). So recurse (and recurse-inheriting) visitors are **struct/`&mut`-only**. Five
-options if ever lifted (**none implemented**; struct visitors are the pragmatic answer — full detail
-in the commit history):
+**Why it's blocked.** A depth-generic `visit_*<R>` runs at *every* depth (`R` shrinks per back-edge),
+so a closure driver would need `for<R> FnMut(&__XxxRec<S, R>)` — *type*-level HRTB, which Rust lacks
+(one `FnMut` value is monomorphic over the full-depth alias: `(self.0)(i)` → "expected `&__XxxRec<S,
+default>`, found `&__XxxRec<S, R>`"). So recurse (and recurse-inheriting) visitors are
+**struct/`&mut`-only**. Five options below; **none implemented** (struct visitors are the pragmatic
+answer). The plans are concrete enough to execute.
 
-1. **Erased view** (sound, no alloc, can't descend): per type a depth-agnostic `XxxView<'v,S>` (leaf
-   fields borrowed, recursive children dropped) + `as_view()`; the closure sees the view, the driver
-   descends. `XxxViewMut` for the mut side; chained per type like the acyclic `Hook`/`Chain`.
-2. **Natural-type conversion** (sound, ergonomic, deep-copies): emit the natural recursive `XxxNat<S>`
-   + `fn to_nat<R>(…) -> XxxNat<S>` (a fn, so `R`-generic; needs `Leaf: Clone`), then a normal closure
-   visitor over `XxxNat` (one type at every depth, so it can match + descend). Most faithful.
-3. **Cast `&__XxxRec<S,R>` → `&Xxx<S>`** — UNSOUND (a descending closure reads a shallower `Box<R'>`
-   past its terminator → UB). Rejected.
-4. **`dyn`-erased** (sound, dynamic, awkward): object-safe `XxxDyn<S>` (`kind`/`child`/leaf accessors)
-   impl'd for every `__XxxRec<S,R>`; closure takes `&dyn XxxDyn<S>` and *can* descend. Accessor API.
-5. **Per-depth monomorphization** — impossible (one `FnMut` can't be `FnMut(&level_k)` for every `k`).
+**Shared anchors (all implementable options).** Everything is emitted in `generate_module_mixed`
+(`macro/visitor.rs`), reusing metadata the consumer already fetches — `@ast` (each cycle type's
+variant/field structure) and `@recurse` (`@node`/`@roots`/`@depth`/`@terms`/`@cycle`). A field is a
+**recursive child** iff its `peel`ed head ∈ `@cycle` (the existing `recurse_lower_*` classification),
+else a **leaf**; reuse that split. The closure adapter impls the *already-generated* `Visit<S>` (its
+`visit_*<R>` calls the existing free `visit_*` to descend), so only the per-type support type + adapter
++ inherent `.visit(f)` wiring is new. Multi-type / tuple-of-closures chains exactly like the acyclic
+`Hook`/`Driver`/`Chain` (one adapter per cycle type, combined in one pass).
 
-**If ever lifted:** prefer #2 (faithful) or #1 (no copy); #3 unsound, #4 awkward, #5 impossible.
+### Option 1 — Erased view (sound; no alloc; closure sees leaves only)
+
+- **Emit per cycle type `Xxx`:** `pub enum XxxView<'v, S> {…}` mirroring `Xxx`'s variants, but a leaf
+  field `L` → `&'v L` (a container/leaf field `Vec<L>` → `&'v Vec<L>` whole), and a recursive-child
+  field is **omitted** (a variant of only children becomes unit). Plus `impl<S, R> __XxxRec<S, R> { pub
+  fn as_view(&self) -> XxxView<'_, S> }` — a `match` per variant borrowing leaves, ignoring children.
+- **Adapter + inherent:** `pub struct XxxClo<F>(pub F); impl<S, F: FnMut(&XxxView<'_, S>)> Visit<S> for
+  XxxClo<F> { fn visit_x<R: VisitRec<S, Self>>(&mut self, i) { (self.0)(&i.as_view()); visit_x(self, i);
+  } }` (pre-order: fire closure, then descend). Inherent `pub fn visit(&self, f)` on the `XxxNode`
+  alias → `visit_x(&mut XxxClo(f), self)`.
+- **Mut side:** `XxxViewMut<'v, S>` with `&'v mut L` leaves, `as_view_mut`, `XxxCloMut`, `.visit_mut(f)`.
+- **Edge cases:** heterogeneous params → `XxxView<'v, S, T>`; multi-root → adapter `Visit` keyed on the
+  roots' params; unlisted *drilled* types get no view (still descended structurally, invisible to the
+  closure); a mixed leaf+child tuple field borrows only its leaf sub-parts.
+- **Tests:** closure counting leaves; mut closure editing a leaf; tuple `(f_expr, f_stmt)`.
+- **Cost / limit:** a `View`/`ViewMut` + `as_view*` per type; the closure **cannot read or descend
+  recursive children** (leaves only) — the inherent ceiling of this option; leaf borrows add `'v`.
+
+### Option 2 — Natural-type conversion (sound; closure can fully descend; deep-copies) — most faithful
+
+- **Emit per cycle type `Xxx`:** the natural recursive `pub enum XxxNat<S> {…}` — a recursive child to
+  cycle type `Y` → `Box<YNat<S>>` (containers preserved, `Vec<Box<YNat<S>>>`), a leaf `L` → `L`. Plus a
+  **free fn** `pub fn to_xxx_nat<R>(&__XxxRec<S, R>) -> XxxNat<S>` (a fn, so it *may* be `R`-generic
+  where a closure can't): `match` each variant, recurse `to_*_nat` on children (descending the depth),
+  `.clone()` leaves. Requires every leaf `: Clone`.
+- **Run an ordinary closure visitor over `XxxNat`:** `XxxNat` is a normal (mutually-)recursive enum —
+  one type at every depth — so the **acyclic `gen_side` machinery applies directly** (emit its
+  `Visit`/`Driver`/closure plumbing for the `*Nat` set, classifying `Box<YNat>` as the followed child).
+  `|n: &XxxNat<S>|` can `match` *and* descend. Inherent `.visit(f)` → `visit_xxx_nat(&to_xxx_nat(self),
+  &mut f)`.
+- **Mut side:** convert → mutate the `Nat` → write back with `from_xxx_nat<R>(&XxxNat<S>) -> __XxxRec<S,
+  R>`, which must rebuild the depth chain and so only succeeds up to `limit` (a `Nat` deeper than
+  `limit` can't be rebuilt). So `visit_mut` here is awkward — make this option **shared-side only**.
+- **Edge cases:** every leaf `: Clone`; `XxxNat` is another public type per cycle; heterogeneous params
+  carried through.
+- **Tests:** a closure that matches a variant AND descends into its child (what Option 1 can't do).
+- **Cost:** a deep copy + `Clone` bound per `.visit()`; the closure sees a real, fully-traversable value.
+
+### Option 3 — Cast `&__XxxRec<S, R>` → `&Xxx<S>` (UNSOUND — rejected; no plan)
+
+All `__XxxRec<S, R>` share a layout (`Box<R>` is a thin pointer), so `unsafe { &*(i as *const _ as
+*const Xxx<S>) }` type-checks — but a closure handed `&Xxx<S>` that descends a child reads a *shallower*
+node's `Box<R'>` as `Box<__XxxDefault>` and dereferences past its terminator → UB (and violates
+provenance/aliasing). No way to restrict to non-descending closures. **Not implementable.**
+
+### Option 4 — `dyn`-erased dispatch (sound; dynamic; awkward API)
+
+- **Emit per cycle type:** `pub enum XxxKind {…}` (variant tag) and an object-safe accessor trait. The
+  heterogeneity wrinkle: a cross-edge child is a *different* node type, so a per-type `XxxDyn` can't type
+  `child()` — emit one **cycle-wide** `pub trait CycleNode<S> { fn kind(&self) -> NodeKind; fn child(&self,
+  i: usize) -> Option<&dyn CycleNode<S>>; /* leaf accessors */ }`, impl'd for every `__YRec<S, R>` in the
+  cycle (`R`-generic): `child(i)` erases the i-th recursive child to `&dyn CycleNode`.
+- **Adapter + inherent:** `struct CloDyn<F>(F); impl<S, F: FnMut(&dyn CycleNode<S>)> Visit<S> for
+  CloDyn<F> { fn visit_x<R>(&mut self, i) { (self.0)(i as &dyn CycleNode<S>); visit_x(self, i); } }`. The
+  closure **can** descend via `child()`. Mut side: a parallel `CycleNodeMut<S>` with `child_mut`.
+- **Cost / limit:** object-safety bans generic/`Self`-returning methods → leaf access is an
+  accessor API (per-leaf-type method or index + enum return), **no pattern-matching**; the cycle-wide
+  supertrait must erase or fix heterogeneous params. Dynamic dispatch (a vtable per node type). Sound and
+  copy-free with descent, but the least ergonomic.
+
+### Option 5 — Per-depth monomorphization (impossible; no plan)
+
+Can't emit `limit+1` `Visit` impls for one `ClosureDriver<F>` (each redefines the same `visit_x<R>`),
+and one `FnMut` value can't be `FnMut(&__XxxRec<S, level_k>)` for every distinct level type `k`. No
+closure covers all depths — the type-HRTB wall restated. **Not implementable.**
+
+### Recommendation
+
+If ever lifted: **#2 (natural-type)** for a faithful, fully-traversable closure API (cost: deep copy +
+`Clone`, shared-side only); **#1 (erased view)** when the closure needs only leaves and a copy is
+unacceptable (and `&mut` is wanted). #4 only if dynamic dispatch + an accessor API are acceptable.
+#3 unsound, #5 impossible.
 
 ---
 
