@@ -383,14 +383,6 @@ fn emit_visited_macro(
     }
 }
 
-/// The host crate of a direct-base path: `Some(ident)` when it is rooted at an *external* crate
-/// (e.g. `syan_rust::inherit::mid`), `None` for same-crate roots (`crate`/`super`/`self`) or a
-/// leading-`::` absolute path. Used to requalify a transitive ancestor that an *upstream*
-/// intermediate recorded `crate::`-relative (its own crate) into a path the *downstream* extender
-/// can resolve. (A `$crate` cannot do this: emitted by a proc-macro into a generated `macro_rules`
-/// body it resolves only for fetch/macro-invocation paths, **not** for the trait path re-emitted
-/// into the new `Driver`'s supertrait impl — so multi-level cross-crate `base => mid => new` with an
-/// *upstream* `mid` needs this concrete requalification instead.)
 /// Whether a path is rooted in the *current* crate (`crate::` / `self::` / `super::`). A foreign path
 /// (an external crate name, or a leading `::`) is not — an inherent `impl` for such a type would be
 /// E0116 (inherent impls must live in the type's defining crate), so the recurse path skips inherent
@@ -405,6 +397,14 @@ fn path_is_crate_local(p: &Path) -> bool {
     )
 }
 
+/// The host crate of a direct-base path: `Some(ident)` when it is rooted at an *external* crate
+/// (e.g. `syan_rust::inherit::mid`), `None` for same-crate roots (`crate`/`super`/`self`) or a
+/// leading-`::` absolute path. Gates the ancestor requalification (`requalify_ancestor`): a transitive
+/// ancestor an *upstream* intermediate recorded relative to its own crate must be rewritten into a
+/// path the *downstream* extender can resolve. (A `$crate` cannot do this: emitted by a proc-macro
+/// into a generated `macro_rules` body it resolves only for fetch/macro-invocation paths, **not** for
+/// the trait path re-emitted into the new `Driver`'s supertrait impl — so a cross-crate `base => mid
+/// => new` with an *upstream* `mid` needs this concrete requalification instead.)
 fn base_host_crate(base: &Path) -> Option<Ident> {
     if base.leading_colon.is_some() {
         return None;
