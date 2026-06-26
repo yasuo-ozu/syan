@@ -45,10 +45,12 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   downstream drill through upstream types via `$crate`-rooted `#[subast]` (`cross_crate_drill.rs`).
   Cross-crate **inheritance** is keyed on the base **path** (supertrait, inherited `base::visit_*`, the
   `pub use`'d `__syan_visited`); multi-level incl. an *upstream* intermediate works because
-  `__visitor_build` **requalifies** a `crate::`-relative ancestor against the base's host crate
-  (`base_host_crate`/`requalify_ancestor`). Tests: `cross_crate_inherit{,_multilevel,_4level,_downstream_mid}.rs`.
-  Residual hole: a `super::`/`self::`-relative ancestor from an upstream intermediate isn't requalified
-  (use `crate::`-rooted entry paths).
+  `__visitor_build` **requalifies** a relative ancestor against the direct base's full path: a
+  `crate::` ancestor → the base's host crate, and a `super::`/`self::` ancestor → resolved against the
+  base module (the consumer is *given* the intermediate's full path, and its `visitor!()` ran inside
+  that module, so `super::base` = pop `mid_ss` off `syan_rust::inherit::mid_ss` + `base`) — closing the
+  former `super`/`self` hole (`base_host_crate`/`requalify_ancestor`). Tests:
+  `cross_crate_inherit{,_multilevel,_4level,_downstream_mid}.rs`, `cross_crate_super_self.rs`.
 - **`#[recurse(limit = N)]`** (type transformer + metadata — *no* visitor): turns a module of
   mutually-recursive AST types into depth-limited concrete types — renames each cycle type `Xxx` →
   `__XxxRec<…, depth>`, emits per-root terminators / `__XxxDefault` depth chains / the public `pub type

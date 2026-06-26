@@ -113,11 +113,10 @@ pub mod inherit {
     }
 
     /// A *mid* variant that records its `base` ancestor via a **`super::`-relative** path (instead of
-    /// the `crate::inherit::base` that [`mid`] uses). It builds fine upstream, but a downstream
-    /// `visitor!(<path>::mid_ss => T)` receives the ancestor as `super::base` — relative to the
-    /// *downstream* module, where it's unresolvable (a proc-macro can't requalify `super`/`self` like
-    /// it does a leading `crate::`). This is the residual cross-crate hole; the fix is to use a
-    /// `crate::`-rooted entry path (as `mid` does). Realized by `tests/ui/cross_crate_super_self.rs`.
+    /// the `crate::inherit::base` that [`mid`] uses). A downstream `visitor!(<path>::mid_ss => T)`
+    /// receives the ancestor as `super::base`; the consumer requalifies it against the full base path
+    /// it was given (`syan_rust::inherit::mid_ss` — the `visitor!()` ran inside that module, so
+    /// `super::base` = `syan_rust::inherit::base`). Exercised by `tests/cross_crate_super_self.rs`.
     /// (Its own `ItemSs` — not `Item` — to avoid colliding with `mid` on the inherent `visit`.)
     #[derive(Debug, Ast)]
     #[subast(crate::inherit::Expr)]

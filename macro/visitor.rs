@@ -421,25 +421,61 @@ fn base_host_crate(base: &Path) -> Option<Ident> {
     }
 }
 
-/// Replace a leading bare `crate` segment of an ancestor path with `host` (the direct base's crate),
-/// so a `crate::…`-relative ancestor recorded by an upstream intermediate resolves downstream. Only a
-/// leading bare `crate` is requalified: a path already concrete (rooted at a crate name / `::`) is
-/// left alone (it points where it should), and a `super::`/`self::`-relative ancestor recorded by an
-/// upstream intermediate is *also* left alone — and so remains unresolvable downstream (the same
-/// residual hole as `ast.rs`'s `crate_rooted_tokens`; canonical `crate::`-rooted `visitor!` entry
-/// paths, which the docs already recommend, avoid it).
-fn requalify_ancestor(anc: &Path, host: &Ident) -> Path {
-    if anc.leading_colon.is_none()
-        && anc
-            .segments
-            .first()
-            .is_some_and(|s| s.ident == "crate" && matches!(s.arguments, PathArguments::None))
-    {
-        let mut out = anc.clone();
-        out.segments[0].ident = host.clone();
-        out
-    } else {
-        anc.clone()
+/// Resolve a transitive ancestor path that an *upstream* intermediate recorded **relative to its own
+/// module** into one the *downstream* extender can resolve, using the direct `base` path. Downstream,
+/// `base` is the path the extender named the intermediate by (e.g. `syan_rust::inherit::mid_ss`), and
+/// the intermediate's `visitor!()` was invoked *inside that module* — so the ancestor's leading
+/// relative segment resolves against `base`:
+///   - `crate::REST` → `<host>::REST`   (host = `base`'s first segment, the upstream crate)
+///   - `super::REST` → pop one trailing segment of `base` per leading `super`, then append `REST`
+///   - `self::REST`  → `base::REST`
+///
+/// A path already concrete (external-crate-rooted or leading `::`) — or a bare ident — is left alone.
+/// Only called for a cross-crate base (`base_host_crate(base).is_some()`); same-crate chains, which
+/// resolve in place, keep their recorded paths. This is why a `super`/`self`-relative `visitor!` entry
+/// path (not just the canonical `crate::`-rooted one) now works cross-crate.
+fn requalify_ancestor(anc: &Path, base: &Path) -> Path {
+    if anc.leading_colon.is_some() {
+        return anc.clone();
+    }
+    let Some(first) = anc.segments.first() else {
+        return anc.clone();
+    };
+    if !matches!(first.arguments, PathArguments::None) {
+        return anc.clone();
+    }
+    // `base`'s segments ARE the intermediate's module path (the `visitor!()` ran inside it).
+    let base_mod: Vec<PathSegment> = base.segments.iter().cloned().collect();
+    // Build a `Path` (no leading `::`) from module-prefix segments + a trailing tail.
+    let join = |prefix: &[PathSegment], tail: &[PathSegment]| -> Path {
+        let mut segments = Punctuated::new();
+        for s in prefix.iter().chain(tail.iter()) {
+            segments.push(s.clone());
+        }
+        Path { leading_colon: None, segments }
+    };
+    match first.ident.to_string().as_str() {
+        "crate" => {
+            // crate::REST -> <host>::REST (replace only the leading segment)
+            let mut out = anc.clone();
+            out.segments[0].ident = base_mod[0].ident.clone();
+            out
+        }
+        "self" => {
+            let tail: Vec<PathSegment> = anc.segments.iter().skip(1).cloned().collect();
+            join(&base_mod, &tail)
+        }
+        "super" => {
+            let supers = anc
+                .segments
+                .iter()
+                .take_while(|s| s.ident == "super" && matches!(s.arguments, PathArguments::None))
+                .count();
+            let keep = base_mod.len().saturating_sub(supers);
+            let tail: Vec<PathSegment> = anc.segments.iter().skip(supers).cloned().collect();
+            join(&base_mod[..keep], &tail)
+        }
+        _ => anc.clone(),
     }
 }
 
@@ -1987,15 +2023,16 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 .map(|p| Ident::new(&param_name(p), Span::call_site()))
                 .collect(),
         });
-        // Requalify transitive ancestors a `crate::`-relative *upstream* intermediate recorded
-        // against the direct base's host crate (no-op for same-crate / already-concrete chains).
-        // This also re-exports them concrete (the chain feeds `anc_export`), so a further extender
-        // inherits resolvable ancestor paths too.
-        let host = base_host_crate(b);
+        // Requalify transitive ancestors that a `crate::`/`super::`/`self::`-relative *upstream*
+        // intermediate recorded, resolving them against the direct base's full path (no-op for
+        // same-crate / already-concrete chains). This also re-exports them concrete (the chain feeds
+        // `anc_export`), so a further extender inherits resolvable ancestor paths too.
+        let cross_crate = base_host_crate(b).is_some();
         for a in &st.base_ancestors {
-            let path = match &host {
-                Some(h) => requalify_ancestor(&a.path, h),
-                None => a.path.clone(),
+            let path = if cross_crate {
+                requalify_ancestor(&a.path, b)
+            } else {
+                a.path.clone()
             };
             chain.push(AncIn {
                 path,
