@@ -618,27 +618,61 @@ fn conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<
     }
 }
 
+// ── nonce-stamped internal names ────────────────────────────────────────────────────────────────
+//
+// Every generated, otherwise-private item carries a per-`#[recurse]`-expansion `nonce` so its name
+// cannot collide with the user's own items — a user type literally named `ExprTerm` no longer clashes
+// with the generated terminator (cf. `ui/audit_recurse_terminator_collision.rs`). The nonce is constant
+// across one expansion, so every site that re-derives a name (in `build_scc`, `gen_natural_extras`,
+// `build_multiroot_tail`, `from_conv_expr`) agrees on it.
+
+/// Engine (depth-limited) node type for a cycle type: `__<name>Rec_<nonce>`.
+fn engine_name(name: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__{name}Rec_{nonce}"), Span::call_site())
+}
+/// Per-root terminator type: `__<root>Term_<nonce>` (now `__`-prefixed + nonced, so it can't collide).
+fn term_name(root: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__{root}Term_{nonce}"), Span::call_site())
+}
+/// Per-root depth-default chain alias: `__<root>Default_<nonce>`.
+fn default_name(root: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__{root}Default_{nonce}"), Span::call_site())
+}
+/// Engine→natural conversion trait for a cycle type: `__ToNat_<name>_<nonce>`.
+fn to_nat_name(name: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__ToNat_{name}_{nonce}"), Span::call_site())
+}
+/// Natural→engine conversion trait for a cycle type: `__FromNat_<name>_<nonce>`.
+fn from_nat_name(name: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__FromNat_{name}_{nonce}"), Span::call_site())
+}
+
 /// The reverse of `conv_expr`: build an *engine* field value from a borrowed *natural* field value
 /// `val` (a `&NatTy` expression). `None` for a leaf (caller `Clone`s it). A recursive child dispatches
 /// on its head's natural type via that type's `__FromNat_<Head>::__from_nat` (Self — the engine field
 /// type — is inferred from the surrounding engine constructor). Containers/tuples are lowered by ref.
-fn from_conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) -> Option<TokenStream> {
+fn from_conv_expr(
+    ty: &Type,
+    val: TokenStream,
+    child_heads: &HashSet<String>,
+    nonce: u64,
+) -> Option<TokenStream> {
     match ty {
         Type::Path(TypePath { qself: None, path }) => {
             let seg = path.segments.last()?;
             let name = seg.ident.to_string();
             if path.segments.len() == 1 && child_heads.contains(&name) {
-                let tn = Ident::new(&format!("__FromNat_{name}"), Span::call_site());
+                let tn = from_nat_name(&name, nonce);
                 return Some(quote!( #tn::__from_nat(#val) ));
             }
             match name.as_str() {
-                "Box" => from_conv_expr(first_ty_arg(seg)?, quote!((&**#val)), child_heads)
+                "Box" => from_conv_expr(first_ty_arg(seg)?, quote!((&**#val)), child_heads, nonce)
                     .map(|c| quote!( ::std::boxed::Box::new(#c) )),
                 "Vec" | "VecDeque" | "Punctuated" => {
-                    from_conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads)
+                    from_conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads, nonce)
                         .map(|c| quote!( #val.iter().map(|__e| #c).collect() ))
                 }
-                "Option" => from_conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads)
+                "Option" => from_conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads, nonce)
                     .map(|c| quote!( #val.as_ref().map(|__e| #c) )),
                 _ => None,
             }
@@ -651,7 +685,7 @@ fn from_conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) ->
                 .elems
                 .iter()
                 .zip(&binds)
-                .any(|(e, b)| from_conv_expr(e, quote!(#b), child_heads).is_some());
+                .any(|(e, b)| from_conv_expr(e, quote!(#b), child_heads, nonce).is_some());
             if !any {
                 return None;
             }
@@ -660,7 +694,7 @@ fn from_conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) ->
                 .iter()
                 .zip(&binds)
                 .map(|(e, b)| {
-                    from_conv_expr(e, quote!(#b), child_heads)
+                    from_conv_expr(e, quote!(#b), child_heads, nonce)
                         .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#b) ))
                 })
                 .collect();
@@ -673,7 +707,13 @@ fn from_conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) ->
 /// The `match __nat { … }` body that builds an engine value (`eng_id`, e.g. `__XRec`) from a borrowed
 /// natural value (`nat_id`). Recursive children convert via `from_conv_expr`; a leaf field is cloned
 /// (`Clone::clone(&field)` — the binding is a reference, so this clones the value, not the reference).
-fn from_conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<String>) -> TokenStream {
+fn from_conv_body(
+    item: &Item,
+    nat_id: &Ident,
+    eng_id: &Ident,
+    child_heads: &HashSet<String>,
+    nonce: u64,
+) -> TokenStream {
     let arm_fields = |fields: &Fields| -> (TokenStream, TokenStream) {
         match fields {
             Fields::Named(FieldsNamed { named, .. }) => {
@@ -682,7 +722,7 @@ fn from_conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &Has
                     .iter()
                     .map(|f| {
                         let n = f.ident.as_ref().unwrap();
-                        let v = from_conv_expr(&f.ty, quote!(#n), child_heads)
+                        let v = from_conv_expr(&f.ty, quote!(#n), child_heads, nonce)
                             .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#n) ));
                         quote!( #n: #v )
                     })
@@ -697,7 +737,7 @@ fn from_conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &Has
                     .iter()
                     .zip(&binds)
                     .map(|(f, b)| {
-                        from_conv_expr(&f.ty, quote!(#b), child_heads)
+                        from_conv_expr(&f.ty, quote!(#b), child_heads, nonce)
                             .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#b) ))
                     })
                     .collect();
@@ -731,12 +771,13 @@ fn from_conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &Has
 }
 
 /// The (whole) types of a cycle type's *leaf* fields — those `from_conv_expr` doesn't convert. Each must
-/// be `Clone` for the natural→engine `from_nat` (which clones leaves into the engine).
-fn leaf_field_types(item: &Item, child_heads: &HashSet<String>) -> Vec<Type> {
+/// be `Clone` for the natural→engine `from_nat` (which clones leaves into the engine). (The `nonce` only
+/// satisfies `from_conv_expr`'s signature — leaf-or-not doesn't depend on it.)
+fn leaf_field_types(item: &Item, child_heads: &HashSet<String>, nonce: u64) -> Vec<Type> {
     let mut out = Vec::new();
     let mut push = |fields: &Fields| {
         for f in fields.iter() {
-            if from_conv_expr(&f.ty, quote!(__x), child_heads).is_none() {
+            if from_conv_expr(&f.ty, quote!(__x), child_heads, nonce).is_none() {
                 out.push(f.ty.clone());
             }
         }
@@ -770,6 +811,7 @@ fn gen_natural_extras(
     parse_types: &HashSet<String>,
     unparse_types: &HashSet<String>,
     spanned_types: &HashSet<String>,
+    nonce: u64,
 ) -> TokenStream {
     let child_heads: HashSet<String> = scc.clone();
     // `root_decl`/`xdecl` (below) keep param BOUNDS (for naming a bounded cycle type like `Expr<S: Span>`
@@ -777,8 +819,8 @@ fn gen_natural_extras(
     let root_decl = param_decls(root_generics);
     let root_use = generic_tokens(root_generics).1;
     let rec_params: Vec<&Ident> = roots_sorted.iter().map(|r| &rec_for_root[r]).collect();
-    let trait_name = |x: &str| Ident::new(&format!("__ToNat_{x}"), Span::call_site());
-    let from_trait_name = |x: &str| Ident::new(&format!("__FromNat_{x}"), Span::call_site());
+    let trait_name = |x: &str| to_nat_name(x, nonce);
+    let from_trait_name = |x: &str| from_nat_name(x, nonce);
     // Whether THIS SCC delegates `Unparse`/`Spanned` natural→engine (a multi-type or group-ful cycle
     // whose `Unparse`/`Spanned` derive(s) were routed to the engine). When so, emit the `__FromNat`
     // bridge + the delegated impls. (A single self-recursive group-free cycle keeps them on the natural
@@ -819,7 +861,7 @@ fn gen_natural_extras(
                 Item::Struct(s) => scc.contains(&s.ident.to_string()),
                 _ => false,
             })
-            .flat_map(|it| leaf_field_types(it, &child_heads))
+            .flat_map(|it| leaf_field_types(it, &child_heads, nonce))
             .filter(|t| seen.insert(quote!(#t).to_string()))
             .map(|t| quote!( #t: ::core::clone::Clone ))
             .collect()
@@ -918,7 +960,7 @@ fn gen_natural_extras(
         // own impl.
         if needs_from_nat {
             let ftn = from_trait_name(&xs);
-            let from_body = from_conv_body(item, id, engine, &child_heads);
+            let from_body = from_conv_body(item, id, engine, &child_heads, nonce);
             out.extend(quote! {
                 #[doc(hidden)]
                 trait #ftn<#(#xdecl),*>
@@ -984,7 +1026,7 @@ fn gen_natural_extras(
     // Terminator → natural: never reached at runtime (the terminator's `Parse` always errors).
     for r in roots_sorted {
         let tn = trait_name(r);
-        let term = Ident::new(&format!("{r}Term"), Span::call_site());
+        let term = term_name(r, nonce);
         let root_id = Ident::new(r, Span::call_site());
         let term_args: TokenStream = if root_decl.is_empty() {
             quote!()
@@ -1061,6 +1103,7 @@ fn build_scc(
     parse_types: &HashSet<String>,
     unparse_types: &HashSet<String>,
     spanned_types: &HashSet<String>,
+    nonce: u64,
 ) -> (TransformCtx, TokenStream) {
     // Root types: this cycle's types that directly reference themselves.
     let root_types: HashSet<String> = scc
@@ -1119,18 +1162,13 @@ fn build_scc(
         candidates[0].clone()
     };
 
-    let term_ident = Ident::new(&format!("{root_name}Term"), Span::call_site());
-    let default_alias = Ident::new(&format!("__{root_name}Default"), Span::call_site());
+    let term_ident = term_name(&root_name, nonce);
+    let default_alias = default_name(&root_name, nonce);
 
-    // Internal (renamed) idents: "Expr" → "__ExprRec"
+    // Internal (renamed) idents: "Expr" → "__ExprRec_<nonce>"
     let internal_names: HashMap<String, Ident> = scc
         .iter()
-        .map(|n| {
-            (
-                n.clone(),
-                Ident::new(&format!("__{n}Rec"), Span::call_site()),
-            )
-        })
+        .map(|n| (n.clone(), engine_name(n, nonce)))
         .collect();
 
     // The root's full generics drive the depth aliases. (The root is always one of the cycle types,
@@ -1280,12 +1318,7 @@ fn build_scc(
         .collect();
     let default_for_root: HashMap<String, Ident> = roots_sorted
         .iter()
-        .map(|r| {
-            (
-                r.clone(),
-                Ident::new(&format!("__{r}Default"), Span::call_site()),
-            )
-        })
+        .map(|r| (r.clone(), default_name(r, nonce)))
         .collect();
     let rec_params: Vec<Ident> = roots_sorted.iter().map(|r| rec_for_root[r].clone()).collect();
     let rec_decls: Vec<TokenStream> = roots_sorted
@@ -1379,6 +1412,7 @@ fn build_scc(
             recursion_depth,
             type_refs,
             mod_ident,
+            nonce,
         )
     };
 
@@ -1396,6 +1430,7 @@ fn build_scc(
         parse_types,
         unparse_types,
         spanned_types,
+        nonce,
     );
 
     (ctx, quote!( #tail #extras ))
@@ -1423,6 +1458,7 @@ fn build_multiroot_tail(
     recursion_depth: usize,
     type_refs: &HashMap<String, HashSet<String>>,
     mod_ident: &Ident,
+    nonce: u64,
 ) -> TokenStream {
     // The depth decrements only at a root (self-referential) back-edge, so every cycle in the SCC
     // must pass through a root. If the SCC with all roots removed is still cyclic, the generated
@@ -1462,7 +1498,7 @@ fn build_multiroot_tail(
 
     let term_for_root: HashMap<String, Ident> = roots_sorted
         .iter()
-        .map(|r| (r.clone(), Ident::new(&format!("{r}Term"), Span::call_site())))
+        .map(|r| (r.clone(), term_name(r, nonce)))
         .collect();
 
     let has_gen = !gen_decl.is_empty();
@@ -1731,7 +1767,7 @@ fn make_engine_item(item: &Item, ctx: &TransformCtx, engine_paths: &[Path]) -> I
     eng
 }
 
-pub fn recurse(attr: TokenStream1, input: TokenStream1, _nonce: u64) -> TokenStream1 {
+pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStream1 {
     let args: RecurseArgs = match syn::parse(attr) {
         Ok(a) => a,
         Err(e) => return e.to_compile_error().into(),
@@ -1949,6 +1985,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, _nonce: u64) -> TokenStr
                 &parse_types,
                 &unparse_types,
                 &spanned_types,
+                nonce,
             )
         })
         .collect();

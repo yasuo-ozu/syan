@@ -61,6 +61,7 @@ fn macro_audit_compile_fail() {
     //  recurse_fixes.rs.)
     // (A where-clause on a Parse-deriving cycle type is now THREADED through the generated engine /
     //  conversion / delegated impls — positive regression test in `recurse_where_clause.rs`.)
-    // Generated terminator `XxxTerm` collides with a user type of that name → E0428.
-    t.compile_fail("tests/ui/audit_recurse_terminator_collision.rs");
+    // (Generated internal names — engine `__XxxRec`, terminator `XxxTerm`, depth default `__XxxDefault`,
+    //  conversion traits `__ToNat`/`__FromNat` — now carry a per-expansion nonce, so a user type named
+    //  `ExprTerm` no longer collides; positive regression test in `recurse_no_engine.rs`.)
 }

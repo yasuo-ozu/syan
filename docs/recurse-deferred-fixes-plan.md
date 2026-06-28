@@ -8,7 +8,12 @@ Status quo recap (what's already shipped):
 - `Unparse`/`Spanned` reach the natural type for **group-free** cycles: directly via `#[ignore_bounds]`
   (single self-recursive) or via the `__FromNat_*` engine delegation (multi-type, depth-limited).
 - `param_decls` already threads *param bounds* (`S: Span`) into the conversion/delegation impls.
+- A cycle type's full `where`-clause is threaded onto the generated impls (`where_preds_of`) — **#2 DONE**.
+- All generated type/trait names are nonce-stamped, so a user `ExprTerm`/`__XxxRec`/… can't collide
+  (the old `audit_recurse_terminator_collision` limitation is gone).
 - Finite-size guard; engine emitted only when needed (`scc_needs_engine`).
+
+**Remaining: only #1 below** (group-ful natural `Unparse`/`Spanned`).
 
 ---
 

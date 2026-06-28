@@ -57,9 +57,9 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   always **routed to the engine**; `Unparse`/`Spanned` stay on the natural type (with `#[ignore_bounds]`
   injected on recursive-child fields) **only for a single self-recursive group-free cycle**, else they
   too are engine-routed (`make_natural_item`, gated by `scc_us_natural`); (2) a `pub(crate)` depth-
-  limited engine `__XxxRec<…, __Rec = __XxxDefault<…>>` family + terminators `XxxTerm` + `__XxxDefault`
-  depth chains, deriving the engine-routed traits, emitted **only when needed** (`scc_needs_engine` — an
-  Ast-only cycle gets none) (`make_engine_item`); (3) per-cycle
+  limited engine `__XxxRec<…, __Rec = __XxxDefault<…>>` family + terminators `__XxxTerm` + `__XxxDefault`
+  depth chains (all **nonce-stamped** — §"name hygiene"), deriving the engine-routed traits, emitted
+  **only when needed** (`scc_needs_engine` — an Ast-only cycle gets none) (`make_engine_item`); (3) per-cycle
   `__ToNat_X` conversion traits/impls (engine→natural, depth-generic, terminator arm `unreachable!`) +
   a **delegated `impl Parse for X`** that parses the engine then `.__to_nat()`s (`gen_natural_extras`,
   `conv_body`/`conv_expr`). The public `pub type X = …` aliases are **gone** (the natural enum owns the
@@ -119,9 +119,12 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   natural type is `Parse` but not directly `Unparse`/`Spanned`. A cycle type's **`where`-clause** is
   threaded through the generated engine/conversion/delegated impls (`where_preds_of` in
   `gen_natural_extras`) — a param bound (`where S: Clone`) or a self-referential bound (`where Expr<S>:
-  Marker`) both work (`recurse_where_clause.rs`). Engine-free (Ast-only) cycles avoid the engine-scoped
-  guards — a user `ExprTerm` type is then fine (`recurse_no_engine.rs`), whereas a Parse-deriving cycle
-  still rejects a `XxxTerm` collision (`ui/audit_recurse_terminator_collision.rs`).
+  Marker`) both work (`recurse_where_clause.rs`). All generated internal **type/trait names** — engine
+  `__XxxRec`, terminator `__XxxTerm`, depth default `__XxxDefault`, conversion traits
+  `__ToNat`/`__FromNat` — carry a **per-expansion nonce** (`engine_name`/`term_name`/`default_name`/
+  `to_nat_name`/`from_nat_name`), so a user item named e.g. `ExprTerm` never collides
+  (`recurse_no_engine.rs`). (The depth *params* `__Rec` stay un-nonced — they're local type-param names
+  that never escape to user scope.)
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names (the alias is one keyword — won't fix).
