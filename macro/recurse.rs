@@ -539,28 +539,24 @@ impl ConvDir {
             }
         }
     }
-    /// Access a `Box` field `val`'s element (by value for `ToNat`, by reference for `FromNat`).
     fn box_elem(self, val: &TokenStream) -> TokenStream {
         match self {
             ConvDir::ToNat => quote!( (*#val) ),
             ConvDir::FromNat { .. } => quote!( (&**#val) ),
         }
     }
-    /// Map a `Vec`/`VecDeque`/`Punctuated` field `val` element-wise through `body` (consume vs borrow).
     fn map_seq(self, val: &TokenStream, body: &TokenStream) -> TokenStream {
         match self {
             ConvDir::ToNat => quote!( #val.into_iter().map(|__e| #body).collect() ),
             ConvDir::FromNat { .. } => quote!( #val.iter().map(|__e| #body).collect() ),
         }
     }
-    /// Map an `Option` field `val` through `body`.
     fn map_opt(self, val: &TokenStream, body: &TokenStream) -> TokenStream {
         match self {
             ConvDir::ToNat => quote!( #val.map(|__e| #body) ),
             ConvDir::FromNat { .. } => quote!( #val.as_ref().map(|__e| #body) ),
         }
     }
-    /// How a leaf field bound to `b` is carried across (moved for `ToNat`, `Clone`d for `FromNat`).
     fn leaf(self, b: &TokenStream) -> TokenStream {
         match self {
             ConvDir::ToNat => quote!( #b ),
@@ -699,7 +695,7 @@ fn conv_body(
 fn engine_name(name: &str, nonce: u64) -> Ident {
     Ident::new(&format!("__{name}Rec_{nonce}"), Span::call_site())
 }
-/// Per-root terminator type: `__<root>Term_<nonce>` (now `__`-prefixed + nonced, so it can't collide).
+/// Per-root terminator type: `__<root>Term_<nonce>`.
 fn term_name(root: &str, nonce: u64) -> Ident {
     Ident::new(&format!("__{root}Term_{nonce}"), Span::call_site())
 }

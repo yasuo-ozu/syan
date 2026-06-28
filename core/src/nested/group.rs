@@ -10,12 +10,10 @@ pub struct Group<T, O, C> {
     pub close: C,
 }
 
-// `Unparse` to a `proc_macro2::TokenTree` atom: a delimited group is a *single* `TokenTree::Group`
-// carrying its slot's tokens, NOT three separate tokens — and the delimiter symbols (`{`/`}` etc.) don't
-// `Unparse` to `TokenTree` on their own (they aren't standalone tokens). So `Group` is hand-written per
-// real delimiter rather than `#[derive(Unparse)]`d: the slot is unparsed into a sub-stream which is
-// wrapped in the matching `Delimiter`. (`#[derive(Unparse)]` is dropped from `Group`; only these
-// delimiter+`TokenTree` impls exist. `GroupAngle` has no proc-macro delimiter and so no impl.)
+// `Unparse` to a `TokenTree`: a delimited group is a *single* `TokenTree::Group` (the delimiters aren't
+// standalone tokens), so `Group` is hand-written per real delimiter rather than `#[derive(Unparse)]`d —
+// the slot is unparsed into a sub-stream wrapped in the matching `Delimiter`. (`GroupAngle` has no
+// proc-macro delimiter, hence no impl.)
 macro_rules! impl_group_unparse_tt {
     ($open:ident, $close:ident, $delim:ident) => {
         impl<T, S> Unparse<proc_macro2::TokenTree>
