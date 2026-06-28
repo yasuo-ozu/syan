@@ -19,6 +19,16 @@ Status quo recap (what's already shipped):
 
 ## #1 — Group-ful cycle `Unparse`/`Spanned` on the natural type
 
+> **PROBE RESULT (step 1, done): it's the DEEP fix, not the quick win.** Temporarily dropping the
+> `!scc_has_group` exclusion (so a group-ful cycle gets the full `__FromNat` delegation + `impl Unparse
+> for Expr where engine_default: Unparse`) still fails to compile: `__ExprRec<S, __ExprDefault<S>>:
+> Unparse` is **not provable**. The engine's derived group `Unparse` carries a `for<'a>
+> <GroupBrace<(),S> as EmptyGroup>::Fill<Substruct<'a,S,__Rec>>: Unparse<Atom>` HRTB bound; its
+> transitive obligations can't be discharged from — or even *named* in — the delegated impl, because the
+> `Substruct` is a derive-internal (nonce-named) type. So step 2 (quick wiring) is ruled out; only the
+> step-3 derive-level rework can lift this. **Stays deferred.** (Group-ful cycles remain `Parse`-only on
+> the natural type; `Unparse`/`Spanned` live on the `pub(crate)` engine.)
+
 **Today.** A cycle with a `#[group(self.brace)]` field keeps `Unparse`/`Spanned` on the `pub(crate)`
 engine only (`scc_us_natural` and the delegation sets exclude group-ful via `!scc_has_group`). So a
 natural `Expr<S>` with a group field is `Parse` but not directly `Unparse`/`Spanned`.
