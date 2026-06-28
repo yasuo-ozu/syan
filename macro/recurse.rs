@@ -772,23 +772,27 @@ struct DelegSpec {
     method: TokenStream,
 }
 
+/// The per-cycle-type context a delegated impl is built against — the natural type, its generics
+/// (`xdecl` bound-preserving / `xuse` bare), the engine instantiated at the public depth defaults, the
+/// two conversion-trait idents, the cycle's span type param (only `Spanned` needs it), and the cycle
+/// type's own `where`-clause. Built once per type in `gen_natural_extras` and shared by the (up to three)
+/// `emit_delegated_impl` calls.
+struct DelegTarget<'a> {
+    id: &'a Ident,
+    xdecl: &'a [TokenStream],
+    xuse: &'a [TokenStream],
+    engine_default: &'a TokenStream,
+    to_nat: &'a Ident,
+    from_nat: &'a Ident,
+    span_param: Option<&'a Ident>,
+    where_preds: &'a [TokenStream],
+}
+
 /// Emit the delegating `impl <Trait> for <natural type>` for one cycle type — the unified algorithm for
 /// all three of `Parse`/`Unparse`/`Spanned`. The engine supplies the *direct* (derived) impl; this is its
-/// *delegating* counterpart. `engine_default` is the engine instantiated at the public depth defaults;
-/// `to_nat`/`from_nat` are this type's conversion-trait idents; `span_param` is the cycle's span type
-/// param (required only by `Spanned`); `where_preds` is the cycle type's own `where`-clause.
-#[allow(clippy::too_many_arguments)]
-fn emit_delegated_impl(
-    t: RecTrait,
-    id: &Ident,
-    xdecl: &[TokenStream],
-    xuse: &[TokenStream],
-    engine_default: &TokenStream,
-    to_nat: &Ident,
-    from_nat: &Ident,
-    span_param: Option<&Ident>,
-    where_preds: &[TokenStream],
-) -> TokenStream {
+/// *delegating* counterpart.
+fn emit_delegated_impl(t: RecTrait, tg: &DelegTarget) -> TokenStream {
+    let DelegTarget { id, xdecl, xuse, engine_default, to_nat, from_nat, span_param, where_preds } = *tg;
     // The conversion-trait bound the delegation goes through: `__ToNat` (engine→natural, for `Parse`) or
     // `__FromNat` (natural→engine, for `Unparse`/`Spanned`).
     let conv_bound = match t {
@@ -862,6 +866,26 @@ fn emit_delegated_impl(
     }
 }
 
+/// Which cycle types delegate which trait through the engine, computed once per `#[recurse]` expansion. A
+/// type name is in `parse`/`unparse`/`spanned` iff it `#[derive]`s that trait; `gen_natural_extras` emits
+/// the matching delegated impl (+ `__FromNat` bridge for `unparse`/`spanned`) for it.
+struct DelegSets {
+    parse: HashSet<String>,
+    unparse: HashSet<String>,
+    spanned: HashSet<String>,
+}
+
+/// The per-SCC engine/root data `build_scc` computes and hands to `gen_natural_extras`: the renamed
+/// engine idents (`X` → `__XRec`), the sorted roots with their depth params / default aliases, and the
+/// roots' shared generics.
+struct RootData<'a> {
+    internal_names: &'a HashMap<String, Ident>,
+    roots_sorted: &'a [String],
+    rec_for_root: &'a HashMap<String, Ident>,
+    default_for_root: &'a HashMap<String, Ident>,
+    root_generics: &'a Generics,
+}
+
 /// For an SCC whose natural types own the public names, emit the engine→natural bridge: one
 /// `__ToNat_X` trait + impl per cycle type, a terminator `__to_nat` (`unreachable!`) per root, and the
 /// delegated `impl Parse for X` (parse the depth-limited engine, then `.__to_nat()`). `Unparse`/`Spanned`
@@ -871,20 +895,14 @@ fn emit_delegated_impl(
 /// are emitted by the single `emit_delegated_impl` algorithm. Replaces the old `@recurse` metadata +
 /// public aliases. `default_for_root` maps each root to its `__<root>Default` depth alias; `rec_for_root`
 /// to its depth param; `root_generics` are the roots' (shared) params.
-#[allow(clippy::too_many_arguments)]
 fn gen_natural_extras(
     scc: &HashSet<String>,
     items: &[Item],
-    internal_names: &HashMap<String, Ident>,
-    roots_sorted: &[String],
-    rec_for_root: &HashMap<String, Ident>,
-    default_for_root: &HashMap<String, Ident>,
-    root_generics: &Generics,
-    parse_types: &HashSet<String>,
-    unparse_types: &HashSet<String>,
-    spanned_types: &HashSet<String>,
+    rd: &RootData,
+    deleg: &DelegSets,
     nonce: u64,
 ) -> TokenStream {
+    let RootData { internal_names, roots_sorted, rec_for_root, default_for_root, root_generics } = *rd;
     let child_heads: HashSet<String> = scc.clone();
     // `root_decl`/`xdecl` (below) keep param BOUNDS (for naming a bounded cycle type like `Expr<S: Span>`
     // in the conversion/delegation impls); `*_use` are the bound-free argument forms.
@@ -893,12 +911,10 @@ fn gen_natural_extras(
     let rec_params: Vec<&Ident> = roots_sorted.iter().map(|r| &rec_for_root[r]).collect();
     let trait_name = |x: &str| to_nat_name(x, nonce);
     let from_trait_name = |x: &str| from_nat_name(x, nonce);
-    // Whether THIS SCC delegates `Unparse`/`Spanned` natural→engine (a multi-type or group-ful cycle
-    // whose `Unparse`/`Spanned` derive(s) were routed to the engine). When so, emit the `__FromNat`
-    // bridge + the delegated impls. (A single self-recursive group-free cycle keeps them on the natural
-    // type directly, so `unparse_types`/`spanned_types` exclude it and this is empty.)
-    let delegate_unparse: Vec<&String> = scc.iter().filter(|n| unparse_types.contains(*n)).collect();
-    let delegate_spanned: Vec<&String> = scc.iter().filter(|n| spanned_types.contains(*n)).collect();
+    // Whether THIS SCC delegates `Unparse`/`Spanned` natural→engine. When so, emit the `__FromNat` bridge
+    // + the delegated impls (a cycle deriving neither has no `__FromNat`).
+    let delegate_unparse: Vec<&String> = scc.iter().filter(|n| deleg.unparse.contains(*n)).collect();
+    let delegate_spanned: Vec<&String> = scc.iter().filter(|n| deleg.spanned.contains(*n)).collect();
     let needs_from_nat = !delegate_unparse.is_empty() || !delegate_spanned.is_empty();
     // `R: __FromNat_<root>` per root — the natural→engine bridge's analogue of `root_bounds`.
     let from_root_bounds: Vec<TokenStream> = roots_sorted
@@ -1009,13 +1025,22 @@ fn gen_natural_extras(
             GenericParam::Type(t) => Some(&t.ident),
             _ => None,
         });
+        // The shared context for this type's (up to three) delegated impls.
+        let target = DelegTarget {
+            id,
+            xdecl: &xdecl,
+            xuse: &xuse,
+            engine_default: &engine_default,
+            to_nat: &tn,
+            from_nat: &ftn,
+            span_param,
+            where_preds: &where_preds,
+        };
         // Delegated `Parse` on the natural type — only when the user derived `Parse` (else the engine
         // has no `Parse` impl to delegate to). Emitted by the unified algorithm (engine→natural via
         // `__ToNat`).
-        if parse_types.contains(&xs) {
-            out.extend(emit_delegated_impl(
-                RecTrait::Parse, id, &xdecl, &xuse, &engine_default, &tn, &ftn, span_param, &where_preds,
-            ));
+        if deleg.parse.contains(&xs) {
+            out.extend(emit_delegated_impl(RecTrait::Parse, &target));
         }
 
         // Natural→engine bridge (`__FromNat_X`) for a delegated `Unparse`/`Spanned` cycle, plus the
@@ -1044,17 +1069,11 @@ fn gen_natural_extras(
                     fn __from_nat(__nat: &#id<#(#xuse),*>) -> Self { #from_body }
                 }
             });
-            if unparse_types.contains(&xs) {
-                out.extend(emit_delegated_impl(
-                    RecTrait::Unparse, id, &xdecl, &xuse, &engine_default, &tn, &ftn, span_param,
-                    &where_preds,
-                ));
+            if deleg.unparse.contains(&xs) {
+                out.extend(emit_delegated_impl(RecTrait::Unparse, &target));
             }
-            if spanned_types.contains(&xs) && span_param.is_some() {
-                out.extend(emit_delegated_impl(
-                    RecTrait::Spanned, id, &xdecl, &xuse, &engine_default, &tn, &ftn, span_param,
-                    &where_preds,
-                ));
+            if deleg.spanned.contains(&xs) && span_param.is_some() {
+                out.extend(emit_delegated_impl(RecTrait::Spanned, &target));
             }
         }
     }
@@ -1136,9 +1155,7 @@ fn build_scc(
     direct_type_refs: &HashMap<String, HashSet<String>>,
     recursion_depth: usize,
     mod_ident: &Ident,
-    parse_types: &HashSet<String>,
-    unparse_types: &HashSet<String>,
-    spanned_types: &HashSet<String>,
+    deleg: &DelegSets,
     nonce: u64,
 ) -> (TransformCtx, TokenStream) {
     // Root types: this cycle's types that directly reference themselves.
@@ -1458,14 +1475,14 @@ fn build_scc(
     let extras = gen_natural_extras(
         scc,
         items,
-        &internal_names,
-        &roots_sorted,
-        &rec_for_root,
-        &default_for_root,
-        &root_generics,
-        parse_types,
-        unparse_types,
-        spanned_types,
+        &RootData {
+            internal_names: &internal_names,
+            roots_sorted: &roots_sorted,
+            rec_for_root: &rec_for_root,
+            default_for_root: &default_for_root,
+            root_generics: &root_generics,
+        },
+        deleg,
         nonce,
     );
 
@@ -1935,8 +1952,11 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
             })
             .collect()
     };
-    let unparse_types = delegated_trait("Unparse");
-    let spanned_types = delegated_trait("Spanned");
+    let deleg = DelegSets {
+        parse: parse_types,
+        unparse: delegated_trait("Unparse"),
+        spanned: delegated_trait("Spanned"),
+    };
 
     // Per SCC: the transform `ctx` + the engine/conversion/delegated-`Parse`/`Unparse`/`Spanned` tail.
     let plans: Vec<(TransformCtx, TokenStream)> = sccs
@@ -1949,9 +1969,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
                 &direct_type_refs,
                 recursion_depth,
                 mod_ident,
-                &parse_types,
-                &unparse_types,
-                &spanned_types,
+                &deleg,
                 nonce,
             )
         })
