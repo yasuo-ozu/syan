@@ -111,36 +111,21 @@ fn strip_derive_helper_attrs(substruct: &ItemStruct) -> ItemStruct {
     substruct
 }
 
-fn add_type_param_predicates(
+/// For each **unbounded** type param of `generics`, add `T: Spanned<Span = #tp_span>` to
+/// `where_predicates` — the `Spanned` derive's per-param bound (pinning every param's span to the impl's
+/// invented span type). A param that already carries bounds is left to the user. Only the `Spanned`
+/// derive needs this (the `Parse`/`Unparse` derives synthesize their per-field bounds directly).
+fn add_spanned_param_predicates(
     where_predicates: &mut Punctuated<WherePredicate, Token![,]>,
     generics: &Generics,
     syan: &Path,
-    tp_atom: &Ident,
-    for_parse: bool,
-    for_unparse: bool,
-    for_spanned: bool,
-    tp_span: Option<&Ident>,
+    tp_span: &Ident,
 ) {
     for param in &generics.params {
         if let GenericParam::Type(type_param) = param {
-            // Check if the type parameter has any bounds
             if type_param.bounds.is_empty() {
                 let ty = &type_param.ident;
-                if for_parse {
-                    where_predicates.push(parse_quote!(#ty: #syan::parse::parse::Parse<#tp_atom>));
-                }
-                if for_unparse {
-                    where_predicates
-                        .push(parse_quote!(#ty: #syan::parse::unparse::Unparse<#tp_atom>));
-                }
-                if for_spanned {
-                    if let Some(span) = tp_span {
-                        where_predicates
-                            .push(parse_quote!(#ty: #syan::span::Spanned<Span = #span>));
-                    } else {
-                        where_predicates.push(parse_quote!(#ty: #syan::span::Spanned));
-                    }
-                }
+                where_predicates.push(parse_quote!(#ty: #syan::span::Spanned<Span = #tp_span>));
             }
         }
     }
@@ -668,17 +653,8 @@ pub(crate) trait Adt {
 
         let tp_span: Ident = parse_quote!(__Syan_Span);
 
-        // Add where predicates for unbounded type parameters
-        add_type_param_predicates(
-            &mut where_predicates,
-            generics,
-            syan,
-            &tp_span,
-            false,
-            false,
-            true,
-            Some(&tp_span),
-        );
+        // Add `T: Spanned<Span = __Syan_Span>` for each unbounded type parameter.
+        add_spanned_param_predicates(&mut where_predicates, generics, syan, &tp_span);
         generic_params.push(parse_quote!(#tp_span: #syan::span::Span));
         proc_macro_error::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
@@ -716,7 +692,7 @@ pub(crate) trait Adt {
                 // here pins the invented span param (fixes E0207 "unconstrained") and makes the
                 // `Span::migrate(acc, Spanned::span(field))` fold type-check (fixes E0308) for
                 // composite / bounded field types like `WithSpan<_, S>`. (For a bare unbounded type
-                // param, add_type_param_predicates already adds the matching bound — harmless dup.)
+                // param, add_spanned_param_predicates already adds the matching bound — harmless dup.)
                 let field_ty = &field.ty;
                 where_predicates.push(parse_quote!(#field_ty: #syan::span::Spanned<Span = #tp_span>));
             }

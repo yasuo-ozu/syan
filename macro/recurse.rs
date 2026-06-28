@@ -513,12 +513,68 @@ fn subgraph_is_cyclic(
 // child* iff its container-peeled head ∈ the SCC (`child_heads`); the conversion descends children via
 // `.__to_nat()` (resolved by receiver type) and moves leaves as-is.
 
-/// Build the conversion *expression* for one engine field value `val` of (original) type `ty`: `None`
-/// for a leaf (caller uses `val` unchanged), else the converted natural value. `child_heads` is the set
-/// of SCC type names; a peeled head in it is a recursive child (`val.__to_nat()`). Containers
+/// Direction of a natural↔engine field/variant conversion. The tree-walk (`conv_expr`/`conv_body`) is
+/// identical either way; only the recursive-child call, the by-value-vs-by-reference container access,
+/// and the leaf handling differ — captured here so one pair of functions serves both bridges (mirroring
+/// `emit_delegated_impl`'s one-algorithm treatment of the traits that use them).
+#[derive(Clone, Copy)]
+enum ConvDir {
+    /// engine → natural, **by value**: a recursive child is `val.__to_nat()`; containers move
+    /// (`into_iter`/`*box`/`Option::map`); a leaf is used unchanged. Backs `__ToNat` (delegated `Parse`).
+    ToNat,
+    /// natural → engine, **by reference**: a recursive child is `__FromNat_<head>::__from_nat(val)`;
+    /// containers borrow (`iter`/`&**box`/`Option::as_ref().map`); a leaf is `Clone`d. Backs `__FromNat`
+    /// (delegated `Unparse`/`Spanned`). Carries the `nonce` (the `__FromNat_<head>` trait name needs it).
+    FromNat { nonce: u64 },
+}
+
+impl ConvDir {
+    /// The recursive-child conversion of `val` whose peeled head ident is `head`.
+    fn child_call(self, head: &str, val: &TokenStream) -> TokenStream {
+        match self {
+            ConvDir::ToNat => quote!( #val.__to_nat() ),
+            ConvDir::FromNat { nonce } => {
+                let tn = from_nat_name(head, nonce);
+                quote!( #tn::__from_nat(#val) )
+            }
+        }
+    }
+    /// Access a `Box` field `val`'s element (by value for `ToNat`, by reference for `FromNat`).
+    fn box_elem(self, val: &TokenStream) -> TokenStream {
+        match self {
+            ConvDir::ToNat => quote!( (*#val) ),
+            ConvDir::FromNat { .. } => quote!( (&**#val) ),
+        }
+    }
+    /// Map a `Vec`/`VecDeque`/`Punctuated` field `val` element-wise through `body` (consume vs borrow).
+    fn map_seq(self, val: &TokenStream, body: &TokenStream) -> TokenStream {
+        match self {
+            ConvDir::ToNat => quote!( #val.into_iter().map(|__e| #body).collect() ),
+            ConvDir::FromNat { .. } => quote!( #val.iter().map(|__e| #body).collect() ),
+        }
+    }
+    /// Map an `Option` field `val` through `body`.
+    fn map_opt(self, val: &TokenStream, body: &TokenStream) -> TokenStream {
+        match self {
+            ConvDir::ToNat => quote!( #val.map(|__e| #body) ),
+            ConvDir::FromNat { .. } => quote!( #val.as_ref().map(|__e| #body) ),
+        }
+    }
+    /// How a leaf field bound to `b` is carried across (moved for `ToNat`, `Clone`d for `FromNat`).
+    fn leaf(self, b: &TokenStream) -> TokenStream {
+        match self {
+            ConvDir::ToNat => quote!( #b ),
+            ConvDir::FromNat { .. } => quote!( ::core::clone::Clone::clone(#b) ),
+        }
+    }
+}
+
+/// Build the conversion *expression* for one field value `val` of (original) type `ty` in direction
+/// `dir`: `None` for a leaf (the caller carries it with `dir.leaf`), else the converted value.
+/// `child_heads` is the set of SCC type names; a peeled head in it is a recursive child. Containers
 /// (`Box`/`Vec`/`VecDeque`/`Punctuated`/`Option`) and tuples are lowered recursively; anything else is a
-/// leaf.
-fn conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) -> Option<TokenStream> {
+/// leaf. Leaf-ness does not depend on `dir`.
+fn conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>, dir: ConvDir) -> Option<TokenStream> {
     match ty {
         Type::Path(TypePath { qself: None, path }) => {
             let seg = path.segments.last()?;
@@ -527,17 +583,15 @@ fn conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) -> Opti
             // foreign multi-segment path (`other::Stmt`) whose last segment merely collides with a cycle
             // name is a leaf. (Mirrors `transform_type`/`collect_refs` keying on the first segment.)
             if path.segments.len() == 1 && child_heads.contains(&name) {
-                return Some(quote!( #val.__to_nat() ));
+                return Some(dir.child_call(&name, &val));
             }
             match name.as_str() {
-                "Box" => conv_expr(first_ty_arg(seg)?, quote!((*#val)), child_heads)
+                "Box" => conv_expr(first_ty_arg(seg)?, dir.box_elem(&val), child_heads, dir)
                     .map(|c| quote!( ::std::boxed::Box::new(#c) )),
-                "Vec" | "VecDeque" | "Punctuated" => {
-                    conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads)
-                        .map(|c| quote!( #val.into_iter().map(|__e| #c).collect() ))
-                }
-                "Option" => conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads)
-                    .map(|c| quote!( #val.map(|__e| #c) )),
+                "Vec" | "VecDeque" | "Punctuated" => conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads, dir)
+                    .map(|c| dir.map_seq(&val, &c)),
+                "Option" => conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads, dir)
+                    .map(|c| dir.map_opt(&val, &c)),
                 _ => None,
             }
         }
@@ -545,27 +599,38 @@ fn conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) -> Opti
             let binds: Vec<Ident> = (0..t.elems.len())
                 .map(|i| Ident::new(&format!("__t{i}"), Span::call_site()))
                 .collect();
+            let mut any = false;
             let convs: Vec<TokenStream> = t
                 .elems
                 .iter()
                 .zip(&binds)
-                .map(|(e, b)| conv_expr(e, quote!(#b), child_heads).unwrap_or_else(|| quote!(#b)))
+                .map(|(e, b)| match conv_expr(e, quote!(#b), child_heads, dir) {
+                    Some(c) => {
+                        any = true;
+                        c
+                    }
+                    None => dir.leaf(&quote!(#b)),
+                })
                 .collect();
-            let any = t
-                .elems
-                .iter()
-                .zip(&binds)
-                .any(|(e, b)| conv_expr(e, quote!(#b), child_heads).is_some());
             any.then(|| quote!( { let (#(#binds,)*) = #val; (#(#convs,)*) } ))
         }
         _ => None,
     }
 }
 
-/// The `match self { … }` body that converts an engine value into the natural type `nat_id`, reusing
-/// the *original* item's variant/field names (engine and natural share them). `eng_id` is the engine
-/// ident (`__XRec`). Field-level conversion is `conv_expr`; a leaf field is moved unchanged.
-fn conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<String>) -> TokenStream {
+/// The conversion *body* (a `match`/`let` expression) that builds a `tgt_id` value from a `src_id` value
+/// bound to `scrutinee`, in direction `dir`. Engine and natural share variant/field names. Field-level
+/// conversion is `conv_expr`; a leaf field is carried by `dir.leaf`. For `ToNat`: `src=engine`,
+/// `tgt=natural`, `scrutinee=self`. For `FromNat`: `src=natural`, `tgt=engine`, `scrutinee=__nat` (a
+/// `&Natural`, so its bindings are references the leaf `Clone`s).
+fn conv_body(
+    item: &Item,
+    src_id: &Ident,
+    tgt_id: &Ident,
+    scrutinee: TokenStream,
+    child_heads: &HashSet<String>,
+    dir: ConvDir,
+) -> TokenStream {
     let arm_fields = |fields: &Fields| -> (TokenStream, TokenStream) {
         match fields {
             Fields::Named(FieldsNamed { named, .. }) => {
@@ -574,7 +639,8 @@ fn conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<
                     .iter()
                     .map(|f| {
                         let n = f.ident.as_ref().unwrap();
-                        let v = conv_expr(&f.ty, quote!(#n), child_heads).unwrap_or_else(|| quote!(#n));
+                        let v = conv_expr(&f.ty, quote!(#n), child_heads, dir)
+                            .unwrap_or_else(|| dir.leaf(&quote!(#n)));
                         quote!( #n: #v )
                     })
                     .collect();
@@ -587,7 +653,10 @@ fn conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<
                 let vals: Vec<TokenStream> = unnamed
                     .iter()
                     .zip(&binds)
-                    .map(|(f, b)| conv_expr(&f.ty, quote!(#b), child_heads).unwrap_or_else(|| quote!(#b)))
+                    .map(|(f, b)| {
+                        conv_expr(&f.ty, quote!(#b), child_heads, dir)
+                            .unwrap_or_else(|| dir.leaf(&quote!(#b)))
+                    })
                     .collect();
                 (quote!( ( #(#binds),* ) ), quote!( ( #(#vals),* ) ))
             }
@@ -602,16 +671,16 @@ fn conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<
                 .map(|v| {
                     let vn = &v.ident;
                     let (pat, ctor) = arm_fields(&v.fields);
-                    quote!( #eng_id::#vn #pat => #nat_id::#vn #ctor, )
+                    quote!( #src_id::#vn #pat => #tgt_id::#vn #ctor, )
                 })
                 .collect();
-            quote!( match self { #(#arms)* } )
+            quote!( match #scrutinee { #(#arms)* } )
         }
         Item::Struct(s) => {
             let (pat, ctor) = arm_fields(&s.fields);
             match &s.fields {
-                Fields::Unit => quote!( #nat_id ),
-                _ => quote!( { let #eng_id #pat = self; #nat_id #ctor } ),
+                Fields::Unit => quote!( #tgt_id ),
+                _ => quote!( { let #src_id #pat = #scrutinee; #tgt_id #ctor } ),
             }
         }
         _ => quote!(),
@@ -624,7 +693,7 @@ fn conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<
 // cannot collide with the user's own items — a user type literally named `ExprTerm` no longer clashes
 // with the generated terminator (cf. `ui/audit_recurse_terminator_collision.rs`). The nonce is constant
 // across one expansion, so every site that re-derives a name (in `build_scc`, `gen_natural_extras`,
-// `build_multiroot_tail`, `from_conv_expr`) agrees on it.
+// `build_multiroot_tail`, `ConvDir::FromNat`) agrees on it.
 
 /// Engine (depth-limited) node type for a cycle type: `__<name>Rec_<nonce>`.
 fn engine_name(name: &str, nonce: u64) -> Ident {
@@ -647,137 +716,14 @@ fn from_nat_name(name: &str, nonce: u64) -> Ident {
     Ident::new(&format!("__FromNat_{name}_{nonce}"), Span::call_site())
 }
 
-/// The reverse of `conv_expr`: build an *engine* field value from a borrowed *natural* field value
-/// `val` (a `&NatTy` expression). `None` for a leaf (caller `Clone`s it). A recursive child dispatches
-/// on its head's natural type via that type's `__FromNat_<Head>::__from_nat` (Self — the engine field
-/// type — is inferred from the surrounding engine constructor). Containers/tuples are lowered by ref.
-fn from_conv_expr(
-    ty: &Type,
-    val: TokenStream,
-    child_heads: &HashSet<String>,
-    nonce: u64,
-) -> Option<TokenStream> {
-    match ty {
-        Type::Path(TypePath { qself: None, path }) => {
-            let seg = path.segments.last()?;
-            let name = seg.ident.to_string();
-            if path.segments.len() == 1 && child_heads.contains(&name) {
-                let tn = from_nat_name(&name, nonce);
-                return Some(quote!( #tn::__from_nat(#val) ));
-            }
-            match name.as_str() {
-                "Box" => from_conv_expr(first_ty_arg(seg)?, quote!((&**#val)), child_heads, nonce)
-                    .map(|c| quote!( ::std::boxed::Box::new(#c) )),
-                "Vec" | "VecDeque" | "Punctuated" => {
-                    from_conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads, nonce)
-                        .map(|c| quote!( #val.iter().map(|__e| #c).collect() ))
-                }
-                "Option" => from_conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads, nonce)
-                    .map(|c| quote!( #val.as_ref().map(|__e| #c) )),
-                _ => None,
-            }
-        }
-        Type::Tuple(t) => {
-            let binds: Vec<Ident> = (0..t.elems.len())
-                .map(|i| Ident::new(&format!("__t{i}"), Span::call_site()))
-                .collect();
-            let any = t
-                .elems
-                .iter()
-                .zip(&binds)
-                .any(|(e, b)| from_conv_expr(e, quote!(#b), child_heads, nonce).is_some());
-            if !any {
-                return None;
-            }
-            let convs: Vec<TokenStream> = t
-                .elems
-                .iter()
-                .zip(&binds)
-                .map(|(e, b)| {
-                    from_conv_expr(e, quote!(#b), child_heads, nonce)
-                        .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#b) ))
-                })
-                .collect();
-            Some(quote!( { let (#(#binds,)*) = #val; (#(#convs,)*) } ))
-        }
-        _ => None,
-    }
-}
-
-/// The `match __nat { … }` body that builds an engine value (`eng_id`, e.g. `__XRec`) from a borrowed
-/// natural value (`nat_id`). Recursive children convert via `from_conv_expr`; a leaf field is cloned
-/// (`Clone::clone(&field)` — the binding is a reference, so this clones the value, not the reference).
-fn from_conv_body(
-    item: &Item,
-    nat_id: &Ident,
-    eng_id: &Ident,
-    child_heads: &HashSet<String>,
-    nonce: u64,
-) -> TokenStream {
-    let arm_fields = |fields: &Fields| -> (TokenStream, TokenStream) {
-        match fields {
-            Fields::Named(FieldsNamed { named, .. }) => {
-                let names: Vec<&Ident> = named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
-                let vals: Vec<TokenStream> = named
-                    .iter()
-                    .map(|f| {
-                        let n = f.ident.as_ref().unwrap();
-                        let v = from_conv_expr(&f.ty, quote!(#n), child_heads, nonce)
-                            .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#n) ));
-                        quote!( #n: #v )
-                    })
-                    .collect();
-                (quote!( { #(#names),* } ), quote!( { #(#vals),* } ))
-            }
-            Fields::Unnamed(FieldsUnnamed { unnamed, .. }) => {
-                let binds: Vec<Ident> = (0..unnamed.len())
-                    .map(|i| Ident::new(&format!("__f{i}"), Span::call_site()))
-                    .collect();
-                let vals: Vec<TokenStream> = unnamed
-                    .iter()
-                    .zip(&binds)
-                    .map(|(f, b)| {
-                        from_conv_expr(&f.ty, quote!(#b), child_heads, nonce)
-                            .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#b) ))
-                    })
-                    .collect();
-                (quote!( ( #(#binds),* ) ), quote!( ( #(#vals),* ) ))
-            }
-            Fields::Unit => (quote!(), quote!()),
-        }
-    };
-    match item {
-        Item::Enum(e) => {
-            let arms: Vec<TokenStream> = e
-                .variants
-                .iter()
-                .map(|v| {
-                    let vn = &v.ident;
-                    let (pat, ctor) = arm_fields(&v.fields);
-                    quote!( #nat_id::#vn #pat => #eng_id::#vn #ctor, )
-                })
-                .collect();
-            quote!( match __nat { #(#arms)* } )
-        }
-        Item::Struct(s) => {
-            let (pat, ctor) = arm_fields(&s.fields);
-            match &s.fields {
-                Fields::Unit => quote!( #eng_id ),
-                _ => quote!( { let #nat_id #pat = __nat; #eng_id #ctor } ),
-            }
-        }
-        _ => quote!(),
-    }
-}
-
-/// The (whole) types of a cycle type's *leaf* fields — those `from_conv_expr` doesn't convert. Each must
-/// be `Clone` for the natural→engine `from_nat` (which clones leaves into the engine). (The `nonce` only
-/// satisfies `from_conv_expr`'s signature — leaf-or-not doesn't depend on it.)
-fn leaf_field_types(item: &Item, child_heads: &HashSet<String>, nonce: u64) -> Vec<Type> {
+/// The (whole) types of a cycle type's *leaf* fields — those `conv_expr` doesn't convert. Each must be
+/// `Clone` for the natural→engine `__FromNat` (which clones leaves into the engine). Leaf-ness is
+/// direction-independent, so this probes with `ConvDir::ToNat`.
+fn leaf_field_types(item: &Item, child_heads: &HashSet<String>) -> Vec<Type> {
     let mut out = Vec::new();
     let mut push = |fields: &Fields| {
         for f in fields.iter() {
-            if from_conv_expr(&f.ty, quote!(__x), child_heads, nonce).is_none() {
+            if conv_expr(&f.ty, quote!(__x), child_heads, ConvDir::ToNat).is_none() {
                 out.push(f.ty.clone());
             }
         }
@@ -987,7 +933,7 @@ fn gen_natural_extras(
                 Item::Struct(s) => scc.contains(&s.ident.to_string()),
                 _ => false,
             })
-            .flat_map(|it| leaf_field_types(it, &child_heads, nonce))
+            .flat_map(|it| leaf_field_types(it, &child_heads))
             .filter(|t| seen.insert(quote!(#t).to_string()))
             .map(|t| quote!( #t: ::core::clone::Clone ))
             .collect()
@@ -1016,7 +962,8 @@ fn gen_natural_extras(
         let engine = &internal_names[&xs];
         let xdecl = param_decls(generics);
         let xuse = generic_tokens(generics).1;
-        let body = conv_body(item, id, engine, &child_heads);
+        // engine → natural (`__to_nat(self)`): src = engine, tgt = natural.
+        let body = conv_body(item, engine, id, quote!(self), &child_heads, ConvDir::ToNat);
         // The cycle type's own `where`-clause predicates (e.g. `where S: Clone` / `where Expr<S>:
         // Marker`). Every generated item that NAMES the natural type `Expr<S>` (the conversion traits'
         // method signatures, and the conversion/delegated impls) must repeat these — naming `Expr<S>`
@@ -1077,7 +1024,9 @@ fn gen_natural_extras(
         // (borrowed) natural value to the depth-default engine value and call the engine's own impl — all
         // via the same `emit_delegated_impl` algorithm (natural→engine via `__FromNat`).
         if needs_from_nat {
-            let from_body = from_conv_body(item, id, engine, &child_heads, nonce);
+            // natural → engine (`__from_nat(__nat: &Natural)`): src = natural, tgt = engine.
+            let from_body =
+                conv_body(item, id, engine, quote!(__nat), &child_heads, ConvDir::FromNat { nonce });
             out.extend(quote! {
                 #[doc(hidden)]
                 trait #ftn<#(#xdecl),*>
