@@ -46,11 +46,10 @@ Status quo recap (what's already shipped):
 > leaves satisfy it — no worse than a non-recurse group type.
 >
 > **Residual (library-level, out of scope for recurse):**
->  - **Spanned**: `impl Spanned for ()` was added (the empty group slot is span-neutral), so group-ful
->    `.span()` now **works for the usual `S=()`** span — `group_ful_spanned_via_delegation` in
->    `recurse_unparse_spanned.rs`. For a *non-`()`* span type the empty slot still can't join the
->    delimiters' span (it would need `(): Spanned<Span = S>`); that requires the group's span fold to skip
->    its `()` slot (a `Group`-derive change), not done.
+>  - **Spanned**: the empty group slot is `()`, and the library deliberately does **not** `impl Spanned
+>    for ()`, so a group's derived `Spanned` fold can't include its `()` slot. (An earlier `impl Spanned
+>    for ()` was added then reverted — `()` carrying a span is semantically wrong.) Supporting group
+>    `.span()` would need the group's span fold to *skip* its `()` slot (a `Group`-derive change), not done.
 >  - **Unparse**: to unparse a group to a real proc-macro atom the library would need symbol→`TokenTree`
 >    `Unparse` (or a shipped `From<String>` atom). Still a general atom feature, tracked separately.
 

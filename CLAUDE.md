@@ -119,14 +119,13 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   Tested in `recurse_unparse_spanned.rs` (single + multi-type, incl. type params; `Spanned` needs `S:
   Span`, threaded through the conversion impls by `param_decls`, and a generated terminator `Spanned`). A
   **group-ful** cycle uses the same delegation (the engine's group `for<'a> Fill<Substruct>: Unparse` HRTB
-  *does* resolve through the delegated `engine_default: Unparse<__Atom>` bound). Group-ful **`Spanned`
-  works** for the usual `S=()` span (`group_ful_spanned_via_delegation` in `recurse_unparse_spanned.rs`),
-  enabled by `impl Spanned for ()` (the empty group slot is span-neutral). What can still fail is a
+  *does* resolve through the delegated `engine_default: Unparse<__Atom>` bound). What can still fail is a
   **library-level** leaf gap shared with *non-`#[recurse]`* group types: delimiter symbols only `Unparse`
-  to a `From<String>` atom (not `TokenTree`), and for a *non-`()`* span type the empty `Group<(),…>` slot
-  can't join the delimiters' span (it would need `(): Spanned<Span = S>`, requiring the group fold to skip
-  its `()` slot). `ui/recurse_group_ful_unparse.rs` pins that a group-ful recurse cycle and a plain group
-  struct fail *identically* on the `Unparse` leaf gap. A cycle type's **`where`-clause** is
+  to a `From<String>` atom (not `TokenTree`), and the empty `Group<(),…>` slot can't join the delimiters'
+  span (it would need `(): Spanned`, which the library deliberately does **not** provide). So a group-ful
+  cycle's natural `Unparse`/`Spanned` impl exists but a concrete `.unparse()`/`.span()` hits these leaf
+  gaps. `ui/recurse_group_ful_unparse.rs` pins that a group-ful recurse cycle and a plain group struct
+  fail *identically* on the `Unparse` leaf gap. A cycle type's **`where`-clause** is
   threaded through the generated engine/conversion/delegated impls (`where_preds_of` in
   `gen_natural_extras`) — a param bound (`where S: Clone`) or a self-referential bound (`where Expr<S>:
   Marker`) both work (`recurse_where_clause.rs`). All generated internal **type/trait names** — engine

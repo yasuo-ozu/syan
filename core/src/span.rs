@@ -304,19 +304,6 @@ macro_rules! impl_for_tup {
 }
 impl_for_tup!(a0 A0 a1 A1 a2 A2 a3 A3 a4 A4 a5 A5 a6 A6 a7 A7 a8 A8 a9 A9 a10 A10 a11 A11 a12 A12 a13 A13);
 
-// The empty tuple is span-neutral. `impl_for_tup!` covers 1..=14-tuples but not the 0-tuple — and an
-// empty-tuple arm there couldn't name a free `S` for `type Span` (E0207). A concrete `Span = ()` is the
-// only valid choice. This lets `()` stand as an *empty group slot* (`GroupBrace<(), ()>`) in a derived
-// `Spanned` fold — unlocking `Spanned` for a group-ful type whose span type is `()` (e.g. a
-// `#[recurse]` cycle's `.span()` on `Expr<()>`, the way span is exercised in tests). For a non-`()` span
-// type the empty slot still cannot join the delimiters' span (it would need `(): Spanned<Span = S>`);
-// that needs the group's span fold to skip its `()` slot, a separate change.
-impl Spanned for () {
-    type Span = ();
-
-    fn span(&self) -> Self::Span {}
-}
-
 impl<T: Spanned> Spanned for Box<T> {
     type Span = T::Span;
 

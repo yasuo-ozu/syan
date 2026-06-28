@@ -5,8 +5,7 @@
 //! `Unparse`/`Spanned` `__FromNat`-convert the natural value to the engine then call the engine's impl.
 //! This holds for every cycle — single/multi-type, group-free/group-ful — so the code path is the same.
 //! Consequence: delegated `Unparse`/`Spanned` are **depth-limited** like `Parse` (a tree deeper than
-//! `limit` panics at the terminator); group-ful `Spanned` additionally relies on `(): Spanned` for the
-//! empty group slot. See CLAUDE.md.
+//! `limit` panics at the terminator). See CLAUDE.md.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -189,44 +188,5 @@ fn multi_type_spanned_via_delegation() {
         slot: 0,
         span: (),
     })))));
-    let _s: () = tree.span();
-}
-
-// ── GROUP-FUL cycle: Spanned via delegation (unlocked by `impl Spanned for ()`) ────────────────────
-// The `brace: GroupBrace<(), S>` field makes this group-ful, so `Spanned` is engine-routed and reaches
-// the natural type via the `__FromNat` delegation. The engine's group `Spanned` folds the brace's `()`
-// slot, which needs `(): Spanned` — now provided (`Span = ()`), so `.span()` works for `S = ()` (the way
-// span is exercised in these tests).
-#[recurse]
-mod grpsp {
-    use syan::nested::group::GroupBrace;
-    use syan::span::{Span, Spanned, WithSpan};
-    use syan::visit::Ast;
-
-    #[derive(Ast, Spanned)]
-    #[subast()]
-    pub enum Expr<S: Span> {
-        Leaf(WithSpan<u32, S>),
-        Block {
-            brace: GroupBrace<(), S>,
-            #[group(self.brace)]
-            inner: Vec<Expr<S>>,
-        },
-    }
-}
-
-#[test]
-fn group_ful_spanned_via_delegation() {
-    use grpsp::Expr;
-    use syan::nested::group::Group;
-    use syan::span::{Spanned, WithSpan};
-    // A group-ful tree with a nested `Block`, within the depth limit; delegated `Spanned` converts to the
-    // engine and folds the delimiter + leaf spans (the empty `()` group slot is span-neutral). `Group`
-    // has no `Default`, so build the brace explicitly (its delimiter `WithSpan`s and the `()` slot are).
-    let brace = Group { open: Default::default(), slot: (), close: Default::default() };
-    let tree: Expr<()> = Expr::Block {
-        brace,
-        inner: vec![Expr::Leaf(WithSpan { slot: 1, span: () })],
-    };
     let _s: () = tree.span();
 }
