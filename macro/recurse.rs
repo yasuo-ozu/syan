@@ -1644,14 +1644,34 @@ fn build_multiroot_tail(
 /// the depth-limited engine — see `make_natural_item`'s doc); `Unparse`/`Spanned` are engine-routed only
 /// for a **group-ful** cycle (their natural derive would need cycle-wide union bounds the group `Fill`
 /// machinery makes infeasible). Everything else (`Ast`, `Debug`, `#[subast]`, docs, …) stays on natural.
+/// If `attr` is a derive-like list attribute, return its name (`"derive"` or `"macro_derive"`), else
+/// `None`. `#[macro_derive]` (from the `type-macro-derive-tricks` crate) is the form a cycle type must use
+/// when it has `Token![..]`-style *type-macro* fields, which rustc forbids under a plain `#[derive]`;
+/// `#[recurse]` handles either the same way.
+fn derive_attr_name(attr: &syn::Attribute) -> Option<&'static str> {
+    if attr.path().is_ident("derive") {
+        Some("derive")
+    } else if attr.path().is_ident("macro_derive") {
+        Some("macro_derive")
+    } else {
+        None
+    }
+}
+
+/// Partition a cycle type's derive list into (kept-on-natural attrs, engine-routed derive paths), routing
+/// the `engine_routed` traits to the engine. Recognizes both `#[derive(...)]` and `#[macro_derive(...)]`,
+/// re-emitting the kept derives under the *same* attribute name. Also returns whether any engine-routed
+/// trait came from a `#[macro_derive]` — the engine type carries the same `Token!` fields, so its
+/// engine-routed derives must use `#[macro_derive]` too.
 fn split_cycle_derives(
     attrs: &[syn::Attribute],
     engine_routed: &[&str],
-) -> (Vec<syn::Attribute>, Vec<Path>) {
+) -> (Vec<syn::Attribute>, Vec<Path>, bool) {
     let mut natural = Vec::new();
     let mut engine_paths = Vec::new();
+    let mut engine_macro_derive = false;
     for attr in attrs {
-        if attr.path().is_ident("derive") {
+        if let Some(name) = derive_attr_name(attr) {
             if let syn::Meta::List(list) = &attr.meta {
                 let paths: Punctuated<Path, Token![,]> = list
                     .parse_args_with(Punctuated::parse_terminated)
@@ -1660,25 +1680,27 @@ fn split_cycle_derives(
                 for p in paths {
                     if p.segments.last().is_some_and(|s| engine_routed.iter().any(|t| s.ident == t)) {
                         engine_paths.push(p);
+                        engine_macro_derive |= name == "macro_derive";
                     } else {
                         kept.push(p);
                     }
                 }
                 if !kept.is_empty() {
-                    natural.push(syn::parse_quote!( #[derive(#(#kept),*)] ));
+                    let name = Ident::new(name, Span::call_site());
+                    natural.push(syn::parse_quote!( #[#name(#(#kept),*)] ));
                 }
                 continue;
             }
         }
         natural.push(attr.clone());
     }
-    (natural, engine_paths)
+    (natural, engine_paths, engine_macro_derive)
 }
 
-/// Whether `attrs` contains a `#[derive(...)]` mentioning any of `names`.
+/// Whether `attrs` contains a `#[derive(...)]` / `#[macro_derive(...)]` mentioning any of `names`.
 fn derives_any(attrs: &[syn::Attribute], names: &[&str]) -> bool {
     attrs.iter().any(|a| {
-        a.path().is_ident("derive")
+        derive_attr_name(a).is_some()
             && matches!(&a.meta, syn::Meta::List(l)
                 if l.parse_args_with(Punctuated::<Path, Token![,]>::parse_terminated)
                     .map(|ps| ps.iter().any(|p| p.segments.last().is_some_and(|s| names.iter().any(|n| s.ident == n))))
@@ -1710,28 +1732,28 @@ fn strip_field_helper_attrs(fields: &mut Fields) {
 /// `Default`, `#[subast]`, docs, …) stays on the natural type; the engine-routed structural-derive field
 /// helper attrs (`#[group]`/`#[ignore_bounds]`/…) are stripped from the natural type (it carries no
 /// structural derive that would consume them — they live on the engine, built from the original item).
-/// Returns `(natural item, engine-routed derive paths)`.
-fn make_natural_item(item: &Item, _scc: &HashSet<String>) -> (Item, Vec<Path>) {
+/// Returns `(natural item, engine-routed derive paths, engine-uses-`#[macro_derive]`)`.
+fn make_natural_item(item: &Item, _scc: &HashSet<String>) -> (Item, Vec<Path>, bool) {
     let engine_routed: &[&str] = &["Parse", "Unparse", "Spanned"];
     let mut it = item.clone();
-    let engine_paths = match &mut it {
+    let (engine_paths, engine_md) = match &mut it {
         Item::Enum(e) => {
-            let (nat, ep) = split_cycle_derives(&e.attrs, engine_routed);
+            let (nat, ep, md) = split_cycle_derives(&e.attrs, engine_routed);
             e.attrs = nat;
             for v in &mut e.variants {
                 strip_field_helper_attrs(&mut v.fields);
             }
-            ep
+            (ep, md)
         }
         Item::Struct(s) => {
-            let (nat, ep) = split_cycle_derives(&s.attrs, engine_routed);
+            let (nat, ep, md) = split_cycle_derives(&s.attrs, engine_routed);
             s.attrs = nat;
             strip_field_helper_attrs(&mut s.fields);
-            ep
+            (ep, md)
         }
-        _ => Vec::new(),
+        _ => (Vec::new(), false),
     };
-    (it, engine_paths)
+    (it, engine_paths, engine_md)
 }
 
 /// The internal **engine** form of a cycle type: `transform_item` (rename `X` → `__XRec`, thread the
@@ -1739,12 +1761,15 @@ fn make_natural_item(item: &Item, _scc: &HashSet<String>) -> (Item, Vec<Path>) {
 /// (`#[derive(Parse, Unparse, Spanned)]` as the user wrote them). The depth-limited engine is finite, so
 /// the normal derives apply. Must be called while the original is still `pub` (transform_item keys on
 /// that), then the visibility is narrowed.
-fn make_engine_item(item: &Item, ctx: &TransformCtx, engine_paths: &[Path]) -> Item {
+fn make_engine_item(item: &Item, ctx: &TransformCtx, engine_paths: &[Path], macro_derive: bool) -> Item {
     let mut eng = transform_item(item.clone(), ctx);
+    // Emit the engine's structural derives under the same mechanism the user used — `#[macro_derive]`
+    // when the cycle type has `Token!` (type-macro) fields, else plain `#[derive]`.
+    let derive_name = Ident::new(if macro_derive { "macro_derive" } else { "derive" }, Span::call_site());
     let derives: Vec<syn::Attribute> = if engine_paths.is_empty() {
         vec![]
     } else {
-        vec![syn::parse_quote!(#[derive(#(#engine_paths),*)])]
+        vec![syn::parse_quote!(#[#derive_name(#(#engine_paths),*)])]
     };
     // Strip any `#[ignore_bounds]` from the engine's fields: the engine's recursive child is the depth
     // param `__Rec` (a *finite* chain), so its derives need the FULL `__Rec: Trait` bound — dropping it
@@ -1902,20 +1927,11 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
     // Which cycle types derive `Parse`? Only those get a delegated `impl Parse for X` on the natural
     // type (the engine derives `Parse` only when the user asked for it; emitting the delegation
     // otherwise would reference a non-existent engine `Parse` impl).
-    let derives_parse = |attrs: &[syn::Attribute]| -> bool {
-        attrs.iter().any(|a| {
-            a.path().is_ident("derive")
-                && matches!(&a.meta, syn::Meta::List(l)
-                    if l.parse_args_with(Punctuated::<Path, Token![,]>::parse_terminated)
-                        .map(|ps| ps.iter().any(|p| p.segments.last().is_some_and(|s| s.ident == "Parse")))
-                        .unwrap_or(false))
-        })
-    };
     let parse_types: HashSet<String> = items
         .iter()
         .filter_map(|item| match item {
-            Item::Enum(e) if derives_parse(&e.attrs) => Some(e.ident.to_string()),
-            Item::Struct(s) if derives_parse(&s.attrs) => Some(s.ident.to_string()),
+            Item::Enum(e) if derives_any(&e.attrs, &["Parse"]) => Some(e.ident.to_string()),
+            Item::Struct(s) if derives_any(&s.attrs, &["Parse"]) => Some(s.ident.to_string()),
             _ => None,
         })
         .collect();
@@ -1984,10 +2000,10 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
                 let scc = &sccs[idx];
                 // Parse/Unparse/Spanned are all engine-routed and re-supplied by delegation; the natural
                 // type keeps only the non-engine derives (Ast/Debug/…).
-                let (natural, engine_paths) = make_natural_item(item, scc);
+                let (natural, engine_paths, engine_md) = make_natural_item(item, scc);
                 if scc_needs_engine[idx] {
                     let ctx = &plans[idx].0;
-                    let engine = make_engine_item(item, ctx, &engine_paths);
+                    let engine = make_engine_item(item, ctx, &engine_paths, engine_md);
                     out_items.push(quote!(#natural #engine));
                 } else {
                     // No engine (derives none of Parse/Unparse/Spanned): just the natural type (+ Ast/…).
