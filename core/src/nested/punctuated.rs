@@ -6,6 +6,9 @@ use parametrized::{Parametrized, ParametrizedIntoIter, ParametrizedIterMut};
 #[parametrized::parametrized(default = 0, iter_mut = 0, into_iter = 0)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Unparse, Spanned)]
 #[syan(crate)]
+// The field type is the natural shape consumed by the `#[parametrized]` / derive machinery; factoring it
+// into a type alias would not help (and the macros key on the written type).
+#[allow(clippy::type_complexity)]
 struct PunctuatedInner<Item, Punct>(Option<(Box<Item>, Vec<(Punct, Item)>)>);
 
 /// An punctuated list representation.
@@ -37,6 +40,10 @@ impl<Item, Punct> Punctuated<Item, Punct> {
             None => 0,
             Some((_, vec)) => 1 + vec.len(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.0.is_none()
     }
 
     pub fn first(&self) -> Option<&Item> {

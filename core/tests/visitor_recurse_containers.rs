@@ -17,6 +17,9 @@ mod ast {
 
     #[derive(Ast)]
     #[subast()]
+    // The container shapes (incl. `Vec<Box<_>>`) are deliberately varied to pin the visitor's traversal;
+    // the redundant `Box` inside `Vec` is the point, not an oversight.
+    #[allow(clippy::vec_box)]
     pub enum Expr<S> {
         // #3: a Box wrapping the Option (`cont_box`) — patterns don't auto-deref Box.
         Opt(Box<Option<Box<Expr<S>>>>),

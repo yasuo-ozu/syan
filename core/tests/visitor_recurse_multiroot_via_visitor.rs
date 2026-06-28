@@ -9,8 +9,10 @@ mod ast {
     use core::marker::PhantomData;
     use syan::visit::Ast;
     #[derive(Ast)] #[subast(crate::ast::B)]
+    #[allow(clippy::enum_variant_names)] // `SelfA`/`ToB` deliberately name the self/cross edges
     pub enum A<S> { SelfA(Box<A<S>>), ToB(Box<B<S>>), Lit(PhantomData<S>) }
     #[derive(Ast)] #[subast(crate::ast::A)]
+    #[allow(clippy::enum_variant_names)]
     pub enum B<S> { ToA(Box<A<S>>), SelfB(Box<B<S>>), Lit(PhantomData<S>) }
 }
 

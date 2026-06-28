@@ -286,6 +286,9 @@ fn emit_visited_macro(
         .collect();
     let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
     quote! {
+        // The embedded visited-type / ancestor paths may be `crate::`-rooted by design (they resolve in
+        // the base's defining crate); suppress clippy's `crate_in_macro_def` for the generated macro.
+        #[allow(clippy::crate_in_macro_def)]
         #[macro_export]
         #[doc(hidden)]
         macro_rules! #vmacro {

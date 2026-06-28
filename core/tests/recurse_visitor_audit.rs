@@ -6,6 +6,7 @@
 //!   - A: `audit_visitor_recurse_helper_hygiene.rs`   (helper idents `__V`/`__R0`/`__W` now fresh-named)
 //!   - C: `audit_visitor_recurse_nonroot_lifetime.rs` (a non-root extra lifetime now emitted lifetime-first)
 //!   - E: `audit_visitor_followed_ref_breaks_mut.rs`  (a followed `&T` is now a leaf on the mut side)
+//!
 //! Plus C' (the acyclic union-param ordering) is fixed by sorting the trait's params lifetime-first;
 //! exercised indirectly by the above.
 //!

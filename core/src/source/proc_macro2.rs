@@ -169,12 +169,12 @@ impl<T: Default + core::fmt::Display> Parse<proc_macro2::TokenTree> for Symbol<T
         let mut stream = stream.into_parse_stream();
         match stream.next() {
             Some(proc_macro2::TokenTree::Ident(ident))
-                if ident.to_string() == Self::default().to_string() =>
+                if ident == Self::default().to_string() =>
             {
                 Ok(Default::default())
             }
             Some(proc_macro2::TokenTree::Punct(punct))
-                if &format!("{}", punct.as_char()) == &Self::default().to_string() =>
+                if format!("{}", punct.as_char()) == Self::default().to_string() =>
             {
                 Ok(Default::default())
             }

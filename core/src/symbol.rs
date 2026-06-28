@@ -1,4 +1,12 @@
 pub mod chars {
+    /// Marker that every single-character symbol parses from the atom type `Atom`.
+    ///
+    /// # Safety
+    ///
+    /// This trait is `unsafe` because downstream code relies on the marker holding for *all* generated
+    /// `char` symbol types; it is implemented only by the blanket impl in this crate (gated on each
+    /// `char` type being `Parse<Atom>`), never by hand. Implementing it manually could assert the
+    /// invariant for an `Atom` that cannot in fact parse every symbol.
     pub unsafe trait AtomParsedToAllChars {}
 
     macro_rules! impl_char {
@@ -160,6 +168,9 @@ mod imp {
     /// when importing from the `imp` module.
     pub use _Symbol::Symbol;
 
+    // Deliberately hand-written, not derived: `#[derive(Default)]` would add a `T: Default` bound, but
+    // `_Symbol<T>` defaults to its fieldless `Symbol` variant for *any* `T`.
+    #[allow(clippy::derivable_impls)]
     impl<T> Default for _Symbol<T> {
         fn default() -> Self {
             _Symbol::Symbol

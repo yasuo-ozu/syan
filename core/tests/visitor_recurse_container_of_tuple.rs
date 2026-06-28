@@ -6,7 +6,6 @@
 
 use core::marker::PhantomData;
 use syan::parse::recurse;
-use syan::visit::Ast;
 
 #[recurse]
 mod ast {
@@ -15,6 +14,9 @@ mod ast {
 
     #[derive(Ast)]
     #[subast()]
+    // The tuple-in-container field types are the point of this test (tuple back-edges nested in
+    // `Vec`/`Option`); a type alias would obscure it.
+    #[allow(clippy::type_complexity)]
     pub enum Expr<S> {
         Pair((Box<Expr<S>>, Box<Expr<S>>)),          // control: top-level tuple back-edges
         VecPair(Vec<(Box<Expr<S>>, Box<Expr<S>>)>),  // bug: tuple back-edges inside a Vec

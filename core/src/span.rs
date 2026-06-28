@@ -336,7 +336,5 @@ impl Spanned for core::convert::Infallible {
 impl<T> Spanned for core::marker::PhantomData<T> {
     type Span = ();
 
-    fn span(&self) -> Self::Span {
-        ()
-    }
+    fn span(&self) -> Self::Span {}
 }

@@ -409,6 +409,11 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
 
         #repeater_items
 
+        // The cleaned definition / `#[subast]` paths embedded below may contain `crate::`-rooted paths
+        // the user wrote; those resolve in *this* (defining) crate by design (downstream-portable paths
+        // are `$crate`-rooted via `crate_rooted_tokens`). Suppress clippy's `crate_in_macro_def` for the
+        // generated callback macro so it never surfaces in a consumer's lint output.
+        #[allow(clippy::crate_in_macro_def)]
         #[macro_export]
         #[doc(hidden)]
         macro_rules! #macro_name {

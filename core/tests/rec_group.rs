@@ -124,8 +124,8 @@ fn test_simple_container_basic() {
     let tokens = quote! { [ 1, 2, 3 ] };
     let container: SimpleContainer<_> = Parse::parse(tokens).unwrap();
     assert_eq!(container.content.len(), 3);
-    // Verify bracket group has proper structure and tokens
-    assert_eq!(container.bracket_group.slot, ());
+    // The bracket group's slot is the unit type (empty group).
+    let () = container.bracket_group.slot;
     // Verify the bracket group contains the expected tokens
     assert!(format!("{}", container.bracket_group.open).contains('['));
     assert!(format!("{}", container.bracket_group.close).contains(']'));
@@ -136,8 +136,8 @@ fn test_simple_container_single_element() {
     let tokens = quote! { [ 42 ] };
     let container: SimpleContainer<_> = Parse::parse(tokens).unwrap();
     assert_eq!(container.content.len(), 1);
-    // Verify bracket group has proper structure and tokens
-    assert_eq!(container.bracket_group.slot, ());
+    // The bracket group's slot is the unit type (empty group).
+    let () = container.bracket_group.slot;
     // Verify the bracket group contains the expected tokens
     assert!(format!("{}", container.bracket_group.open).contains('['));
     assert!(format!("{}", container.bracket_group.close).contains(']'));
@@ -148,8 +148,8 @@ fn test_simple_container_empty() {
     let tokens = quote! { [ ] };
     let container: SimpleContainer<_> = Parse::parse(tokens).unwrap();
     assert_eq!(container.content.len(), 0);
-    // Verify bracket group has proper structure and tokens
-    assert_eq!(container.bracket_group.slot, ());
+    // The bracket group's slot is the unit type (empty group).
+    let () = container.bracket_group.slot;
     // Verify the bracket group contains the expected tokens
     assert!(format!("{}", container.bracket_group.open).contains('['));
     assert!(format!("{}", container.bracket_group.close).contains(']'));

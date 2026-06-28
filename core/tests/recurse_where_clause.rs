@@ -5,7 +5,6 @@
 //! generated items (`ui/audit_recurse_where_clause.rs`, now removed).
 #![allow(dead_code)]
 
-use core::marker::PhantomData;
 use syan::parse::{recurse, Parse, Unparse};
 use template_quote::quote;
 
