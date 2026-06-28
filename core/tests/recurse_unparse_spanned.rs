@@ -1,12 +1,12 @@
-//! `#[derive(Unparse)]` / `#[derive(Spanned)]` with `#[ignore_bounds]` on a `#[recurse]` cycle that
-//! carries **type parameters**. Answer to "does it still work?": **yes**, for a *single self-recursive*
-//! group-free cycle. There `#[recurse]` keeps `Unparse`/`Spanned` on the **natural** public type (only
-//! `Parse` is routed to the depth-limited engine), injecting `#[ignore_bounds]` on each recursive-child
-//! field so the leaf-only-bounded impl compiles — the body's recursive `.unparse()`/`.span()` call
-//! resolves against the *same* impl, with no E0275 where-bound cycle. A multi-type **or group-ful** cycle
-//! instead gets `Unparse`/`Spanned` on the natural type by **delegation through the engine** (the
-//! `__FromNat` bridge); group-ful `Spanned` additionally relies on `(): Spanned` for the empty group
-//! slot. See CLAUDE.md.
+//! `#[derive(Unparse)]` / `#[derive(Spanned)]` on a `#[recurse]` cycle that carries **type parameters**.
+//! Answer to "does it still work?": **yes** — and now via ONE uniform mechanism. `#[recurse]` routes
+//! `Parse`/`Unparse`/`Spanned` to the depth-limited engine and re-supplies them on the natural public
+//! type by **delegation** (`emit_delegated_impl`): `Parse` parses the engine then `__ToNat`-converts;
+//! `Unparse`/`Spanned` `__FromNat`-convert the natural value to the engine then call the engine's impl.
+//! This holds for every cycle — single/multi-type, group-free/group-ful — so the code path is the same.
+//! Consequence: delegated `Unparse`/`Spanned` are **depth-limited** like `Parse` (a tree deeper than
+//! `limit` panics at the terminator); group-ful `Spanned` additionally relies on `(): Spanned` for the
+//! empty group slot. See CLAUDE.md.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -21,13 +21,11 @@ mod pu {
     use syan::source::proc_macro2::literal::Integer;
 
     // A list `1 2 3` → Cons(1, Cons(2, Cons(3, Nil))). Group-free, self-recursive, all-`Integer` leaves
-    // (so the round-trip unparses cleanly). `#[recurse]` auto-injects `#[ignore_bounds]` on `tail`; we
-    // also write one by hand to confirm it is honored, not doubled.
+    // (so the round-trip unparses cleanly). `Unparse` is delegated through the engine like `Parse`.
     #[derive(Parse, Unparse)]
     pub enum Expr<S> {
         Cons {
             head: Integer,
-            #[ignore_bounds]
             tail: Box<Expr<S>>,
         },
         Nil(PhantomData<S>),
@@ -36,8 +34,8 @@ mod pu {
 
 #[test]
 fn unparse_roundtrip_with_type_param() {
-    // `1 2 3` parses (through the engine, depth-limited) into the NATURAL `Expr<S>`, then the NATURAL
-    // `Unparse` (leaf-only bounds via `#[ignore_bounds]`) emits it back.
+    // `1 2 3` parses (through the engine) into the NATURAL `Expr<S>`, then the delegated `Unparse`
+    // (`__FromNat` → engine) emits it back. Within the depth limit.
     let toks = quote! { 1 2 3 };
     // `S` is phantom here (used only in `Nil`), so annotate it; the atom is `TokenTree` (from `Integer`).
     let e: pu::Expr<()> = Parse::parse(toks).unwrap();
@@ -47,12 +45,32 @@ fn unparse_roundtrip_with_type_param() {
 }
 
 #[test]
-fn unparse_constructed_deep_tree() {
+fn unparse_constructed_within_limit() {
     use pu::Expr;
     use syan::source::proc_macro2::literal::Integer;
-    // Build a tree by hand and unparse it (no parse) — exercises the NATURAL recursive `Unparse`
-    // directly. The natural type accepts ANY depth (only `Parse` is engine-bounded), so this depth-11
-    // tree — past the default recursion limit — still unparses.
+    // Build a within-limit tree by hand and unparse it (no parse) — exercises the delegated `Unparse`.
+    // The delegated path is depth-limited (default limit 4), so build a depth-3 list.
+    let mut e: Expr<()> = Expr::Nil(PhantomData);
+    for _ in 0..3 {
+        e = Expr::Cons {
+            head: Integer { value: "1".into(), suffix: None },
+            tail: Box::new(e),
+        };
+    }
+    let mut out = Vec::<proc_macro2::TokenTree>::new();
+    e.unparse(&mut (&mut out)).unwrap();
+    assert_eq!(out.len(), 3, "three `1`s — depth 3, within the engine limit");
+}
+
+#[test]
+#[should_panic(expected = "recursion")]
+fn unparse_past_limit_panics() {
+    use pu::Expr;
+    use syan::source::proc_macro2::literal::Integer;
+    // The delegated `Unparse` is depth-limited (it converts the natural value to the depth-default engine
+    // value): a tree deeper than `limit` reaches the terminator's `__from_nat`/`Unparse` and panics. This
+    // is the documented trade-off of the uniform delegated path (vs. the old direct path's arbitrary
+    // depth). Default limit is 4, so a depth-11 list overflows.
     let mut e: Expr<()> = Expr::Nil(PhantomData);
     for _ in 0..11 {
         e = Expr::Cons {
@@ -61,8 +79,7 @@ fn unparse_constructed_deep_tree() {
         };
     }
     let mut out = Vec::<proc_macro2::TokenTree>::new();
-    e.unparse(&mut (&mut out)).unwrap();
-    assert_eq!(out.len(), 11, "eleven `1`s — depth 11, far past the engine limit");
+    let _ = e.unparse(&mut (&mut out)); // panics at the depth-limit terminator
 }
 
 // ── Spanned over a self-recursive recurse type with a type param `S: Span` ─────────────────────────
@@ -71,14 +88,13 @@ mod sp {
     use syan::span::{Spanned, WithSpan};
     use syan::visit::Ast;
 
-    // All non-recursive leaves are `WithSpan<_, S>` (Spanned, `Span = S`); the recursive `child` is
-    // `#[ignore_bounds]` (auto-injected) and so excluded from the span fold.
+    // All non-recursive leaves are `WithSpan<_, S>` (Spanned, `Span = S`). `Spanned` is delegated through
+    // the engine (`__FromNat` → engine's `Spanned`), uniformly with every other cycle.
     #[derive(Ast, Spanned)]
     #[subast()]
     pub enum Expr<S: syan::span::Span> {
         Node {
             head: WithSpan<u32, S>,
-            #[ignore_bounds]
             child: Box<Expr<S>>,
         },
         Leaf(WithSpan<u64, S>),
@@ -89,9 +105,9 @@ mod sp {
 fn spanned_with_type_param() {
     use sp::Expr;
     use syan::span::{Spanned, WithSpan};
-    // `()` is a `Span`. `.span()` folds the (non-ignored) `WithSpan` leaves; the recursive child is
-    // ignored. The point is that the NATURAL recursive `Spanned` impl compiles (via `#[ignore_bounds]`)
-    // and `.span()` is callable on a type with a parameter.
+    // `()` is a `Span`. `.span()` delegates through the engine and folds the `WithSpan` leaf spans. The
+    // point is that the delegated `Spanned` impl compiles and `.span()` is callable on a type with a
+    // parameter (within the depth limit — this is a depth-3 tree).
     let tree: Expr<()> = Expr::Node {
         head: WithSpan { slot: 0, span: () },
         child: Box::new(Expr::Node {

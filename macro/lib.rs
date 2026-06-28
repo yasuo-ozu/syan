@@ -28,10 +28,10 @@ fn random() -> u64 {
 ///   The intended use is a **naturally-recursive child** (e.g. `Box<Expr<S>>` in a mutually-recursive
 ///   AST), where the per-field bound would otherwise form an infinite `where`-clause cycle
 ///   (`Expr: Parse ⇐ … ⇐ Expr: Parse`, E0275); with the bound dropped the recursion is discharged
-///   coinductively via the sibling type's own impl. `#[recurse]` injects this automatically on a
-///   single self-recursive cycle's recursive-child fields. (Caveat for `Parse` specifically: a
+///   coinductively via the sibling type's own impl. (Caveat for `Parse` specifically: a
 ///   *generic* field type with no other impl in scope, e.g. a bare `T`, will then fail to parse — the
-///   bound was the only thing satisfying it.)
+///   bound was the only thing satisfying it.) Note `#[recurse]` does **not** use this — it delegates
+///   `Parse`/`Unparse`/`Spanned` to its internal depth-limited engine instead.
 /// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
 #[proc_macro_error]
 #[proc_macro_derive(Parse, attributes(group, syan, joint, alone, ignore_bounds,))]
@@ -59,10 +59,9 @@ pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
 ///   so its type must implement `Unparse`; the bound is merely omitted from the impl's `where`-clause.
 ///   The intended use is a **naturally-recursive child**, where the per-field bound would form an
 ///   infinite `where`-clause cycle (E0275); with it dropped, the recursive `.unparse()` resolves
-///   coinductively against the sibling type's own (leaf-only-bounded) impl. This makes a natural
-///   recursive `Unparse` compile — `#[recurse]` injects it on a single self-recursive cycle's
-///   recursive-child fields. (Unlike `Parse`, `Unparse` has no backtracking, so this works at arbitrary
-///   depth.)
+///   coinductively against the sibling type's own (leaf-only-bounded) impl. This makes a hand-written
+///   natural recursive `Unparse` compile (arbitrary depth — `Unparse` has no backtracking). Note
+///   `#[recurse]` does **not** use this — it delegates `Unparse` to its internal engine instead.
 /// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
 #[proc_macro_error]
 #[proc_macro_derive(Unparse, attributes(group, syan, joint, alone, ignore_bounds,))]
@@ -98,8 +97,8 @@ pub fn ast_derive(input: TokenStream1) -> TokenStream1 {
 ///   the field is *not* visited — the dropped predicate is what pins the field's associated `Span` type,
 ///   so the field cannot be folded without it.) The intended use is a **naturally-recursive child**,
 ///   whose per-field bound would otherwise form an infinite `where`-clause cycle (E0275); dropping it
-///   lets a natural recursive `Spanned` compile (the resulting span reflects the non-ignored leaves).
-///   `#[recurse]` injects it on a single self-recursive cycle's recursive-child fields.
+///   lets a hand-written natural recursive `Spanned` compile (the resulting span reflects the non-ignored
+///   leaves). Note `#[recurse]` does **not** use this — it delegates `Spanned` to its internal engine.
 /// - `#[default]` — also excludes a field from the span fold.
 #[proc_macro_error]
 #[proc_macro_derive(Spanned, attributes(group, syan, joint, alone, ignore_bounds,))]
@@ -158,12 +157,9 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// `visitor!(<cycle types>)` builds an ordinary acyclic visitor over the natural types — closures,
 /// tuples-of-closures, `visit_mut`, and inheritance (`visitor!(base => New)`) all work, and it may span
 /// acyclic/outer types in one `Visit` trait. `#[subast]` on each cycle type lists its cross-edge
-/// children. `Parse` is always delegated through the engine. `Unparse`/`Spanned` are on the natural type
-/// for a **group-free** cycle — directly for a single self-recursive one (via injected
-/// `#[ignore_bounds]`, arbitrary depth), or by **engine delegation** (a generated natural→engine
-/// `from_nat` bridge, depth-limited) for a multi-type one. A **group-ful** cycle keeps `Unparse`/
-/// `Spanned` on the internal `pub(crate)` engine only — there the natural type is `Parse` but not
-/// directly `Unparse`/`Spanned` (see CLAUDE.md).
+/// children. `Parse`/`Unparse`/`Spanned` are **all** delegated through the internal depth-limited engine
+/// (one uniform path for every cycle), so the natural type's `Unparse`/`Spanned` are depth-limited like
+/// `Parse` — a tree deeper than `limit` panics at the terminator (see CLAUDE.md).
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {

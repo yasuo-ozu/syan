@@ -51,18 +51,21 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `syan_rust::inherit::base`), via `base_host_crate`/`requalify_ancestor`. Tests:
   `cross_crate_inherit{,_multilevel,_4level,_downstream_mid}.rs`, `cross_crate_super_self.rs`.
 - **`#[recurse(limit = N)]`** (type transformer): turns a module of mutually-recursive AST types into
-  **natural recursive public types** + an internal depth-limited **engine** used only for `Parse`. Per
-  SCC it emits: (1) the user's cycle types as **genuine natural recursive enums/structs** — the public
-  API `Expr<S>` (one type at all depths), carrying `#[derive(Ast)]` + `Debug`/`Default`/… with `Parse`
-  always **routed to the engine**; `Unparse`/`Spanned` stay on the natural type (with `#[ignore_bounds]`
-  injected on recursive-child fields) **only for a single self-recursive group-free cycle**, else they
-  too are engine-routed (`make_natural_item`, gated by `scc_us_natural`); (2) a `pub(crate)` depth-
+  **natural recursive public types** + an internal depth-limited **engine** that backs `Parse`/`Unparse`/
+  `Spanned` by delegation. Per SCC it emits: (1) the user's cycle types as **genuine natural recursive
+  enums/structs** — the public API `Expr<S>` (one type at all depths), carrying `#[derive(Ast)]` +
+  `Debug`/`Default`/… ; `Parse`/`Unparse`/`Spanned` are **all routed to the engine** and re-supplied on
+  the natural type by **delegation** — one uniform path for every cycle (single/multi-type,
+  group-free/group-ful), no direct-impl special case (`make_natural_item`); (2) a `pub(crate)` depth-
   limited engine `__XxxRec<…, __Rec = __XxxDefault<…>>` family + terminators `__XxxTerm` + `__XxxDefault`
   depth chains (all **nonce-stamped** — §"name hygiene"), deriving the engine-routed traits, emitted
-  **only when needed** (`scc_needs_engine` — an Ast-only cycle gets none) (`make_engine_item`); (3) per-cycle
-  `__ToNat_X` conversion traits/impls (engine→natural, depth-generic, terminator arm `unreachable!`) +
-  a **delegated `impl Parse for X`** that parses the engine then `.__to_nat()`s (`gen_natural_extras`,
-  `conv_body`/`conv_expr`). The public `pub type X = …` aliases are **gone** (the natural enum owns the
+  **only when needed** (`scc_needs_engine` — a cycle deriving none of Parse/Unparse/Spanned, e.g.
+  Ast-only, gets none) (`make_engine_item`); (3) per-cycle `__ToNat_X` (engine→natural) and, when the
+  cycle delegates `Unparse`/`Spanned`, `__FromNat_X` (natural→engine) conversion traits/impls
+  (depth-generic, terminator arm `unreachable!`/`panic!`) + **delegated `impl Parse`/`Unparse`/`Spanned`
+  for X** emitted by ONE algorithm (`emit_delegated_impl`, modelling each trait via the `RecTrait` enum):
+  `Parse` parses the engine then `.__to_nat()`s; `Unparse`/`Spanned` `.__from_nat()` then call the
+  engine's impl (`gen_natural_extras`, `conv_body`/`from_conv_body`). The public `pub type X = …` aliases are **gone** (the natural enum owns the
   name); user inherent `impl`s land on the natural type verbatim. **Why Parse still needs the engine:**
   deriving `Parse` directly on a natural recursive type fails two ways — (a) per-field `field_ty: Parse`
   where-bounds form an infinite cycle (E0275); (b) backtracking `stream.dup(…)` wraps the stream in
@@ -103,20 +106,20 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 
 ## Known gaps / limitations
 
-- **`Unparse`/`Spanned` on a natural former-`#[recurse]` cycle — always on the natural type.** A natural
-  `Expr<S>` is always `Parse` (delegated through the engine). `Unparse`/`Spanned` are emitted on the
-  **natural** type in two ways: (a) **single self-recursive group-free** cycle — directly, via injected
-  `#[ignore_bounds]` (leaf-only bounds; the recursive `.unparse()`/`.span()` resolves against the *same*
-  impl, **arbitrary depth**); (b) **every other** cycle (multi-type, or group-ful) — by **delegation
-  through the engine**: a generated `__FromNat_X` bridge converts the (borrowed) natural value to the
-  depth-default engine value (`Clone`ing leaves; the leaf-`Clone` bounds are *unioned* across the cycle
-  so a member can build its siblings) and calls the engine's `Unparse`/`Spanned` (`gen_natural_extras`).
-  Delegated `Unparse`/`Spanned` are **depth-limited** — a tree deeper than `limit` `panic!`s at the
-  terminator (within the limit they succeed). Tested in `recurse_unparse_spanned.rs` (single + multi-
-  type, incl. type params; `Spanned` needs `S: Span`, threaded through the conversion impls by
-  `param_decls`, and a generated terminator `Spanned`). A **group-ful** cycle gets the delegated impl
-  too (the engine's group `for<'a> Fill<Substruct>: Unparse` HRTB *does* resolve through the delegated
-  `engine_default: Unparse<__Atom>` bound) — so it is **not** a recurse limitation. Group-ful **`Spanned`
+- **`Unparse`/`Spanned` on a natural former-`#[recurse]` cycle — always delegated through the engine.**
+  `Parse`/`Unparse`/`Spanned` are all re-supplied on the natural type by **one uniform delegated path**
+  (no direct-impl special case): `Parse` parses the engine then `__ToNat`s; `Unparse`/`Spanned` go through
+  a generated `__FromNat_X` bridge that converts the (borrowed) natural value to the depth-default engine
+  value (`Clone`ing leaves; the leaf-`Clone` bounds are *unioned* across the cycle so a member can build
+  its siblings) and calls the engine's `Unparse`/`Spanned`. All three delegating impls are emitted by ONE
+  algorithm (`emit_delegated_impl` + the `RecTrait` model). Delegated `Unparse`/`Spanned` are therefore
+  **depth-limited** like `Parse` — a tree deeper than `limit` `panic!`s at the terminator (within the
+  limit they succeed; `unparse_past_limit_panics` pins this). This is the deliberate trade for uniformity
+  (the former single-self-recursive *direct* path was arbitrary-depth but a separate code path).
+  Tested in `recurse_unparse_spanned.rs` (single + multi-type, incl. type params; `Spanned` needs `S:
+  Span`, threaded through the conversion impls by `param_decls`, and a generated terminator `Spanned`). A
+  **group-ful** cycle uses the same delegation (the engine's group `for<'a> Fill<Substruct>: Unparse` HRTB
+  *does* resolve through the delegated `engine_default: Unparse<__Atom>` bound). Group-ful **`Spanned`
   works** for the usual `S=()` span (`group_ful_spanned_via_delegation` in `recurse_unparse_spanned.rs`),
   enabled by `impl Spanned for ()` (the empty group slot is span-neutral). What can still fail is a
   **library-level** leaf gap shared with *non-`#[recurse]`* group types: delimiter symbols only `Unparse`
@@ -170,25 +173,29 @@ metadata ping-pong only supplies each type's structure. Code: `macro/ast.rs` + `
 
 ---
 
-# `#[recurse]` expansion (natural types + internal Parse engine)
+# `#[recurse]` expansion (natural types + internal engine, delegated impls)
 
 `#[recurse(limit = N)]` emits, per SCC:
 
 1. **Natural public types** — the user's cycle types *un-renamed* (`Expr<S>`, one type at all depths),
-   with the `#[derive(…)]` list rewritten: `Parse` **removed**, everything else (`Ast`, `Debug`,
-   `Default`, `Unparse`, `Spanned`, …) kept, and `#[ignore_bounds]` injected on every recursive-child
-   field so the kept `Unparse`/`Spanned` derives emit **leaf-only** bounds (no E0275 where-cycle).
-   `make_natural_item`.
-2. **Engine types** (`pub(crate)`) — today's depth-limited `__XxxRec<…, __Rec = __XxxDefault<…>>` family
-   (a back-edge to a root becomes the depth param `__Rec`, one per root) + terminators `XxxTerm` +
-   `__XxxDefault` depth chains, deriving **only** `Parse`. Each depth level is a *distinct* finite type,
-   which bottoms out **both** Parse E0275 cycles (the per-field `field_ty: Parse` where-cycle **and** the
-   `stream.dup(…)` `Dup<…>` stream-monomorphization cycle). `make_engine_item`.
-3. **Conversion + delegated Parse** — a private depth-generic `__ToNat_X` trait/impl per cycle type
-   (engine→natural; a back-edge collapses to `__Rec`, a cross-edge bounds the sibling node, containers
-   map element-wise; terminator arm is `unreachable!`) + a hand-emitted **`impl Parse for Expr<S>`** that
-   parses the engine then `.__to_nat()`s. `gen_natural_extras`, `conv_body`/`conv_expr`. (Deep-copies
-   once per top-level parse; preserves the engine's lenient depth-truncation semantics.)
+   with the `#[derive(…)]` list rewritten: `Parse`/`Unparse`/`Spanned` **removed** (re-supplied by
+   delegation, below), everything else (`Ast`, `Debug`, `Default`, …) kept; the engine-routed derives'
+   field helper attrs (`#[group]`/`#[ignore_bounds]`/…) are stripped from the natural type (they live on
+   the engine). `make_natural_item`.
+2. **Engine types** (`pub(crate)`) — the depth-limited `__XxxRec<…, __Rec = __XxxDefault<…>>` family
+   (a back-edge to a root becomes the depth param `__Rec`, one per root) + terminators `__XxxTerm` +
+   `__XxxDefault` depth chains, deriving the engine-routed traits (`Parse`/`Unparse`/`Spanned` as
+   applicable). Each depth level is a *distinct* finite type, which bottoms out **both** Parse E0275
+   cycles (the per-field `field_ty: Parse` where-cycle **and** the `stream.dup(…)` `Dup<…>`
+   stream-monomorphization cycle) and lets `Unparse`/`Spanned` derive normally. `make_engine_item`.
+3. **Conversion + delegated impls** — per cycle type: a private depth-generic `__ToNat_X` (engine→natural)
+   and, when the cycle delegates `Unparse`/`Spanned`, `__FromNat_X` (natural→engine) trait/impl (a
+   back-edge collapses to `__Rec`, a cross-edge bounds the sibling node, containers map element-wise;
+   terminator arm is `unreachable!`/`panic!`) + **delegated `impl Parse`/`Unparse`/`Spanned` for Expr<S>**
+   emitted by one algorithm (`emit_delegated_impl`, per-trait shape from the `RecTrait` model): `Parse`
+   parses the engine then `.__to_nat()`s; `Unparse`/`Spanned` `.__from_nat()` (cloning leaves) then call
+   the engine's impl. `gen_natural_extras`, `conv_body`/`conv_expr` + `from_conv_body`/`from_conv_expr`.
+   (Delegation deep-copies once per call; `Unparse`/`Spanned` are therefore depth-limited like `Parse`.)
 
 The public `pub type Xxx = …` alias is **gone** (the natural enum owns the name); user inherent `impl`s
 land on the natural type verbatim. A **pure by-value cycle** (no heap indirection on any edge) is
@@ -202,6 +209,7 @@ visitor metadata (`@ast` + `@subast`, re-exported under the type name) exactly l
 `visitor!(<cycle types>)` builds a **non-depth-generic** acyclic visitor (`generate_module`/`gen_side`):
 `visit_xxx(&mut self, &Expr<S>)`, dispatch to listed cross-edges via `this.visit_<head>`, drill an
 unlisted cross-edge inline, descend containers/tuples — closures and `visit_mut` included. The engine,
-conversions, and terminators are **fully internal** (`pub(crate)`, in no metadata) — used only to
-implement `Parse`, which the defining crate emits (so a downstream cross-crate visitor over the natural
-type has no orphan issue and parses via the upstream `Expr<S>: Parse`).
+conversions, and terminators are **fully internal** (`pub(crate)`, in no metadata) — used only to back
+the delegated `Parse`/`Unparse`/`Spanned` impls, which the defining crate emits (so a downstream
+cross-crate visitor over the natural type has no orphan issue and parses via the upstream `Expr<S>:
+Parse`).

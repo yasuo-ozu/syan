@@ -3,10 +3,14 @@
 Both are **capability gaps, not bugs** — the suite is green; the engine retains the traits. Each plan is
 concrete enough to execute. Code references are to `macro/recurse.rs` unless noted.
 
+> **Update (2026-06): the Unparse/Spanned path was UNIFIED.** `Parse`/`Unparse`/`Spanned` now *all*
+> delegate through the engine via one algorithm (`emit_delegated_impl` + the `RecTrait` model); the
+> former single-self-recursive *direct* path (`scc_us_natural` + `#[ignore_bounds]` injection) was
+> removed. Consequence: delegated `Unparse`/`Spanned` are depth-limited like `Parse` (the old direct
+> path's arbitrary depth is gone — the deliberate trade for uniformity). The notes below predate that.
+
 Status quo recap (what's already shipped):
-- `Parse` always delegates engine→natural (`__ToNat_*` + `gen_natural_extras`).
-- `Unparse`/`Spanned` reach the natural type for **group-free** cycles: directly via `#[ignore_bounds]`
-  (single self-recursive) or via the `__FromNat_*` engine delegation (multi-type, depth-limited).
+- `Parse`/`Unparse`/`Spanned` all delegate engine↔natural (`__ToNat_*`/`__FromNat_*`, one emitter).
 - `param_decls` already threads *param bounds* (`S: Span`) into the conversion/delegation impls.
 - A cycle type's full `where`-clause is threaded onto the generated impls (`where_preds_of`) — **#2 DONE**.
 - All generated type/trait names are nonce-stamped, so a user `ExprTerm`/`__XxxRec`/… can't collide

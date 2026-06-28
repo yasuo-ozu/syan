@@ -790,15 +790,141 @@ fn leaf_field_types(item: &Item, child_heads: &HashSet<String>, nonce: u64) -> V
     out
 }
 
+/// A "mock model" of the three traits `#[recurse]` re-implements on the natural type by **delegating**
+/// to the depth-limited engine. Each natural type's `Parse`/`Unparse`/`Spanned` impl forwards to the
+/// engine's own (direct, derived) impl through one of the two conversion bridges; this enum captures just
+/// enough of each trait's *shape* that ONE emitter (`emit_delegated_impl`) produces all three, instead of
+/// three near-identical hand-written `impl` blocks.
+///
+/// The two differ only in the **direction** of the natural↔engine conversion, which follows from whether
+/// the trait *produces* or *consumes* the value:
+///   * `Parse` produces `Self` → build the engine value, then `__ToNat` it to the natural type.
+///   * `Unparse`/`Spanned` consume `&self` → `__FromNat` the natural value to the engine, then call the
+///     engine's method.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecTrait {
+    Parse,
+    Unparse,
+    Spanned,
+}
+
+/// The per-trait pieces of a delegating impl — the "filled-in" model for one cycle type. Spliced into the
+/// single shared skeleton in `emit_delegated_impl`.
+struct DelegSpec {
+    /// Extra impl generic params beyond the type's own, placed after the `#(#xdecl,)*` trailing comma
+    /// (`__Atom` for `Parse`/`Unparse`; empty for `Spanned`).
+    impl_extra: TokenStream,
+    /// The trait reference on the natural type (`Parse<__Atom>` / `Unparse<__Atom>` / `Spanned`).
+    trait_ref: TokenStream,
+    /// Extra where-predicates not involving the engine (`__Atom: Spanned + Clone` for `Parse`).
+    extra_where: TokenStream,
+    /// The engine-side trait bound (`Parse<__Atom, Error = …>` / `Unparse<__Atom>` / `Spanned<Span = S>`).
+    engine_trait_bound: TokenStream,
+    /// Associated-type items (`type Error = …;` / `type Span = S;` / none).
+    assoc_items: TokenStream,
+    /// The method definition, including the delegation body.
+    method: TokenStream,
+}
+
+/// Emit the delegating `impl <Trait> for <natural type>` for one cycle type — the unified algorithm for
+/// all three of `Parse`/`Unparse`/`Spanned`. The engine supplies the *direct* (derived) impl; this is its
+/// *delegating* counterpart. `engine_default` is the engine instantiated at the public depth defaults;
+/// `to_nat`/`from_nat` are this type's conversion-trait idents; `span_param` is the cycle's span type
+/// param (required only by `Spanned`); `where_preds` is the cycle type's own `where`-clause.
+#[allow(clippy::too_many_arguments)]
+fn emit_delegated_impl(
+    t: RecTrait,
+    id: &Ident,
+    xdecl: &[TokenStream],
+    xuse: &[TokenStream],
+    engine_default: &TokenStream,
+    to_nat: &Ident,
+    from_nat: &Ident,
+    span_param: Option<&Ident>,
+    where_preds: &[TokenStream],
+) -> TokenStream {
+    // The conversion-trait bound the delegation goes through: `__ToNat` (engine→natural, for `Parse`) or
+    // `__FromNat` (natural→engine, for `Unparse`/`Spanned`).
+    let conv_bound = match t {
+        RecTrait::Parse => quote!( #to_nat<#(#xuse),*> ),
+        RecTrait::Unparse | RecTrait::Spanned => quote!( #from_nat<#(#xuse),*> ),
+    };
+    let spec = match t {
+        RecTrait::Parse => DelegSpec {
+            impl_extra: quote!(__Atom),
+            trait_ref: quote!( ::syan::parse::Parse<__Atom> ),
+            extra_where: quote!( __Atom: ::syan::span::Spanned + ::core::clone::Clone, ),
+            engine_trait_bound: quote!( ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError> ),
+            assoc_items: quote!( type Error = ::syan::error::ParseError; ),
+            method: quote! {
+                fn parse(
+                    __syan_s: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
+                ) -> ::core::result::Result<Self, Self::Error> {
+                    ::core::result::Result::Ok(
+                        #to_nat::__to_nat(
+                            <#engine_default as ::syan::parse::Parse<__Atom>>::parse(__syan_s)?,
+                        ),
+                    )
+                }
+            },
+        },
+        RecTrait::Unparse => DelegSpec {
+            impl_extra: quote!(__Atom),
+            trait_ref: quote!( ::syan::parse::Unparse<__Atom> ),
+            extra_where: quote!(),
+            engine_trait_bound: quote!( ::syan::parse::Unparse<__Atom> ),
+            assoc_items: quote!(),
+            method: quote! {
+                fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                    &self,
+                    __sink: &mut __E,
+                ) -> ::core::result::Result<(), __E::Error> {
+                    let __e: #engine_default = #from_nat::__from_nat(self);
+                    <#engine_default as ::syan::parse::Unparse<__Atom>>::unparse(&__e, __sink)
+                }
+            },
+        },
+        RecTrait::Spanned => {
+            let sp = span_param.expect("Spanned delegation requires the cycle's span type param");
+            DelegSpec {
+                impl_extra: quote!(),
+                trait_ref: quote!( ::syan::span::Spanned ),
+                extra_where: quote!(),
+                engine_trait_bound: quote!( ::syan::span::Spanned<Span = #sp> ),
+                assoc_items: quote!( type Span = #sp; ),
+                method: quote! {
+                    fn span(&self) -> Self::Span {
+                        let __e: #engine_default = #from_nat::__from_nat(self);
+                        <#engine_default as ::syan::span::Spanned>::span(&__e)
+                    }
+                },
+            }
+        }
+    };
+    let DelegSpec { impl_extra, trait_ref, extra_where, engine_trait_bound, assoc_items, method } = spec;
+    // The shared skeleton: same for all three — only the model's pieces above vary.
+    quote! {
+        impl<#(#xdecl,)* #impl_extra> #trait_ref for #id<#(#xuse),*>
+        where
+            #extra_where
+            #engine_default: #engine_trait_bound + #conv_bound,
+            #(#where_preds,)*
+        {
+            #assoc_items
+            #method
+        }
+    }
+}
+
 /// For an SCC whose natural types own the public names, emit the engine→natural bridge: one
 /// `__ToNat_X` trait + impl per cycle type, a terminator `__to_nat` (`unreachable!`) per root, and the
-/// delegated `impl Parse for X` (parse the depth-limited engine, then `.__to_nat()`). When
-/// `Unparse`/`Spanned` are engine-routed (a multi-type or group-ful cycle), also emit the *reverse*
-/// `__FromNat_X` bridge (natural→engine, `Clone`ing leaves, terminator `panic!`s past the depth limit)
-/// and a delegated `impl Unparse`/`impl Spanned` for the natural type that converts then calls the
-/// engine's impl. Replaces the old `@recurse` metadata + public aliases. `default_for_root` maps each
-/// root to its `__<root>Default` depth alias; `rec_for_root` to its depth param; `root_generics` are the
-/// roots' (shared) params.
+/// delegated `impl Parse for X` (parse the depth-limited engine, then `.__to_nat()`). `Unparse`/`Spanned`
+/// are likewise re-supplied on the natural type by **delegation**: the *reverse* `__FromNat_X` bridge
+/// (natural→engine, `Clone`ing leaves, terminator `panic!`s past the depth limit) + a delegated
+/// `impl Unparse`/`impl Spanned` that converts then calls the engine's impl. All three delegating impls
+/// are emitted by the single `emit_delegated_impl` algorithm. Replaces the old `@recurse` metadata +
+/// public aliases. `default_for_root` maps each root to its `__<root>Default` depth alias; `rec_for_root`
+/// to its depth param; `root_generics` are the roots' (shared) params.
 #[allow(clippy::too_many_arguments)]
 fn gen_natural_extras(
     scc: &HashSet<String>,
@@ -886,6 +1012,7 @@ fn gen_natural_extras(
         };
         let xs = id.to_string();
         let tn = trait_name(&xs);
+        let ftn = from_trait_name(&xs);
         let engine = &internal_names[&xs];
         let xdecl = param_decls(generics);
         let xuse = generic_tokens(generics).1;
@@ -928,38 +1055,28 @@ fn gen_natural_extras(
                 fn __to_nat(self) -> #id<#(#xuse),*> { #body }
             }
         });
+        // The cycle's span type is its first type param (recurse convention) — and the engine's
+        // `Spanned::Span` equals it (the `WithSpan<_, S>` leaves pin it). Used by the delegated `Spanned`
+        // (so the *private* engine type doesn't leak into the public assoc type — E0446).
+        let span_param = generics.params.iter().find_map(|p| match p {
+            GenericParam::Type(t) => Some(&t.ident),
+            _ => None,
+        });
         // Delegated `Parse` on the natural type — only when the user derived `Parse` (else the engine
-        // has no `Parse` impl to delegate to).
+        // has no `Parse` impl to delegate to). Emitted by the unified algorithm (engine→natural via
+        // `__ToNat`).
         if parse_types.contains(&xs) {
-            out.extend(quote! {
-                impl<#(#xdecl,)* __Atom> ::syan::parse::Parse<__Atom> for #id<#(#xuse),*>
-                where
-                    __Atom: ::syan::span::Spanned + ::core::clone::Clone,
-                    #engine_default: ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError>,
-                    #engine_default: #tn<#(#xuse),*>,
-                    #(#where_preds,)*
-                {
-                    type Error = ::syan::error::ParseError;
-                    fn parse(
-                        __syan_s: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
-                    ) -> ::core::result::Result<Self, Self::Error> {
-                        ::core::result::Result::Ok(
-                            #tn::__to_nat(
-                                <#engine_default as ::syan::parse::Parse<__Atom>>::parse(__syan_s)?,
-                            ),
-                        )
-                    }
-                }
-            });
+            out.extend(emit_delegated_impl(
+                RecTrait::Parse, id, &xdecl, &xuse, &engine_default, &tn, &ftn, span_param, &where_preds,
+            ));
         }
 
-        // Natural→engine bridge (`__FromNat_X`) for an engine-delegated `Unparse`/`Spanned` cycle, plus
-        // the delegated impls. The bridge `Clone`s leaves into the engine; recursive children recurse
-        // through it (terminator `panic!`s past the depth limit — see below). `Unparse`/`Spanned` then
-        // convert the (borrowed) natural value to the depth-default engine value and call the engine's
-        // own impl.
+        // Natural→engine bridge (`__FromNat_X`) for a delegated `Unparse`/`Spanned` cycle, plus the
+        // delegated impls. The bridge `Clone`s leaves into the engine; recursive children recurse through
+        // it (terminator `panic!`s past the depth limit — see below). `Unparse`/`Spanned` then convert the
+        // (borrowed) natural value to the depth-default engine value and call the engine's own impl — all
+        // via the same `emit_delegated_impl` algorithm (natural→engine via `__FromNat`).
         if needs_from_nat {
-            let ftn = from_trait_name(&xs);
             let from_body = from_conv_body(item, id, engine, &child_heads, nonce);
             out.extend(quote! {
                 #[doc(hidden)]
@@ -979,46 +1096,16 @@ fn gen_natural_extras(
                 }
             });
             if unparse_types.contains(&xs) {
-                out.extend(quote! {
-                    impl<#(#xdecl,)* __Atom> ::syan::parse::Unparse<__Atom> for #id<#(#xuse),*>
-                    where
-                        #engine_default: ::syan::parse::Unparse<__Atom> + #ftn<#(#xuse),*>,
-                        #(#where_preds,)*
-                    {
-                        fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
-                            &self,
-                            __sink: &mut __E,
-                        ) -> ::core::result::Result<(), __E::Error> {
-                            let __e: #engine_default = #ftn::__from_nat(self);
-                            <#engine_default as ::syan::parse::Unparse<__Atom>>::unparse(&__e, __sink)
-                        }
-                    }
-                });
+                out.extend(emit_delegated_impl(
+                    RecTrait::Unparse, id, &xdecl, &xuse, &engine_default, &tn, &ftn, span_param,
+                    &where_preds,
+                ));
             }
-            if spanned_types.contains(&xs) {
-                // The cycle's span type is its first type param (recurse convention) — and the engine's
-                // `Spanned::Span` equals it (the `WithSpan<_, S>` leaves pin it). Use `type Span = S`
-                // directly so the *private* engine type doesn't leak into this public assoc type (E0446);
-                // the body delegates through the engine (bounded `Spanned<Span = S>`).
-                let span_param = generics.params.iter().find_map(|p| match p {
-                    GenericParam::Type(t) => Some(&t.ident),
-                    _ => None,
-                });
-                if let Some(sp) = span_param {
-                    out.extend(quote! {
-                        impl<#(#xdecl),*> ::syan::span::Spanned for #id<#(#xuse),*>
-                        where
-                            #engine_default: ::syan::span::Spanned<Span = #sp> + #ftn<#(#xuse),*>,
-                            #(#where_preds,)*
-                        {
-                            type Span = #sp;
-                            fn span(&self) -> Self::Span {
-                                let __e: #engine_default = #ftn::__from_nat(self);
-                                <#engine_default as ::syan::span::Spanned>::span(&__e)
-                            }
-                        }
-                    });
-                }
+            if spanned_types.contains(&xs) && span_param.is_some() {
+                out.extend(emit_delegated_impl(
+                    RecTrait::Spanned, id, &xdecl, &xuse, &engine_default, &tn, &ftn, span_param,
+                    &where_preds,
+                ));
             }
         }
     }
@@ -1658,66 +1745,31 @@ fn strip_field_helper_attrs(fields: &mut Fields) {
     }
 }
 
-/// Inject `#[ignore_bounds]` on every field whose type references a cycle type (a *recursive child*),
-/// so the natural type's `Unparse`/`Spanned` derive emits leaf-only bounds (the recursion resolves
-/// coinductively at the body's `.unparse()`/`.span()` call sites, not via an E0275 where-bound cycle).
-/// A user-written `#[ignore_bounds]` is left as-is (not doubled).
-fn inject_ignore_bounds(fields: &mut Fields, scc: &HashSet<String>) {
-    let go = |f: &mut Field| {
-        let mut refs = HashSet::new();
-        collect_refs(&f.ty, scc, &mut refs);
-        if !refs.is_empty() && !f.attrs.iter().any(|a| a.path().is_ident("ignore_bounds")) {
-            f.attrs.push(syn::parse_quote!(#[ignore_bounds]));
-        }
-    };
-    match fields {
-        Fields::Named(n) => n.named.iter_mut().for_each(go),
-        Fields::Unnamed(u) => u.unnamed.iter_mut().for_each(go),
-        Fields::Unit => {}
-    }
-}
-
-/// The public **natural** form of a cycle type. `Parse` is always routed to the engine (it needs the
-/// depth-limited engine: a natural `Parse` overflows both on the per-field where-bound cycle and on the
-/// backtracking `Dup<…>` stream-type recursion). `Unparse`/`Spanned` are kept on the natural type when
-/// the cycle is **group-free** (`us_natural`) — then `#[ignore_bounds]` is injected on recursive-child
-/// fields so their leaf-only-bounded impls compile (the recursion resolves at the body's call sites);
-/// for a **group-ful** cycle they too are engine-routed (the group `Fill` bounds would need cycle-wide
-/// unioning). When the natural type carries a structural derive its field helper attrs are kept (the
-/// derive consumes them); otherwise they are stripped (else unregistered). Returns `(natural item,
-/// engine-routed derive paths)`.
-fn make_natural_item(item: &Item, scc: &HashSet<String>, us_natural: bool) -> (Item, Vec<Path>) {
-    let engine_routed: &[&str] = if us_natural {
-        &["Parse"]
-    } else {
-        &["Parse", "Unparse", "Spanned"]
-    };
+/// The public **natural** form of a cycle type. `Parse`/`Unparse`/`Spanned` are **all** routed to the
+/// depth-limited engine and re-supplied on the natural type by delegation (`gen_natural_extras` /
+/// `emit_delegated_impl`): a natural `Parse` overflows (per-field where-bound cycle + backtracking
+/// `Dup<…>` stream recursion), and `Unparse`/`Spanned` use the uniform delegated path so every cycle —
+/// single/multi-type, group-free/group-ful — is handled identically. Everything else (`Ast`, `Debug`,
+/// `Default`, `#[subast]`, docs, …) stays on the natural type; the engine-routed structural-derive field
+/// helper attrs (`#[group]`/`#[ignore_bounds]`/…) are stripped from the natural type (it carries no
+/// structural derive that would consume them — they live on the engine, built from the original item).
+/// Returns `(natural item, engine-routed derive paths)`.
+fn make_natural_item(item: &Item, _scc: &HashSet<String>) -> (Item, Vec<Path>) {
+    let engine_routed: &[&str] = &["Parse", "Unparse", "Spanned"];
     let mut it = item.clone();
     let engine_paths = match &mut it {
         Item::Enum(e) => {
             let (nat, ep) = split_cycle_derives(&e.attrs, engine_routed);
-            // Does the natural type still carry a structural derive (Unparse/Spanned) that consumes the
-            // field helper attrs and needs `#[ignore_bounds]` on recursive children?
-            let structural = derives_any(&nat, &["Unparse", "Spanned"]);
             e.attrs = nat;
             for v in &mut e.variants {
-                if structural {
-                    inject_ignore_bounds(&mut v.fields, scc);
-                } else {
-                    strip_field_helper_attrs(&mut v.fields);
-                }
+                strip_field_helper_attrs(&mut v.fields);
             }
             ep
         }
         Item::Struct(s) => {
             let (nat, ep) = split_cycle_derives(&s.attrs, engine_routed);
-            let structural = derives_any(&nat, &["Unparse", "Spanned"]);
             s.attrs = nat;
-            if structural {
-                inject_ignore_bounds(&mut s.fields, scc);
-            } else {
-                strip_field_helper_attrs(&mut s.fields);
-            }
+            strip_field_helper_attrs(&mut s.fields);
             ep
         }
         _ => Vec::new(),
@@ -1864,19 +1916,6 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
         }
     }
 
-    // Per SCC: does any member have a `#[group(...)]` field? `Unparse`/`Spanned` are kept on the natural
-    // type only for a GROUP-FREE cycle — a group field's `Fill<Substruct>: Unparse` bound would have to
-    // be unioned across every cycle member (the substruct is derive-internal), which the per-type derive
-    // can't do, so a group-ful cycle keeps `Unparse`/`Spanned` on the engine instead.
-    let field_has_group = |f: &Field| f.attrs.iter().any(|a| a.path().is_ident("group"));
-    let item_has_group = |item: &Item| match item {
-        Item::Enum(e) => e
-            .variants
-            .iter()
-            .any(|v| v.fields.iter().any(&field_has_group)),
-        Item::Struct(s) => s.fields.iter().any(&field_has_group),
-        _ => false,
-    };
     let item_in_scc = |item: &Item, scc: &HashSet<String>| match item {
         Item::Enum(e) => scc.contains(&e.ident.to_string()),
         Item::Struct(s) => scc.contains(&s.ident.to_string()),
@@ -1889,42 +1928,17 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
             _ => &[],
         }
     }
-    let scc_has_group: Vec<bool> = sccs
-        .iter()
-        .map(|scc| {
-            items
-                .iter()
-                .any(|item| item_in_scc(item, scc) && item_has_group(item))
-        })
-        .collect();
-    // Keep `Unparse`/`Spanned` on the *natural* type only for a **single, self-recursive, group-free**
-    // cycle. There the leaf-only-bounded impl (via injected `#[ignore_bounds]`) always type-checks: the
-    // body's recursive `.unparse()`/`.span()` call resolves against the *same* impl, so no sibling's
-    // bounds need to be in scope. A multi-type cycle would need each member to carry every *other*
-    // member's leaf bounds (the members' leaf field types generally differ), and a group-ful cycle would
-    // additionally need the derive-internal `Fill<Substruct>` bounds unioned — neither is expressible
-    // per-type, so those keep `Unparse`/`Spanned` on the engine (where the depth param breaks the
-    // cycle). See `docs/recurse-natural-types-plan.md` §5.
-    let scc_us_natural: Vec<bool> = sccs
-        .iter()
-        .enumerate()
-        .map(|(i, scc)| scc.len() == 1 && !scc_has_group[i])
-        .collect();
-    // The depth-limited engine (+ terminators + `__ToNat_*` conversion) backs `Parse` and any
-    // engine-routed `Unparse`/`Spanned`. A cycle that derives no `Parse` and keeps its
-    // `Unparse`/`Spanned` on the natural type (or derives none) needs no engine — emit just the natural
-    // types (with their direct `Unparse`/`Spanned`/`Ast`).
+    // `Parse`/`Unparse`/`Spanned` are **all** delegated through the depth-limited engine — one uniform
+    // path for every cycle (single/multi-type, group-free/group-ful). So a cycle needs the engine (+
+    // terminators + `__ToNat_*`/`__FromNat_*` conversions) iff it derives any of the three. A cycle that
+    // derives none of them (e.g. `Ast`-only) needs no engine — emit just the natural types.
     let scc_needs_engine: Vec<bool> = sccs
         .iter()
-        .enumerate()
-        .map(|(i, scc)| {
-            let has_parse = items
-                .iter()
-                .any(|item| item_in_scc(item, scc) && derives_any(item_attrs(item), &["Parse"]));
-            let has_us = items.iter().any(|item| {
-                item_in_scc(item, scc) && derives_any(item_attrs(item), &["Unparse", "Spanned"])
-            });
-            has_parse || (!scc_us_natural[i] && has_us)
+        .map(|scc| {
+            items.iter().any(|item| {
+                item_in_scc(item, scc)
+                    && derives_any(item_attrs(item), &["Parse", "Unparse", "Spanned"])
+            })
         })
         .collect();
 
@@ -1950,15 +1964,14 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
         .collect();
 
     // Cycle types that get a *delegated* natural `Unparse`/`Spanned` via the `__FromNat` bridge to the
-    // engine: any cycle that derives the trait but does NOT keep it on the natural type directly (i.e.
-    // every non-`us_natural` cycle — multi-type, or group-ful). The delegation is structurally identical
-    // for a group-ful cycle: `from_nat` clones the leaf `brace` and recurses into `inner`, and the
-    // engine's group `Unparse`/`Spanned` (with its `for<'a> Fill<Substruct>: Unparse` HRTB) *does*
-    // resolve through the delegated impl's `engine_default: Unparse<__Atom>` bound. (A concrete
-    // group-ful `.unparse()`/`.span()` can still hit a **library-level** leaf gap shared with
+    // engine — i.e. every cycle type that derives the trait (the delegated path is now uniform; there is
+    // no longer a direct natural-impl special case). The delegation is structurally identical across
+    // single/multi-type and group-free/group-ful: `from_nat` clones leaf fields and recurses into cycle
+    // children, and the engine's own (derived) `Unparse`/`Spanned` — including the group `for<'a>
+    // Fill<Substruct>: Unparse` HRTB — resolves through the delegated impl's `engine_default` bound. (A
+    // concrete group-ful `.unparse()`/`.span()` can still hit a **library-level** leaf gap shared with
     // non-`#[recurse]` group types — delimiter symbols only `Unparse` to a `From<String>` atom, not
-    // `TokenTree`; a `Group<(),…>` slot needs `(): Spanned` — but that is orthogonal to recurse. See
-    // `ui/recurse_group_ful_unparse.rs`.)
+    // `TokenTree` — but that is orthogonal to recurse. See `ui/recurse_group_ful_unparse.rs`.)
     let delegated_trait = |trait_name: &str| -> HashSet<String> {
         items
             .iter()
@@ -1968,9 +1981,8 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
                     Item::Struct(s) => (s.ident.to_string(), &s.attrs),
                     _ => return None,
                 };
-                let idx = *type_to_scc.get(&id)?;
-                (!scc_us_natural[idx] && derives_any(attrs, &[trait_name]))
-                    .then_some(id)
+                let _idx = *type_to_scc.get(&id)?;
+                derives_any(attrs, &[trait_name]).then_some(id)
             })
             .collect()
     };
@@ -2012,16 +2024,15 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
             Some(name) => {
                 let idx = type_to_scc[&name];
                 let scc = &sccs[idx];
-                // Keep Unparse/Spanned on the natural type only for a single self-recursive group-free
-                // cycle; engine-route them otherwise.
-                let us_natural = scc_us_natural[idx];
-                let (natural, engine_paths) = make_natural_item(item, scc, us_natural);
+                // Parse/Unparse/Spanned are all engine-routed and re-supplied by delegation; the natural
+                // type keeps only the non-engine derives (Ast/Debug/…).
+                let (natural, engine_paths) = make_natural_item(item, scc);
                 if scc_needs_engine[idx] {
                     let ctx = &plans[idx].0;
                     let engine = make_engine_item(item, ctx, &engine_paths);
                     out_items.push(quote!(#natural #engine));
                 } else {
-                    // No engine: just the natural type (+ its direct Unparse/Spanned/Ast).
+                    // No engine (derives none of Parse/Unparse/Spanned): just the natural type (+ Ast/…).
                     out_items.push(quote!(#natural));
                 }
             }
