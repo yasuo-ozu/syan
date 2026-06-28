@@ -41,10 +41,14 @@ Status quo recap (what's already shipped):
 > group-ful type now *has* the `Unparse`/`Spanned` impl, conditionally provable for any atom whose
 > leaves satisfy it — no worse than a non-recurse group type.
 >
-> **Residual (library-level, out of scope for recurse):** to actually unparse a group to a real
-> proc-macro atom, the library would need symbol→`TokenTree` `Unparse` (or a shipped `From<String>`
-> atom); to `span()` an empty-slot group it would need `(): Spanned`. Those are general
-> `#[derive(Unparse/Spanned)]`/atom features, tracked separately if wanted.
+> **Residual (library-level, out of scope for recurse):**
+>  - **Spanned**: `impl Spanned for ()` was added (the empty group slot is span-neutral), so group-ful
+>    `.span()` now **works for the usual `S=()`** span — `group_ful_spanned_via_delegation` in
+>    `recurse_unparse_spanned.rs`. For a *non-`()`* span type the empty slot still can't join the
+>    delimiters' span (it would need `(): Spanned<Span = S>`); that requires the group's span fold to skip
+>    its `()` slot (a `Group`-derive change), not done.
+>  - **Unparse**: to unparse a group to a real proc-macro atom the library would need symbol→`TokenTree`
+>    `Unparse` (or a shipped `From<String>` atom). Still a general atom feature, tracked separately.
 
 **Today.** A cycle with a `#[group(self.brace)]` field keeps `Unparse`/`Spanned` on the `pub(crate)`
 engine only (`scc_us_natural` and the delegation sets exclude group-ful via `!scc_has_group`). So a
