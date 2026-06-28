@@ -122,6 +122,28 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
                 e.matchkey(),
             );
         }
+        // Reject generic arguments on any segment: a subast entry names a type by *path only* — the path
+        // is used verbatim as a metadata-macro fetch target (`path! { .. }`) and a drill scrutinee, where
+        // `<..>` is illegal (otherwise a cryptic "expected `!` or `::`, found `<`" surfaces at the visitor).
+        if e.path
+            .segments
+            .iter()
+            .any(|s| !matches!(s.arguments, PathArguments::None))
+        {
+            let p = &e.path;
+            let mut stripped = e.path.clone();
+            for s in &mut stripped.segments {
+                s.arguments = PathArguments::None;
+            }
+            abort!(
+                e.path,
+                "`#[subast(..)]` path `{}` carries generic arguments; a subast entry names a type by \
+                 path only (it is used as a metadata-macro fetch target and a match scrutinee, where \
+                 `<..>` is illegal). Drop the arguments — write `{}`.",
+                quote!(#p).to_string().replace(' ', ""),
+                quote!(#stripped).to_string().replace(' ', ""),
+            );
+        }
     }
     let mut seen: HashMap<String, ()> = HashMap::new();
     for e in &entries {
