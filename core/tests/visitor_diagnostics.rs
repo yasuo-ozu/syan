@@ -13,7 +13,7 @@ fn visitor_diagnostics() {
     // `visitor!()` over a cycle that follows an unlisted intermediate forming a cycle of unlisted
     // intermediates (list one of them to break it).
     t.compile_fail("tests/ui/visitor_recurse_unlisted_coroot.rs");
-    // A `where`-bounded generic param not declared by every visited type (the bound would be
-    // undischargeable on the param-less visited type).
-    t.compile_fail("tests/ui/visitor_union_where_unshared_param.rs");
+    // (A `where`-bounded generic param not shared by all visited types is now SUPPORTED — the bounded
+    //  param becomes a per-method generic, trait keyed on the shared subset; see
+    //  `visitor_union_where_unshared_param.rs`.)
 }

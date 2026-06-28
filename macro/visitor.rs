@@ -1206,6 +1206,12 @@ fn gen_side(
         /// The free fn's full generic list (trait params ∪ this type's non-shared params), normalized
         /// lifetimes-first so a non-shared lifetime never lands after a type/const param.
         free_params: Vec<GenericParam>,
+        /// `where`-clause for the trait method (`where Self: Sized` in struct-only mode, plus any bound
+        /// on this type's method-generic params, e.g. `S: Bound`); empty in the common union mode.
+        trait_where: TokenStream,
+        /// `where`-clause for the free fn — the union predicates (trait-level) plus this type's
+        /// method-generic-param bounds; covers naming `Bounded<S>` where `S` is a method generic.
+        free_where: TokenStream,
         hook: Ident,
         hook_struct: Ident,
         body: TokenStream,
@@ -1222,6 +1228,30 @@ fn gen_side(
             let mut free_params: Vec<GenericParam> =
                 g_params.iter().cloned().chain(t.method_params.iter().cloned()).collect();
             sort_lifetimes_first(&mut free_params);
+            // This type's `where`-bounds on its method-generic params (e.g. `S: Bound` when `S` is
+            // non-shared). They can't live on the trait (it's keyed on the shared params), so they ride
+            // the per-type `visit_*` method + free fn that declares the param.
+            let mp_names: HashSet<String> = t.method_params.iter().map(param_name).collect();
+            let method_where: Vec<WherePredicate> = t
+                .own_where
+                .iter()
+                .filter(|p| where_pred_param(p).is_some_and(|id| mp_names.contains(&id.to_string())))
+                .cloned()
+                .collect();
+            // Trait method: `where Self: Sized` (struct-only) + the method-param bounds.
+            let trait_where = if struct_only {
+                let mut preds: Vec<WherePredicate> = vec![parse_quote!(Self: ::core::marker::Sized)];
+                preds.extend(method_where.iter().cloned());
+                where_clause(&preds)
+            } else {
+                quote!()
+            };
+            // Free fn: the trait-level union predicates + this type's method-param bounds.
+            let free_where = {
+                let mut preds = union_where.to_vec();
+                preds.extend(method_where.iter().cloned());
+                where_clause(&preds)
+            };
             let name = ident.to_string();
             let mname = method_ident_m(&ident, mutable).to_string();
             let tdoc = format!(
@@ -1243,6 +1273,8 @@ fn gen_side(
                 method: method_ident_m(&ident, mutable),
                 method_params,
                 free_params,
+                trait_where,
+                free_where,
                 hook: Ident::new(
                     &format!("hook_{}{}", to_snake(&ident), mt(mutable)),
                     Span::call_site(),
@@ -1336,7 +1368,7 @@ fn gen_side(
                 // In heterogeneous (struct-only) mode the method carries this type's non-shared params
                 // as generics, and `where Self: Sized` (the method-generic dispatch needs a sized Self).
                 #[doc = #{&s.tdoc}]
-                fn #{&s.method}< #(for mp in &s.method_params) { #mp, } >(&mut self, i: #amp #{&s.ty}) #(if struct_only) { where Self: ::core::marker::Sized } {
+                fn #{&s.method}< #(for mp in &s.method_params) { #mp, } >(&mut self, i: #amp #{&s.ty}) #{&s.trait_where} {
                     #{&s.method}(self, i)
                 }
             }
@@ -1360,7 +1392,7 @@ fn gen_side(
             pub fn #{&s.method}< #(for gp in &s.free_params) { #gp, } #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >(
                 this: &mut #p_v,
                 i: #amp #{&s.ty},
-            ) #uw {
+            ) #{&s.free_where} {
                 #{&s.body}
             }
         }
@@ -1609,11 +1641,26 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         shared_names.insert(param_name(bp));
     }
 
-    // Heterogeneous mode: a non-shared param is *concrete-filled* in a cross-edge (e.g. `Stmt<S, u8>`),
-    // which the union-of-params trait can't express. Make non-shared params per-method generics and go
-    // struct-only (no closures — a closure can't be `for<T>` generic). Gated to the no-inheritance case
-    // (a recurse/heterogeneous base is out of scope) so the common union+closure path is untouched.
-    let method_mode = st.base.is_none() && has_concrete_fill(&targets, &shared_names);
+    // A union param that some visited type does NOT declare. Such a param can stay a trait param (the
+    // union) only while it's *unbounded* — a type lacking it is then harmlessly quantified over it. But a
+    // `where`-bounded one (`S: Bound`) can't: applied to items over the union, a type lacking `S` carries
+    // an undischargeable `S: Bound`. So a bounded unshared param, like a concrete-filled one, must become
+    // a per-method generic with the trait keyed on the shared subset (method-mode, below).
+    let unshared_names: HashSet<String> =
+        union_params.iter().map(param_name).filter(|n| !shared_names.contains(n)).collect();
+    let has_bounded_unshared = targets.iter().any(|d| {
+        item_where_preds(&d.def)
+            .iter()
+            .any(|p| where_pred_param(p).is_some_and(|id| unshared_names.contains(&id.to_string())))
+    });
+
+    // Heterogeneous mode: a non-shared param is either *concrete-filled* in a cross-edge (e.g.
+    // `Stmt<S, u8>`) — which the union-of-params trait can't express — or carries a `where`-bound (above).
+    // Make non-shared params per-method generics and go struct-only (no closures — a closure can't be
+    // `for<T>` generic). Gated to the no-inheritance case (a recurse/heterogeneous base is out of scope)
+    // so the common union+closure path is untouched.
+    let method_mode =
+        st.base.is_none() && (has_concrete_fill(&targets, &shared_names) || has_bounded_unshared);
 
     // Trait params: the full union normally; only the shared subset in method-mode (non-shared params
     // become method generics instead).
@@ -1752,45 +1799,21 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .collect();
 
     // The union of every visited type's `where`-predicates (deduped by rendered text — identical
-    // predicates from two types are harmless but noisy), repeated on each generated item quantified
-    // over the full param union so a `enum Expr<S> where S: Bound { .. }` stays well-formed there.
+    // predicates from two types are harmless but noisy), applied (as `uw`) to each generated item
+    // quantified over the param union so a `enum Expr<S> where S: Bound { .. }` stays well-formed there.
+    // In method-mode the *non-shared* params are method generics, not trait params, so a bound on one
+    // would reference an undeclared param at the trait level — drop it here; `gen_side` re-attaches it
+    // to the per-type `visit_*` method + free fn that actually carries the param.
     let mut seen_pred: HashSet<String> = HashSet::new();
     let union_where: Vec<WherePredicate> = vtypes
         .iter()
         .flat_map(|vt| vt.own_where.iter().cloned())
+        .filter(|p| {
+            !method_mode
+                || where_pred_param(p).is_none_or(|id| !unshared_names.contains(&id.to_string()))
+        })
         .filter(|p| seen_pred.insert(quote!(#p).to_string()))
         .collect();
-
-    // A `where`-BOUNDED generic param must be declared by EVERY visited type. The visitor trait is
-    // keyed on the param union, and `union_where` is applied to items quantified over that union (the
-    // inherent `.visit()`, `IntoVisitor`, the `&mut V` blanket, …). A visited type lacking a bounded
-    // param `P` would then be quantified over `P` carrying an undischargeable `P: Bound`, producing an
-    // opaque E0277/E0283 cascade at the `visitor!()` site. Reject cleanly. (An *unbounded* unshared
-    // param is fine — `visitor_generics.rs` exercises that; only a bounded one breaks.)
-    for pred in &union_where {
-        let Some(p) = where_pred_param(pred) else { continue };
-        let pname = p.to_string();
-        if !g_params.iter().any(|gp| param_name(gp) == pname) {
-            continue; // not a union param (e.g. a bound on a concrete type) — irrelevant
-        }
-        if let Some(vt) =
-            vtypes.iter().find(|vt| !vt.own_params.iter().any(|op| param_name(op) == pname))
-        {
-            abort!(
-                Span::call_site(),
-                "visitor!(...): visited type `{}` does not declare the `where`-bounded generic param \
-                 `{}` (bound `{}`). The visitor trait is keyed on the param union and applies the \
-                 bound to items quantified over it, so `{}` would carry an undischargeable bound. \
-                 Give every visited type the param `{}`, or visit `{}` from a separate `visitor!()`.",
-                vt.ident,
-                pname,
-                quote!(#pred),
-                vt.ident,
-                pname,
-                vt.ident
-            );
-        }
-    }
 
     let shared = gen_side(
         false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
