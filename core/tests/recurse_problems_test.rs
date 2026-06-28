@@ -20,11 +20,9 @@ fn compile_fail_problems() {
     t.compile_fail("tests/ui/problem8_qself.rs");
 }
 
-// Problem 6: where clauses on cycle types are not updated by #[recurse].
-// Additionally, the current #[derive(Parse, Unparse)] asserts `where_clause.is_none()`,
-// so any where clause on a cycle type causes a derive panic before the recurse
-// transformation even runs.  The issue is documented in tests/ui/problem6_where_clause.rs;
-// no runtime assertion is possible until both limitations are resolved.
+// Problem 6 (FIXED): a where-clause on a cycle type is now threaded through the generated engine,
+// conversion, and delegated impls — positive regression test in `recurse_where_clause.rs` (both a param
+// bound `where S: Clone` and the self-referential `where Expr<S>: Marker` shape).
 
 // ── fix 10: #[recurse(limit = N)] ────────────────────────────────────────────
 

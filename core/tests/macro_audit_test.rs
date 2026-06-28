@@ -59,8 +59,8 @@ fn macro_audit_compile_fail() {
     // ── #[recurse] ──────────────────────────────────────────────────────────────────────────────
     // (#6 limit=1-generic and #7 foreign-dispatch are now FIXED — positive regression tests live in
     //  recurse_fixes.rs.)
+    // (A where-clause on a Parse-deriving cycle type is now THREADED through the generated engine /
+    //  conversion / delegated impls — positive regression test in `recurse_where_clause.rs`.)
     // Generated terminator `XxxTerm` collides with a user type of that name → E0428.
     t.compile_fail("tests/ui/audit_recurse_terminator_collision.rs");
-    // A where-clause on a cycle type is not threaded into the regenerated items → cryptic E0277.
-    t.compile_fail("tests/ui/audit_recurse_where_clause.rs");
 }

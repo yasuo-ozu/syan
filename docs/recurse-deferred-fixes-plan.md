@@ -68,7 +68,15 @@ past `limit`, like the multi-type case) and requires the leaves (incl. `brace`) 
 
 ---
 
-## #2 — `where`-clause / non-trivial param bounds on a Parse-deriving cycle type
+## #2 — `where`-clause / non-trivial param bounds on a Parse-deriving cycle type — ✅ DONE
+
+> **Implemented** (commit on branch `recurse-natural-types`): `gen_natural_extras` captures each cycle
+> type's `where`-clause (`where_preds_of`) and threads its predicates onto every generated trait
+> declaration + impl that names the natural type (`__ToNat`/`__FromNat`/delegated `Parse`/`Unparse`/
+> `Spanned`, incl. the terminator impls). Both a param bound (`where S: Clone`) and the self-referential
+> `where Expr<S>: Marker` (old "problem 6") shape work. Test: `recurse_where_clause.rs`; the
+> `ui/audit_recurse_where_clause.rs` + `ui/problem6_where_clause.rs` compile-fail probes were removed.
+> Below is the original plan, kept for reference.
 
 **Today.** `param_decls` threads simple *param bounds* (`S: Span`) into the conversion/delegation impls
 (that's what made multi-type `Spanned` work). NOT threaded: an explicit **`where`-clause** on the cycle

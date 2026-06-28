@@ -827,6 +827,10 @@ fn gen_natural_extras(
         Vec::new()
     };
 
+    // Each cycle type's `where`-clause predicates, by name — so the terminator loop (below, which names
+    // the root's natural type and impls the conversion traits) can repeat the root's clause too.
+    let mut where_preds_of: HashMap<String, Vec<TokenStream>> = HashMap::new();
+
     let mut out = TokenStream::new();
     for item in items {
         let (id, generics) = match item {
@@ -844,6 +848,17 @@ fn gen_natural_extras(
         let xdecl = param_decls(generics);
         let xuse = generic_tokens(generics).1;
         let body = conv_body(item, id, engine, &child_heads);
+        // The cycle type's own `where`-clause predicates (e.g. `where S: Clone` / `where Expr<S>:
+        // Marker`). Every generated item that NAMES the natural type `Expr<S>` (the conversion traits'
+        // method signatures, and the conversion/delegated impls) must repeat these — naming `Expr<S>`
+        // is only well-formed when its where-clause holds — else the obligation surfaces undischarged
+        // (E0277). They reference the cycle's own params, which are in scope on all of these.
+        let where_preds: Vec<TokenStream> = generics
+            .where_clause
+            .as_ref()
+            .map(|w| w.predicates.iter().map(|p| quote!(#p)).collect())
+            .unwrap_or_default();
+        where_preds_of.insert(xs.clone(), where_preds.clone());
         // engine instantiation at the public depth defaults: `__XRec<own…, __RootDefault<root>…>`
         let default_args: Vec<TokenStream> = roots_sorted
             .iter()
@@ -857,12 +872,16 @@ fn gen_natural_extras(
         // Conversion trait + engine→natural impl (always emitted; used by the delegated `Parse`).
         out.extend(quote! {
             #[doc(hidden)]
-            trait #tn<#(#xdecl),*> {
+            trait #tn<#(#xdecl),*>
+            #(if !where_preds.is_empty()) { where #(#where_preds),* }
+            {
                 fn __to_nat(self) -> #id<#(#xuse),*>;
             }
             impl<#(#xdecl,)* #(#rec_params),*> #tn<#(#xuse),*>
                 for #engine<#(#xuse,)* #(#rec_params),*>
-            #(if !root_bounds.is_empty()) { where #(#root_bounds),* }
+            #(if !root_bounds.is_empty() || !where_preds.is_empty()) {
+                where #(#root_bounds,)* #(#where_preds,)*
+            }
             {
                 fn __to_nat(self) -> #id<#(#xuse),*> { #body }
             }
@@ -876,6 +895,7 @@ fn gen_natural_extras(
                     __Atom: ::syan::span::Spanned + ::core::clone::Clone,
                     #engine_default: ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError>,
                     #engine_default: #tn<#(#xuse),*>,
+                    #(#where_preds,)*
                 {
                     type Error = ::syan::error::ParseError;
                     fn parse(
@@ -901,7 +921,9 @@ fn gen_natural_extras(
             let from_body = from_conv_body(item, id, engine, &child_heads);
             out.extend(quote! {
                 #[doc(hidden)]
-                trait #ftn<#(#xdecl),*> {
+                trait #ftn<#(#xdecl),*>
+                #(if !where_preds.is_empty()) { where #(#where_preds),* }
+                {
                     fn __from_nat(__nat: &#id<#(#xuse),*>) -> Self;
                 }
                 impl<#(#xdecl,)* #(#rec_params),*> #ftn<#(#xuse),*>
@@ -909,6 +931,7 @@ fn gen_natural_extras(
                 where
                     #(#from_root_bounds,)*
                     #(#from_leaf_clones,)*
+                    #(#where_preds,)*
                 {
                     fn __from_nat(__nat: &#id<#(#xuse),*>) -> Self { #from_body }
                 }
@@ -918,6 +941,7 @@ fn gen_natural_extras(
                     impl<#(#xdecl,)* __Atom> ::syan::parse::Unparse<__Atom> for #id<#(#xuse),*>
                     where
                         #engine_default: ::syan::parse::Unparse<__Atom> + #ftn<#(#xuse),*>,
+                        #(#where_preds,)*
                     {
                         fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
                             &self,
@@ -943,6 +967,7 @@ fn gen_natural_extras(
                         impl<#(#xdecl),*> ::syan::span::Spanned for #id<#(#xuse),*>
                         where
                             #engine_default: ::syan::span::Spanned<Span = #sp> + #ftn<#(#xuse),*>,
+                            #(#where_preds,)*
                         {
                             type Span = #sp;
                             fn span(&self) -> Self::Span {
@@ -966,8 +991,13 @@ fn gen_natural_extras(
         } else {
             quote!( <#(#root_use),*> )
         };
+        // The root's own `where`-clause — the terminator names the root's natural type and impls its
+        // conversion trait (both carrying the clause), so repeat it here too.
+        let rwp: &[TokenStream] = where_preds_of.get(r).map(Vec::as_slice).unwrap_or(&[]);
         out.extend(quote! {
-            impl<#(#root_decl),*> #tn<#(#root_use),*> for #term #term_args {
+            impl<#(#root_decl),*> #tn<#(#root_use),*> for #term #term_args
+            #(if !rwp.is_empty()) { where #(#rwp),* }
+            {
                 fn __to_nat(self) -> #root_id<#(#root_use),*> {
                     ::core::unreachable!("#[recurse]: depth-limit terminator can never be parsed")
                 }
@@ -979,7 +1009,9 @@ fn gen_natural_extras(
         if needs_from_nat {
             let ftn = from_trait_name(r);
             out.extend(quote! {
-                impl<#(#root_decl),*> #ftn<#(#root_use),*> for #term #term_args {
+                impl<#(#root_decl),*> #ftn<#(#root_use),*> for #term #term_args
+                #(if !rwp.is_empty()) { where #(#rwp),* }
+                {
                     fn __from_nat(_: &#root_id<#(#root_use),*>) -> Self {
                         ::core::panic!(
                             "#[recurse]: cannot Unparse/Spanned a natural tree deeper than the \
@@ -999,7 +1031,7 @@ fn gen_natural_extras(
             }) {
                 out.extend(quote! {
                     impl<#(#root_decl),*> ::syan::span::Spanned for #term #term_args
-                    where #sp: ::syan::span::Span {
+                    where #sp: ::syan::span::Span, #(#rwp,)* {
                         type Span = #sp;
                         fn span(&self) -> Self::Span {
                             ::core::unreachable!("#[recurse]: depth-limit terminator has no span")
