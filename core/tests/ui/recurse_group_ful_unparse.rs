@@ -1,20 +1,28 @@
-// KNOWN LIMITATION (#1, deferred): `Unparse`/`Spanned` on the NATURAL type of a **group-ful**
-// `#[recurse]` cycle. The natural `Expr<S>` is `Parse` (delegated through the depth-limited engine),
-// but a cycle with a `#[group(self.brace)]` field keeps `Unparse`/`Spanned` on the `pub(crate)` engine
-// only — they are NOT emitted on the natural type. (A group-FREE cycle does get them: directly for a
-// single self-recursive cycle, or via the `__FromNat` engine delegation for a multi-type one — see
-// `recurse_unparse_spanned.rs`.) So calling `.unparse()` on a group-ful natural `Expr` fails to resolve.
+// `Unparse` on a GROUP-FUL `#[recurse]` cycle: the natural type DOES get a delegated `Unparse` impl
+// (natural → engine `__FromNat` → engine's group `Unparse`, exactly like a multi-type group-free cycle).
+// So this is NOT a `#[recurse]` limitation. What still fails is a **library-level** leaf gap shared with
+// any non-`#[recurse]` group type: a brace/delimiter *symbol* only `Unparse`s to an atom that is
+// `From<String> + AtomParsedToAllChars`, and the usual proc-macro atom `proc_macro2::TokenTree` is not
+// one. Hence `OpenBrace: Unparse<TokenTree>` is unsatisfied.
 //
-// Why deferred: the engine's group `Unparse` carries a `for<'a> <GroupBrace<…> as EmptyGroup>::Fill<
-// Substruct<…>>: Unparse` HRTB bound whose transitive obligations can't be discharged from — or named
-// in — a delegated impl (the `Substruct` is a derive-internal, nonce-named type). Lifting it needs a
-// derive-level rework. See `docs/recurse-deferred-fixes-plan.md` §1 and CLAUDE.md "Known gaps".
-//
-// This test pins the limitation: if a future fix makes group-ful natural `Unparse` work, this stops
-// failing and should be promoted to a passing round-trip test.
+// This file pins exactly that: the SAME `OpenBrace: Unparse<TokenTree>` error arises for a plain
+// (non-recurse) group struct `Plain` AND for the recurse cycle `grp::Expr` — demonstrating that
+// `#[recurse]`'s delegation adds no extra limitation. If the library later lets symbols unparse to
+// `TokenTree` (or ships a `From<String>` atom), both stop failing together.
+use syan::nested::group::GroupBrace;
 use syan::parse::{recurse, Parse, Unparse};
-use template_quote::quote;
+use syan::source::proc_macro2::literal::Integer;
 
+// (1) plain, NON-recurse group type — already cannot unparse to `TokenTree`.
+#[derive(Parse, Unparse)]
+pub struct Plain<S> {
+    brace: GroupBrace<(), S>,
+    #[group(self.brace)]
+    inner: Vec<Integer>,
+}
+
+// (2) group-ful recurse cycle — the natural `Expr` HAS a delegated `Unparse` impl; it fails to resolve
+// for `TokenTree` for the *same* leaf reason, not for lack of an impl.
 #[recurse]
 mod grp {
     use syan::nested::group::GroupBrace;
@@ -32,10 +40,9 @@ mod grp {
     }
 }
 
+fn assert_unparse<T: Unparse<proc_macro2::TokenTree>>() {}
+
 fn main() {
-    // Parse works (delegated through the engine)...
-    let e: grp::Expr<_> = Parse::parse(quote! { { 1 } }).unwrap();
-    let mut out = Vec::<proc_macro2::TokenTree>::new();
-    // ...but `Unparse` is engine-only for a group-ful cycle, so this does not resolve on the natural type.
-    e.unparse(&mut (&mut out)).unwrap();
+    assert_unparse::<Plain<proc_macro2::Span>>(); // library-level fail (non-recurse)
+    assert_unparse::<grp::Expr<proc_macro2::Span>>(); // same library-level fail (recurse, delegated)
 }

@@ -64,8 +64,9 @@ fn macro_audit_compile_fail() {
     // (Generated internal names — engine `__XxxRec`, terminator `XxxTerm`, depth default `__XxxDefault`,
     //  conversion traits `__ToNat`/`__FromNat` — now carry a per-expansion nonce, so a user type named
     //  `ExprTerm` no longer collides; positive regression test in `recurse_no_engine.rs`.)
-    // KNOWN LIMITATION (#1, deferred): `Unparse`/`Spanned` on the natural type of a GROUP-FUL cycle is
-    // engine-only (the group `Fill<Substruct>: Unparse` chain isn't delegable) → `.unparse()` on the
-    // natural type doesn't resolve. Group-free cycles do get it (recurse_unparse_spanned.rs).
+    // A group-ful cycle's natural `Unparse`/`Spanned` IS delegated to the engine (like a multi-type
+    // cycle) — NOT a recurse limitation. The remaining failure is a library-level leaf gap shared with
+    // non-recurse group types (delimiter symbols don't `Unparse` to `TokenTree`); this test pins that
+    // the recurse cycle and a plain group struct fail identically.
     t.compile_fail("tests/ui/recurse_group_ful_unparse.rs");
 }

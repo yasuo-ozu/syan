@@ -1950,9 +1950,15 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
         .collect();
 
     // Cycle types that get a *delegated* natural `Unparse`/`Spanned` via the `__FromNat` bridge to the
-    // engine: a **multi-type, group-free** cycle that derives the trait. (A single self-recursive
-    // group-free cycle keeps the trait on the natural type directly — `us_natural`; a **group-ful** cycle
-    // keeps it on the engine only — the recursive `Fill<Substruct>: Unparse` chain isn't delegable.)
+    // engine: any cycle that derives the trait but does NOT keep it on the natural type directly (i.e.
+    // every non-`us_natural` cycle — multi-type, or group-ful). The delegation is structurally identical
+    // for a group-ful cycle: `from_nat` clones the leaf `brace` and recurses into `inner`, and the
+    // engine's group `Unparse`/`Spanned` (with its `for<'a> Fill<Substruct>: Unparse` HRTB) *does*
+    // resolve through the delegated impl's `engine_default: Unparse<__Atom>` bound. (A concrete
+    // group-ful `.unparse()`/`.span()` can still hit a **library-level** leaf gap shared with
+    // non-`#[recurse]` group types — delimiter symbols only `Unparse` to a `From<String>` atom, not
+    // `TokenTree`; a `Group<(),…>` slot needs `(): Spanned` — but that is orthogonal to recurse. See
+    // `ui/recurse_group_ful_unparse.rs`.)
     let delegated_trait = |trait_name: &str| -> HashSet<String> {
         items
             .iter()
@@ -1963,7 +1969,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
                     _ => return None,
                 };
                 let idx = *type_to_scc.get(&id)?;
-                (!scc_us_natural[idx] && !scc_has_group[idx] && derives_any(attrs, &[trait_name]))
+                (!scc_us_natural[idx] && derives_any(attrs, &[trait_name]))
                     .then_some(id)
             })
             .collect()

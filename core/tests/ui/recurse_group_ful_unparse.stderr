@@ -1,17 +1,99 @@
-error[E0599]: no method named `unparse` found for enum `Expr` in the current scope
-  --> tests/ui/recurse_group_ful_unparse.rs:40:7
+error[E0277]: the trait bound `OpenBrace: Unparse<TokenTree>` is not satisfied
+  --> tests/ui/recurse_group_ful_unparse.rs:46:22
    |
-25 |     pub enum Expr<S> {
-   |     ---------------- method `unparse` not found for this enum
-...
-40 |     e.unparse(&mut (&mut out)).unwrap();
-   |       ^^^^^^^ method not found in `Expr<syan::source::proc_macro2::Span>`
+46 |     assert_unparse::<Plain<proc_macro2::Span>>(); // library-level fail (non-recurse)
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Unparse<TokenTree>` is not implemented for `OpenBrace`
    |
-note: the method `unparse` exists on the type `syan::source::proc_macro2::literal::Integer`
-  --> src/parse/unparse.rs
+   = help: the following other types implement trait `Unparse<Atom>`:
+             `&T` implements `Unparse<Atom>`
+             `&mut T` implements `Unparse<Atom>`
+             `()` implements `Unparse<Atom>`
+             `(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A12, A13)` implements `Unparse<__SyanMacroAtom>`
+           and $N others
+   = note: required for `WithSpan<OpenBrace, proc_macro2::Span>` to implement `Unparse<TokenTree>`
+   = note: 2 redundant requirements hidden
+   = note: required for `Plain<proc_macro2::Span>` to implement `Unparse<TokenTree>`
+note: required by a bound in `assert_unparse`
+  --> tests/ui/recurse_group_ful_unparse.rs:43:22
    |
-   |     fn unparse<S: Emitter<Atom>>(&self, sink: &mut S) -> Result<(), S::Error>;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   = help: items from traits can only be used if the trait is implemented and in scope
-   = note: the following trait defines an item `unparse`, perhaps you need to implement it:
-           candidate #1: `Unparse`
+43 | fn assert_unparse<T: Unparse<proc_macro2::TokenTree>>() {}
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_unparse`
+
+error[E0277]: the trait bound `CloseBrace: Unparse<TokenTree>` is not satisfied
+  --> tests/ui/recurse_group_ful_unparse.rs:46:22
+   |
+46 |     assert_unparse::<Plain<proc_macro2::Span>>(); // library-level fail (non-recurse)
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Unparse<TokenTree>` is not implemented for `CloseBrace`
+   |
+   = help: the following other types implement trait `Unparse<Atom>`:
+             `&T` implements `Unparse<Atom>`
+             `&mut T` implements `Unparse<Atom>`
+             `()` implements `Unparse<Atom>`
+             `(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A12, A13)` implements `Unparse<__SyanMacroAtom>`
+           and $N others
+   = note: required for `WithSpan<CloseBrace, proc_macro2::Span>` to implement `Unparse<TokenTree>`
+   = note: 2 redundant requirements hidden
+   = note: required for `Plain<proc_macro2::Span>` to implement `Unparse<TokenTree>`
+note: required by a bound in `assert_unparse`
+  --> tests/ui/recurse_group_ful_unparse.rs:43:22
+   |
+43 | fn assert_unparse<T: Unparse<proc_macro2::TokenTree>>() {}
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_unparse`
+
+error[E0277]: the trait bound `OpenBrace: Unparse<TokenTree>` is not satisfied
+  --> tests/ui/recurse_group_ful_unparse.rs:47:22
+   |
+47 |     assert_unparse::<grp::Expr<proc_macro2::Span>>(); // same library-level fail (recurse, delegated)
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Unparse<TokenTree>` is not implemented for `OpenBrace`
+   |
+   = help: the following other types implement trait `Unparse<Atom>`:
+             `&T` implements `Unparse<Atom>`
+             `&mut T` implements `Unparse<Atom>`
+             `()` implements `Unparse<Atom>`
+             `(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A12, A13)` implements `Unparse<__SyanMacroAtom>`
+           and $N others
+   = note: required for `WithSpan<OpenBrace, proc_macro2::Span>` to implement `Unparse<TokenTree>`
+   = note: 3 redundant requirements hidden
+   = note: required for `Expr<proc_macro2::Span>` to implement `Unparse<TokenTree>`
+note: required by a bound in `assert_unparse`
+  --> tests/ui/recurse_group_ful_unparse.rs:43:22
+   |
+43 | fn assert_unparse<T: Unparse<proc_macro2::TokenTree>>() {}
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_unparse`
+
+error[E0277]: the trait bound `CloseBrace: Unparse<TokenTree>` is not satisfied
+  --> tests/ui/recurse_group_ful_unparse.rs:47:22
+   |
+47 |     assert_unparse::<grp::Expr<proc_macro2::Span>>(); // same library-level fail (recurse, delegated)
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Unparse<TokenTree>` is not implemented for `CloseBrace`
+   |
+   = help: the following other types implement trait `Unparse<Atom>`:
+             `&T` implements `Unparse<Atom>`
+             `&mut T` implements `Unparse<Atom>`
+             `()` implements `Unparse<Atom>`
+             `(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A10, A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A11, A12, A13)` implements `Unparse<__SyanMacroAtom>`
+             `(A12, A13)` implements `Unparse<__SyanMacroAtom>`
+           and $N others
+   = note: required for `WithSpan<CloseBrace, proc_macro2::Span>` to implement `Unparse<TokenTree>`
+   = note: 3 redundant requirements hidden
+   = note: required for `Expr<proc_macro2::Span>` to implement `Unparse<TokenTree>`
+note: required by a bound in `assert_unparse`
+  --> tests/ui/recurse_group_ful_unparse.rs:43:22
+   |
+43 | fn assert_unparse<T: Unparse<proc_macro2::TokenTree>>() {}
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_unparse`

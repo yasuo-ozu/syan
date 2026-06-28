@@ -13,26 +13,38 @@ Status quo recap (what's already shipped):
   (the old `audit_recurse_terminator_collision` limitation is gone).
 - Finite-size guard; engine emitted only when needed (`scc_needs_engine`).
 
-**Remaining: only #1 below** (group-ful natural `Unparse`/`Spanned`).
+**All three originally-deferred recurse gaps are now resolved at the recurse level.** #1 below is
+**DONE** (delegation wired); its residue is a *library-level* gap unrelated to recurse.
 
 ---
 
-## #1 — Group-ful cycle `Unparse`/`Spanned` on the natural type
+## #1 — Group-ful cycle `Unparse`/`Spanned` on the natural type — ✅ DONE (delegation wired)
 
-> **PROBE RESULT (step 1, done): it's the DEEP fix, not the quick win.** Temporarily dropping the
-> `!scc_has_group` exclusion (so a group-ful cycle gets the full `__FromNat` delegation + `impl Unparse
-> for Expr where engine_default: Unparse`) still fails to compile: `__ExprRec<S, __ExprDefault<S>>:
-> Unparse` is **not provable**. The engine's derived group `Unparse` carries a `for<'a>
-> <GroupBrace<(),S> as EmptyGroup>::Fill<Substruct<'a,S,__Rec>>: Unparse<Atom>` HRTB bound; its
-> transitive obligations can't be discharged from — or even *named* in — the delegated impl, because the
-> `Substruct` is a derive-internal (nonce-named) type. So step 2 (quick wiring) is ruled out; only the
-> step-3 derive-level rework can lift this. **Stays deferred.** (Group-ful cycles remain `Parse`-only on
-> the natural type; `Unparse`/`Spanned` live on the `pub(crate)` engine.)
+> **CORRECTION + RESOLUTION.** The earlier probe write-up here was **wrong**: it claimed
+> `__ExprRec<S,__ExprDefault<S>>: Unparse` was "not provable" because of the engine's
+> `for<'a> Fill<Substruct>: Unparse` HRTB. Re-probing with a *concrete* atom (rather than reading the
+> method-resolution summary, which only showed `Unparse<_>` with an unresolved atom) revealed the HRTB
+> **does** resolve — the compiler walks it down to concrete leaves. The real failure was a leaf:
+> `OpenBrace: Unparse<TokenTree>` — i.e. a **library-level** constraint, *not* a recurse one:
+>  - brace/delimiter *symbols* only `Unparse` to an atom that is `From<String> + AtomParsedToAllChars`,
+>    and `proc_macro2::TokenTree` is not (and no `From<String>` atom ships); and
+>  - a `Group<(),…>` slot is `()`, which impls `Span` but **not** `Spanned`, so group `Spanned` needs
+>    `(): Spanned`.
+> Both reproduce **identically for a plain non-`#[recurse]` group type** — confirmed in
+> `ui/recurse_group_ful_unparse.rs` (the cycle `grp::Expr` and a plain `Plain` struct fail on the same
+> `OpenBrace: Unparse<TokenTree>` note).
 >
-> **Pinned** by a compile-fail test: `ui/recurse_group_ful_unparse.rs` (registered in
-> `macro_audit_test.rs`) — `.unparse()` on a group-ful natural `Expr` is `no method named unparse`.
-> When the derive-level fix lands, this test stops failing and should be promoted to a passing
-> round-trip test.
+> **Implemented:** dropped the `!scc_has_group` exclusion from `delegated_trait` in `recurse()`, so a
+> group-ful cycle now gets the full `__FromNat` delegation + delegated `impl Unparse`/`impl Spanned`
+> exactly like a multi-type cycle. The `from_conv_*`/`from_leaf_clones`/terminator machinery already
+> handles a group field (the `brace` is a cloned leaf; `inner` is the recursive child). So the natural
+> group-ful type now *has* the `Unparse`/`Spanned` impl, conditionally provable for any atom whose
+> leaves satisfy it — no worse than a non-recurse group type.
+>
+> **Residual (library-level, out of scope for recurse):** to actually unparse a group to a real
+> proc-macro atom, the library would need symbol→`TokenTree` `Unparse` (or a shipped `From<String>`
+> atom); to `span()` an empty-slot group it would need `(): Spanned`. Those are general
+> `#[derive(Unparse/Spanned)]`/atom features, tracked separately if wanted.
 
 **Today.** A cycle with a `#[group(self.brace)]` field keeps `Unparse`/`Spanned` on the `pub(crate)`
 engine only (`scc_us_natural` and the delegation sets exclude group-ful via `!scc_has_group`). So a

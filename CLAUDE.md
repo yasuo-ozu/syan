@@ -103,22 +103,24 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 
 ## Known gaps / limitations
 
-- **`Unparse`/`Spanned` on a natural former-`#[recurse]` cycle — natural everywhere except a group-ful
-  cycle.** A natural `Expr<S>` is always `Parse` (delegated through the engine). `Unparse`/`Spanned` are
-  emitted on the **natural** type in two ways: (a) **single self-recursive group-free** cycle — directly,
-  via injected `#[ignore_bounds]` (leaf-only bounds; the recursive `.unparse()`/`.span()` resolves
-  against the *same* impl, **arbitrary depth**); (b) **multi-type group-free** cycle — by **delegation
+- **`Unparse`/`Spanned` on a natural former-`#[recurse]` cycle — always on the natural type.** A natural
+  `Expr<S>` is always `Parse` (delegated through the engine). `Unparse`/`Spanned` are emitted on the
+  **natural** type in two ways: (a) **single self-recursive group-free** cycle — directly, via injected
+  `#[ignore_bounds]` (leaf-only bounds; the recursive `.unparse()`/`.span()` resolves against the *same*
+  impl, **arbitrary depth**); (b) **every other** cycle (multi-type, or group-ful) — by **delegation
   through the engine**: a generated `__FromNat_X` bridge converts the (borrowed) natural value to the
   depth-default engine value (`Clone`ing leaves; the leaf-`Clone` bounds are *unioned* across the cycle
   so a member can build its siblings) and calls the engine's `Unparse`/`Spanned` (`gen_natural_extras`).
   Delegated `Unparse`/`Spanned` are **depth-limited** — a tree deeper than `limit` `panic!`s at the
   terminator (within the limit they succeed). Tested in `recurse_unparse_spanned.rs` (single + multi-
   type, incl. type params; `Spanned` needs `S: Span`, threaded through the conversion impls by
-  `param_decls`, and a generated terminator `Spanned`). A **group-ful** cycle still keeps them on the
-  `pub(crate)` engine only (the group `Fill<Substruct>: Unparse` chain isn't delegable) — there the
-  natural type is `Parse` but not directly `Unparse`/`Spanned` (pinned by the compile-fail
-  `ui/recurse_group_ful_unparse.rs`; deferred derive-level fix in `docs/recurse-deferred-fixes-plan.md`
-  §1). A cycle type's **`where`-clause** is
+  `param_decls`, and a generated terminator `Spanned`). A **group-ful** cycle gets the delegated impl
+  too (the engine's group `for<'a> Fill<Substruct>: Unparse` HRTB *does* resolve through the delegated
+  `engine_default: Unparse<__Atom>` bound) — so it is **not** a recurse limitation. What can still fail
+  is a **library-level** leaf gap shared with *non-`#[recurse]`* group types: delimiter symbols only
+  `Unparse` to a `From<String>` atom (not `TokenTree`), and a `Group<(),…>` slot needs `(): Spanned`.
+  `ui/recurse_group_ful_unparse.rs` pins that a group-ful recurse cycle and a plain group struct fail
+  *identically* on that leaf gap. A cycle type's **`where`-clause** is
   threaded through the generated engine/conversion/delegated impls (`where_preds_of` in
   `gen_natural_extras`) — a param bound (`where S: Clone`) or a self-referential bound (`where Expr<S>:
   Marker`) both work (`recurse_where_clause.rs`). All generated internal **type/trait names** — engine
