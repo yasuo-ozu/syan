@@ -40,7 +40,13 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `visitor_inherit_multilevel.rs`.
 - **Generics**: the trait is keyed on the **union** of visited types' params; each type uses its subset
   (`visitor_generics.rs`). Generated helper params avoid visited types' param names
-  (`visitor_hygiene.rs`). Caveat: `.visit()` on a root that omits a union param may need a turbofish.
+  (`visitor_hygiene.rs`). Caveat: `.visit()` on a root that omits a union param may need a turbofish. A
+  **`where`-bounded param not shared by all visited types** can't be a union trait param (a type lacking
+  it would carry an undischargeable bound), so it becomes a **per-method generic** (`visit_bounded<S:
+  Bound>`) with the trait keyed on the shared subset — going **struct-only** (a closure can't be
+  `for<S>`), same machinery as the heterogeneous concrete-fill case (`method_mode`,
+  `visitor_union_where_unshared_param.rs`). An *unbounded* unshared param instead stays in the union +
+  closure path.
 - **Cross-crate**: visited types named by full path → no downstream import (`cross_crate.rs`);
   downstream drill through upstream types via `$crate`-rooted `#[subast]` (`cross_crate_drill.rs`).
   Cross-crate **inheritance** is keyed on the base **path** (supertrait, inherited `base::visit_*`, the
@@ -58,15 +64,19 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   the natural type by **delegation** — one uniform path for every cycle (single/multi-type,
   group-free/group-ful), no direct-impl special case (`make_natural_item`); (2) a `pub(crate)` depth-
   limited engine `__XxxRec<…, __Rec = __XxxDefault<…>>` family + terminators `__XxxTerm` + `__XxxDefault`
-  depth chains (all **nonce-stamped** — §"name hygiene"), deriving the engine-routed traits, emitted
+  depth chains (all **nonce-stamped**, so a user item named e.g. `ExprTerm` never collides), deriving
+  the engine-routed traits, emitted
   **only when needed** (`scc_needs_engine` — a cycle deriving none of Parse/Unparse/Spanned, e.g.
   Ast-only, gets none) (`make_engine_item`); (3) per-cycle `__ToNat_X` (engine→natural) and, when the
   cycle delegates `Unparse`/`Spanned`, `__FromNat_X` (natural→engine) conversion traits/impls
   (depth-generic, terminator arm `unreachable!`/`panic!`) + **delegated `impl Parse`/`Unparse`/`Spanned`
   for X** emitted by ONE algorithm (`emit_delegated_impl`, modelling each trait via the `RecTrait` enum):
   `Parse` parses the engine then `.__to_nat()`s; `Unparse`/`Spanned` `.__from_nat()` then call the
-  engine's impl (`gen_natural_extras`, `conv_body`/`from_conv_body`). The public `pub type X = …` aliases are **gone** (the natural enum owns the
-  name); user inherent `impl`s land on the natural type verbatim. **Why Parse still needs the engine:**
+  engine's impl (`gen_natural_extras`, `conv_body`/`from_conv_body`). A cycle type's `where`-clause is
+  threaded onto the generated impls (`where_preds_of`); a **group-ful** cycle works the same way, with
+  `Group`'s hand-written `Unparse<TokenTree>` emitting a single `TokenTree::Group` and its `Spanned`
+  taking the span from its delimiters (`nested/group.rs`). The natural enum owns the name (no `pub type`
+  alias); user inherent `impl`s land on the natural type verbatim. **Why Parse still needs the engine:**
   deriving `Parse` directly on a natural recursive type fails two ways — (a) per-field `field_ty: Parse`
   where-bounds form an infinite cycle (E0275); (b) backtracking `stream.dup(…)` wraps the stream in
   another `Dup<…>` per descent level → infinite stream-type monomorphization (also E0275). The engine
@@ -100,56 +110,25 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   (E0116 — use `Visit::visit_*`), via `path_is_crate_local`. Tests: `visitor_recurse_cycle.rs` (incl.
   `closure_over_recurse_cycle`), `visitor_recurse_via_visitor.rs` (+`visit_mut`), `…_heterogeneous`,
   `…_mixed`, `…_containers`, `…_container_of_tuple`, `…_multiroot_via_visitor`,
-  `…_multicycle_via_visitor`, `…_drill_unlisted`, `recurse_generics.rs` (`het`),
+  `…_multicycle_via_visitor`, `visitor_recurse_drill.rs` (`unlisted`), `recurse_generics.rs` (`het`),
   `audit_visitor_recurse_nonroot_lifetime.rs`, `visitor_inherit_recurse{,_acyclic_mid}.rs`,
   `rust/tests/cross_crate_recurse.rs`.
 
 ## Known gaps / limitations
 
-- **`Unparse`/`Spanned` on a natural former-`#[recurse]` cycle — always delegated through the engine.**
-  `Parse`/`Unparse`/`Spanned` are all re-supplied on the natural type by **one uniform delegated path**
-  (no direct-impl special case): `Parse` parses the engine then `__ToNat`s; `Unparse`/`Spanned` go through
-  a generated `__FromNat_X` bridge that converts the (borrowed) natural value to the depth-default engine
-  value (`Clone`ing leaves; the leaf-`Clone` bounds are *unioned* across the cycle so a member can build
-  its siblings) and calls the engine's `Unparse`/`Spanned`. All three delegating impls are emitted by ONE
-  algorithm (`emit_delegated_impl` + the `RecTrait` model). Delegated `Unparse`/`Spanned` are therefore
-  **depth-limited** like `Parse` — a tree deeper than `limit` `panic!`s at the terminator (within the
-  limit they succeed; `unparse_past_limit_panics` pins this). This is the deliberate trade for uniformity
-  (the former single-self-recursive *direct* path was arbitrary-depth but a separate code path).
-  Tested in `recurse_unparse_spanned.rs` (single + multi-type, incl. type params; `Spanned` needs `S:
-  Span`, threaded through the conversion impls by `param_decls`, and a generated terminator `Spanned`). A
-  **group-ful** cycle uses the same delegation (the engine's group `for<'a> Fill<Substruct>: Unparse` HRTB
-  *does* resolve through the delegated `engine_default: Unparse<__Atom>` bound) and **now fully works**
-  (`recurse_group_ful.rs`): `Group`'s `Unparse<TokenTree>` is hand-written per real delimiter to emit a
-  **single `TokenTree::Group`** (delimiter + slot stream) rather than three tokens, and `Group`'s
-  `Spanned` takes its span from its **delimiters** (so an empty `Group<(),…>` slot needs no `(): Spanned`
-  — that earlier hack was reverted). `nested/group.rs`. A cycle type's **`where`-clause** is
-  threaded through the generated engine/conversion/delegated impls (`where_preds_of` in
-  `gen_natural_extras`) — a param bound (`where S: Clone`) or a self-referential bound (`where Expr<S>:
-  Marker`) both work (`recurse_where_clause.rs`). All generated internal **type/trait names** — engine
-  `__XxxRec`, terminator `__XxxTerm`, depth default `__XxxDefault`, conversion traits
-  `__ToNat`/`__FromNat` — carry a **per-expansion nonce** (`engine_name`/`term_name`/`default_name`/
-  `to_nat_name`/`from_nat_name`), so a user item named e.g. `ExprTerm` never collides
-  (`recurse_no_engine.rs`). (The depth *params* `__Rec` stay un-nonced — they're local type-param names
-  that never escape to user scope.)
+- **Delegated `Unparse`/`Spanned` are depth-limited** (the one residual `#[recurse]` limitation). Because
+  they delegate through the depth-limited engine (like `Parse`), a tree deeper than `limit` `panic!`s at
+  the terminator; within the limit they succeed (`unparse_past_limit_panics` pins this). The trade-off of
+  the uniform delegated path — there is no arbitrary-depth direct impl. `recurse_unparse_spanned.rs`.
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names (the alias is one keyword — won't fix).
-- **Clean `abort!` for a `where`-bounded param not shared by all visited types** (the bound would be
-  undischargeable on a type lacking it — an *unbounded* unshared param is fine); `visitor_diagnostics.rs`,
-  `ui/visitor_union_where_unshared_param.rs`. (A cycle following an **unlisted intermediate** that forms
-  a cycle of unlisted intermediates is the general drill diagnostic — "list one" — incl. an omitted
-  co-root: `ui/visitor_recurse_unlisted_coroot.rs`.)
-
-## Closures over `#[recurse]` — now work (was deferred)
-
-**Closed.** `#[recurse]` now emits **natural recursive public types** (`make_natural_item`), so a
-former-recurse cycle is depth-*uniform* — one type at all depths. A `visitor!(…)` over it is therefore
-an ordinary acyclic visitor with **no** depth-generic `visit_*<R>` and no type-level HRTB wall, so
-closures, tuples-of-closures, inherent `.visit(closure)`, `visit_mut`, and inheritance all work via the
-existing `Hook`/`Driver`/`Chain`. The depth-limited types survive only as an internal `pub(crate)`
-engine for `Parse` (see "`#[recurse]` expansion" below). Tests: `visitor_recurse_cycle.rs`
-(`closure_over_recurse_cycle`), `visitor_recurse_via_visitor.rs`.
+- **A `where`-bound naming a user trait must be in scope at the `visitor!()` site** (`use crate::Bound;`
+  inside the visitor module). The generated impls repeat the bound by bare path, so an un-imported trait
+  is unresolved — applies to any where-bound, shared or not. (The bounded param itself being *unshared*
+  is supported — see "Shipped".) (A cycle following an **unlisted intermediate** that forms a cycle of
+  unlisted intermediates is the general drill diagnostic — "list one" — incl. an omitted co-root:
+  `ui/visitor_recurse_unlisted_coroot.rs`.)
 
 ---
 
@@ -194,15 +173,16 @@ metadata ping-pong only supplies each type's structure. Code: `macro/ast.rs` + `
    the engine's impl. `gen_natural_extras`, `conv_body`/`conv_expr` + `from_conv_body`/`from_conv_expr`.
    (Delegation deep-copies once per call; `Unparse`/`Spanned` are therefore depth-limited like `Parse`.)
 
-The public `pub type Xxx = …` alias is **gone** (the natural enum owns the name); user inherent `impl`s
-land on the natural type verbatim. A **pure by-value cycle** (no heap indirection on any edge) is
+The natural enum owns the name (no `pub type` alias); user inherent `impl`s land on the natural type
+verbatim. A **pure by-value cycle** (no heap indirection on any edge) is
 rejected (`abort!`, would be E0072) — the natural type would be infinite-size; checked via the
 direct-edge subgraph being acyclic (`subgraph_is_cyclic` on `direct_type_refs`).
 
 ## How `visitor!()` consumes it — ordinary acyclic metadata
 
-There is **no `@recurse` metadata** anymore. The natural type's plain `#[derive(Ast)]` macro carries the
-visitor metadata (`@ast` + `@subast`, re-exported under the type name) exactly like any acyclic type. A
+The natural type's plain `#[derive(Ast)]` macro carries the visitor metadata (`@ast` + `@subast`,
+re-exported under the type name) exactly like any acyclic type — there is no `#[recurse]`-specific
+visitor metadata. A
 `visitor!(<cycle types>)` builds a **non-depth-generic** acyclic visitor (`generate_module`/`gen_side`):
 `visit_xxx(&mut self, &Expr<S>)`, dispatch to listed cross-edges via `this.visit_<head>`, drill an
 unlisted cross-edge inline, descend containers/tuples — closures and `visit_mut` included. The engine,
