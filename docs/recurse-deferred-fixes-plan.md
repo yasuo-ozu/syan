@@ -28,6 +28,11 @@ Status quo recap (what's already shipped):
 > `Substruct` is a derive-internal (nonce-named) type. So step 2 (quick wiring) is ruled out; only the
 > step-3 derive-level rework can lift this. **Stays deferred.** (Group-ful cycles remain `Parse`-only on
 > the natural type; `Unparse`/`Spanned` live on the `pub(crate)` engine.)
+>
+> **Pinned** by a compile-fail test: `ui/recurse_group_ful_unparse.rs` (registered in
+> `macro_audit_test.rs`) — `.unparse()` on a group-ful natural `Expr` is `no method named unparse`.
+> When the derive-level fix lands, this test stops failing and should be promoted to a passing
+> round-trip test.
 
 **Today.** A cycle with a `#[group(self.brace)]` field keeps `Unparse`/`Spanned` on the `pub(crate)`
 engine only (`scc_us_natural` and the delegation sets exclude group-ful via `!scc_has_group`). So a

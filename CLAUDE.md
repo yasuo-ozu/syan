@@ -116,7 +116,9 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   type, incl. type params; `Spanned` needs `S: Span`, threaded through the conversion impls by
   `param_decls`, and a generated terminator `Spanned`). A **group-ful** cycle still keeps them on the
   `pub(crate)` engine only (the group `Fill<Substruct>: Unparse` chain isn't delegable) — there the
-  natural type is `Parse` but not directly `Unparse`/`Spanned`. A cycle type's **`where`-clause** is
+  natural type is `Parse` but not directly `Unparse`/`Spanned` (pinned by the compile-fail
+  `ui/recurse_group_ful_unparse.rs`; deferred derive-level fix in `docs/recurse-deferred-fixes-plan.md`
+  §1). A cycle type's **`where`-clause** is
   threaded through the generated engine/conversion/delegated impls (`where_preds_of` in
   `gen_natural_extras`) — a param bound (`where S: Clone`) or a self-referential bound (`where Expr<S>:
   Marker`) both work (`recurse_where_clause.rs`). All generated internal **type/trait names** — engine

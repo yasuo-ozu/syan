@@ -1,0 +1,17 @@
+error[E0599]: no method named `unparse` found for enum `Expr` in the current scope
+  --> tests/ui/recurse_group_ful_unparse.rs:40:7
+   |
+25 |     pub enum Expr<S> {
+   |     ---------------- method `unparse` not found for this enum
+...
+40 |     e.unparse(&mut (&mut out)).unwrap();
+   |       ^^^^^^^ method not found in `Expr<syan::source::proc_macro2::Span>`
+   |
+note: the method `unparse` exists on the type `syan::source::proc_macro2::literal::Integer`
+  --> src/parse/unparse.rs
+   |
+   |     fn unparse<S: Emitter<Atom>>(&self, sink: &mut S) -> Result<(), S::Error>;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `unparse`, perhaps you need to implement it:
+           candidate #1: `Unparse`
