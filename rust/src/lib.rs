@@ -2,6 +2,10 @@
 //!
 //! Rebuilt incrementally; previous contents are preserved in `rust_old/` at the repo root.
 
+/// A small parseable subset of Rust (statements/expressions) with a parse↔unparse round-trip and a
+/// `visitor!`. See `tests/rustsub_roundtrip.rs`.
+pub mod rustsub;
+
 /// A tiny sample AST used to exercise the visitor system across crate boundaries
 /// (see `tests/cross_crate.rs`).
 pub mod ast {
