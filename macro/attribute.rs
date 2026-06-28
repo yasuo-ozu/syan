@@ -193,7 +193,6 @@ fn generate_substruct(
     nonce: u64,
     by_ref: bool,
 ) -> Option<(ItemStruct, Vec<Field>)> {
-    // iterate over subfields which has attribute `#[group(...)]`
     let mut subfields = Vec::new();
     let lt = Lifetime::new("'syan_substruct_ref", Span::call_site());
     while let Some((submember, subident, subfield)) = fields.pop_front() {
@@ -221,7 +220,6 @@ fn generate_substruct(
         }
     }
     if !subfields.is_empty() {
-        // make substruct
         let substruct_ident = Ident::new(
             &format!("__SyanSubstructOf_{field_ident}_{ident}_{nonce}"),
             member.span(),
@@ -397,23 +395,7 @@ pub(crate) trait Adt {
                         }, #field_ident) = #syan::nested::group::EmptyGroup::unfill(#field_ident);
                     ));
 
-                    // let substruct_ty: Type = parse2(quote!(#{&substruct.ident}<#(for p in &substruct.generics.params), {#p}>)).unwrap();
-                    // let mut replaced_ty = field.ty.clone();
-                    // if let Type::Path(TypePath {  path,.. }) = &mut replaced_ty {
-                    //     if let Some(PathSegment {  arguments: PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) ,..}) = path.segments.last_mut() {
-                    //         for arg in args.iter_mut() {
-                    //             if let GenericArgument::Type(ty) = arg {
-                    //                 if ty == &parse_quote!(()) {
-                    //                     *ty = substruct_ty.clone();
-                    //                 } else {
-                    //                     where_predicates.push(parse_quote!(#ty: #trait_fullpath));
-                    //                 }
-                    //             }
-                    //         }
-                    //     }
-                    // }
                     substructs.push(substruct);
-                    // where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroupParse<#tp_atom>));
                     where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup));
                     where_predicates.push(parse_quote!(#to_parse_ty: #trait_fullpath));
                 } else {

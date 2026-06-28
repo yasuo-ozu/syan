@@ -248,7 +248,6 @@ fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
                     return syn::parse_quote!( #internal < #(#existing,)* #(#recs),* > );
                 }
             }
-            // Non-cycle path: recurse into generic args
             let mut new_path = path.clone();
             for seg in new_path.segments.iter_mut() {
                 if let PathArguments::AngleBracketed(ref mut ab) = seg.arguments {
@@ -384,8 +383,7 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
             transform_fields(&mut s.fields, ctx);
             Item::Struct(s)
         }
-        // Inherent impl block whose Self type is a cycle type: rename Self type, add __Rec param,
-        // and transform all method signature types so they use the internal names.
+        // Inherent impl block whose Self type is a cycle type.
         Item::Impl(mut impl_block) if impl_block.trait_.is_none() => {
             let cycle_name: Option<String> = (|| {
                 let Type::Path(TypePath { qself: None, path }) = impl_block.self_ty.as_ref() else {
@@ -400,7 +398,6 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
                 let internal = ctx.internal_names[&name].clone();
                 let recs = &ctx.rec_params;
 
-                // Rename self_ty (keeping its own generic args) and append one depth type-arg per root.
                 if let Type::Path(TypePath { path, .. }) = impl_block.self_ty.as_mut() {
                     if let Some(seg) = path.segments.first_mut() {
                         seg.ident = internal;
@@ -439,7 +436,6 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
                     impl_block.generics.params.push(syn::parse_quote!(#r));
                 }
 
-                // Transform types in method signatures (params + return type)
                 for item in &mut impl_block.items {
                     if let ImplItem::Fn(method) = item {
                         for input in &mut method.sig.inputs {
@@ -1021,7 +1017,6 @@ fn gen_natural_extras(
             GenericParam::Type(t) => Some(&t.ident),
             _ => None,
         });
-        // The shared context for this type's (up to three) delegated impls.
         let target = DelegTarget {
             id,
             xdecl: &xdecl,

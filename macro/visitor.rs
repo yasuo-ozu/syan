@@ -366,7 +366,6 @@ fn requalify_ancestor(anc: &Path, base: &Path) -> Path {
     }
     // `base`'s segments ARE the intermediate's module path (the `visitor!()` ran inside it).
     let base_mod: Vec<PathSegment> = base.segments.iter().cloned().collect();
-    // Build a `Path` (no leading `::`) from module-prefix segments + a trailing tail.
     let join = |prefix: &[PathSegment], tail: &[PathSegment]| -> Path {
         let mut segments = Punctuated::new();
         for s in prefix.iter().chain(tail.iter()) {
