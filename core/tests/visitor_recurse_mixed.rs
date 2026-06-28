@@ -1,7 +1,7 @@
 //! Phase 1b: ONE `visitor!()` spanning an acyclic outer type (`Program`) AND a `#[recurse]` cycle
-//! (`Expr`/`Stmt`). A single `Visit` impl with a fixed `visit_program` and depth-generic
-//! `visit_expr`/`visit_stmt`, and one `.visit()` that crosses the boundary automatically — replacing
-//! the manual two-trait hand-off of `visitor_mixed_recurse.rs`.
+//! (`Expr`/`Stmt`). With natural types it is a single ordinary acyclic `Visit` impl with
+//! `visit_program`/`visit_expr`/`visit_stmt`, and one `.visit()` that crosses the boundary
+//! automatically — replacing the manual two-trait hand-off of `visitor_mixed_recurse.rs`.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -52,11 +52,11 @@ impl<S> v::Visit<S> for Counter {
         self.p += 1;
         v::visit_program(self, i); // drills body/tail → crosses into the Expr cycle
     }
-    fn visit_expr<R: v::VisitRec<S, Self>>(&mut self, i: &v::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &ast::Expr<S>) {
         self.e += 1;
         v::visit_expr(self, i);
     }
-    fn visit_stmt<R: v::VisitRec<S, Self>>(&mut self, i: &v::StmtNode<S, R>) {
+    fn visit_stmt(&mut self, i: &ast::Stmt<S>) {
         self.s += 1;
         v::visit_stmt(self, i);
     }
@@ -66,8 +66,8 @@ impl<S> v::Visit<S> for Counter {
 fn one_visit_spans_outer_and_inner() {
     let prog: Program<()> = Program {
         // Expr -> Stmt -> Expr(back-edge) -> Lit
-        body: vec![ast::Expr::Stmt(Box::new(v::StmtNode::Expr(Box::new(
-            v::ExprNode::Lit(PhantomData),
+        body: vec![ast::Expr::Stmt(Box::new(ast::Stmt::Expr(Box::new(
+            ast::Expr::Lit(PhantomData),
         ))))],
         tail: ast::Expr::Lit(PhantomData),
     };

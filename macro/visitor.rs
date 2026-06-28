@@ -1,7 +1,6 @@
 use crate::util::{
     angle, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
-    method_ident_m, mt, param_name, param_tokens, param_use, peel, recurse_lower_body, to_snake,
-    Head, RecLower,
+    method_ident_m, mt, param_name, param_use, peel, to_snake, Head,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -173,83 +172,11 @@ fn norm_path(p: &Path) -> String {
     quote!(#p).to_string().replace(' ', "")
 }
 
-/// The `@recurse { … }` metadata a `#[recurse]` cycle type carries (absent for acyclic types). It
-/// drives depth-generic visitor generation: `node` is the `__XRec` depth-generic node type; `roots`
-/// and `depth` are the parallel root idents and their depth params; `terms` the per-root terminators;
-/// `cycle` every type ident in the SCC. (See the CLAUDE.md "Metadata contract" section.)
-#[derive(Clone)]
-struct RecurseMeta {
-    node: Path,
-    roots: Vec<Ident>,
-    depth: Vec<Ident>,
-    terms: Vec<Path>,
-    cycle: Vec<Ident>,
-}
-
-/// Parse whitespace-separated paths (for `@terms`); each `Path` ends where the next segment lacks a
-/// leading `::`, so `crate::a::ATerm crate::a::BTerm` parses as two paths.
-fn parse_paths(ts: TokenStream) -> Result<Vec<Path>> {
-    let parser = |input: ParseStream| {
-        let mut out = Vec::new();
-        while !input.is_empty() {
-            out.push(input.parse::<Path>()?);
-        }
-        Ok(out)
-    };
-    parser.parse2(ts)
-}
-
-/// Parse a `@recurse` body: `@node {PATH} @roots {idents} @depth {idents} @terms {paths} @cycle {idents}`.
-/// `@roots`/`@depth`/`@cycle` are whitespace-separated idents; `@terms` whitespace-separated paths
-/// (all parallel to `@roots`). Matches what `#[recurse]` emits (see `macro/recurse.rs`).
-fn parse_recurse(ts: TokenStream) -> Result<RecurseMeta> {
-    let parser = |input: ParseStream| {
-        let (mut node, mut roots, mut depth, mut terms, mut cycle) =
-            (None, Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        while !input.is_empty() {
-            let (name, content) = parse_section(input)?;
-            match name.to_string().as_str() {
-                "node" => node = Some(syn::parse2(content)?),
-                "roots" => roots = parse_idents(content)?,
-                "depth" => depth = parse_idents(content)?,
-                "terms" => terms = parse_paths(content)?,
-                "cycle" => cycle = parse_idents(content)?,
-                other => {
-                    return Err(Error::new(name.span(), format!("unknown @recurse section @{other}")))
-                }
-            }
-        }
-        let node = node.ok_or_else(|| Error::new(Span::call_site(), "missing @node in @recurse"))?;
-        if roots.len() != depth.len() || roots.len() != terms.len() {
-            return Err(Error::new(
-                Span::call_site(),
-                "@recurse: @roots, @depth, @terms must be parallel (same length)",
-            ));
-        }
-        Ok(RecurseMeta { node, roots, depth, terms, cycle })
-    };
-    parser.parse2(ts)
-}
-
-/// Re-serialize a `RecurseMeta` for the next ping-pong bounce (mirrors `parse_recurse`).
-fn emit_recurse(r: &RecurseMeta) -> TokenStream {
-    let RecurseMeta { node, roots, depth, terms, cycle } = r;
-    quote! {
-        @node { #node }
-        @roots { #(#roots)* }
-        @depth { #(#depth)* }
-        @terms { #(#terms)* }
-        @cycle { #(#cycle)* }
-    }
-}
-
-/// A fetched AST type: the path it was fetched by, its (cleaned) definition, its `#[subast]`, and —
-/// for a `#[recurse]` cycle type — its `@recurse` coordinates (`None` for an acyclic type).
+/// A fetched AST type: the path it was fetched by, its (cleaned) definition, and its `#[subast]`.
 struct DoneType {
     path: Path,
     def: Item,
     subast: Vec<SubEntry>,
-    recurse: Option<RecurseMeta>,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,10 +198,6 @@ struct BuildInput {
     /// visitor can emit the empty `Driver` impl for every transitive supertrait, not just the direct
     /// base.
     base_ancestors: Vec<AncIn>,
-    /// The base is a `#[recurse]`-cycle visitor (its `__syan_visited` carried `@recbase`). Its
-    /// `Visit`/`VisitMut` have depth-generic methods, so an inheriting visitor must be **struct-only**
-    /// (no closure `Driver`/`&mut V` blanket can satisfy that supertrait).
-    base_is_recurse: bool,
     /// Path of the type whose `@ast`/`@subast` trail in this bounce (so the fetched def is recorded
     /// under the path it was fetched by). Empty before any type is fetched.
     fetching: Option<Path>,
@@ -282,8 +205,6 @@ struct BuildInput {
     rest: Vec<Path>,
     just_def: Option<Item>,
     just_subast: Vec<SubEntry>,
-    /// The `@recurse` section of the type fetched this bounce (a `#[recurse]` cycle type), if any.
-    just_recurse: Option<RecurseMeta>,
 }
 
 /// Parse one `@<name> { .. }` section, returning the name and the braced content as tokens.
@@ -350,15 +271,12 @@ fn emit_ancestors(anc: &[AncIn]) -> TokenStream {
 }
 
 /// The `__syan_visited` export — a `#[macro_export]` muncher that, when a downstream `visitor!(self =>
-/// New)` invokes it, appends this visitor's visited+inherited idents (`@inh`), param union (`@bg`),
-/// ancestor chain (`@an`), and — for a recurse visitor — the `@recbase {}` marker (telling the consumer
-/// the base is recurse, so it must go struct-only). Shared by the acyclic (`generate_module`) and
-/// recurse (`generate_module_mixed`) paths.
+/// New)` invokes it, appends this visitor's visited+inherited idents (`@inh`), param union (`@bg`), and
+/// ancestor chain (`@an`).
 fn emit_visited_macro(
     st: &BuildInput,
     g_params: &[GenericParam],
     anc_export: TokenStream,
-    recbase: bool,
 ) -> TokenStream {
     let all_visible: Vec<Ident> = st
         .visited
@@ -374,7 +292,6 @@ fn emit_visited_macro(
             (@visited $cb:path { $($pre:tt)* }) => {
                 $cb ! {
                     $($pre)* @inh { #(#all_visible)* } @bg { #(#g_params),* } @an { #anc_export }
-                    #(if recbase) { @recbase {} }
                 }
             };
         }
@@ -385,8 +302,8 @@ fn emit_visited_macro(
 
 /// Whether a path is rooted in the *current* crate (`crate::` / `self::` / `super::`). A foreign path
 /// (an external crate name, or a leading `::`) is not — an inherent `impl` for such a type would be
-/// E0116 (inherent impls must live in the type's defining crate), so the recurse path skips inherent
-/// `.visit()`/`.visit_mut()` for them and the trait method (`Visit::visit_*`) is used instead.
+/// E0116 (inherent impls must live in the type's defining crate), so the visitor skips the inherent
+/// `.visit()`/`.visit_mut()` for a foreign target and the trait method (`Visit::visit_*`) is used.
 fn path_is_crate_local(p: &Path) -> bool {
     if p.leading_colon.is_some() {
         return false;
@@ -502,14 +419,12 @@ fn parse_done_type(input: ParseStream) -> Result<DoneType> {
     let mut path = None;
     let mut def = None;
     let mut subast = Vec::new();
-    let mut recurse = None;
     while !input.is_empty() {
         let (name, content) = parse_section(input)?;
         match name.to_string().as_str() {
             "path" => path = Some(syn::parse2(content)?),
             "def" => def = Some(syn::parse2(content)?),
             "subast" => subast = parse_subentries(content)?,
-            "recurse" => recurse = Some(parse_recurse(content)?),
             other => {
                 return Err(Error::new(name.span(), format!("unknown @t section @{other}")))
             }
@@ -519,7 +434,6 @@ fn parse_done_type(input: ParseStream) -> Result<DoneType> {
         path: path.ok_or_else(|| Error::new(Span::call_site(), "missing @path in @t"))?,
         def: def.ok_or_else(|| Error::new(Span::call_site(), "missing @def in @t"))?,
         subast,
-        recurse,
     })
 }
 
@@ -532,13 +446,11 @@ impl Parse for BuildInput {
         let mut inherited = Vec::new();
         let mut base_generics = Vec::new();
         let mut base_ancestors = Vec::new();
-        let mut base_is_recurse = false;
         let mut fetching = None;
         let mut done = Vec::new();
         let mut rest = Vec::new();
         let mut just_def = None;
         let mut just_subast = Vec::new();
-        let mut just_recurse = None;
 
         while !input.is_empty() {
             let (name, content) = parse_section(input)?;
@@ -569,9 +481,6 @@ impl Parse for BuildInput {
                 }
                 // `@anc` is the carried ancestor chain; `@an` is appended by a base's macro.
                 "anc" | "an" => base_ancestors = parse_ancestors(content)?,
-                // Appended by a recurse base's `__syan_visited` (presence ⇒ the base is a recurse
-                // visitor); carried as `@recbasecarry` across bounces.
-                "recbase" | "recbasecarry" => base_is_recurse = true,
                 "fetching" => {
                     if !content.is_empty() {
                         fetching = Some(syn::parse2(content)?);
@@ -585,7 +494,6 @@ impl Parse for BuildInput {
                 }
                 "ast" => just_def = Some(syn::parse2(content)?),
                 "subast" => just_subast = parse_subentries(content)?,
-                "recurse" => just_recurse = Some(parse_recurse(content)?),
                 other => {
                     return Err(Error::new(name.span(), format!("unknown section @{other}")))
                 }
@@ -600,13 +508,11 @@ impl Parse for BuildInput {
             inherited,
             base_generics,
             base_ancestors,
-            base_is_recurse,
             fetching,
             done,
             rest,
             just_def,
             just_subast,
-            just_recurse,
         })
     }
 }
@@ -660,8 +566,7 @@ pub fn build(input: TokenStream) -> TokenStream {
                 st.rest.push(entry_path);
             }
         }
-        let recurse = st.just_recurse.take();
-        st.done.push(DoneType { path, def, subast, recurse });
+        st.done.push(DoneType { path, def, subast });
     }
     st.fetching = None;
 
@@ -695,7 +600,6 @@ pub fn build(input: TokenStream) -> TokenStream {
                     @inherited { #(#inherited)* }
                     @baseg { #(#base_generics),* }
                     @anc { #anc_tokens }
-                    #(if st.base_is_recurse) { @recbasecarry {} }
                     @fetching { #next }
                     @done { #done_tokens }
                     @rest { #(#rest),* }
@@ -715,14 +619,7 @@ fn emit_done(done: &[DoneType]) -> TokenStream {
             let path = &d.path;
             let def = &d.def;
             let subast = subentries_tokens(&d.subast);
-            let recurse = match &d.recurse {
-                Some(r) => {
-                    let r = emit_recurse(r);
-                    quote!( @recurse { #r } )
-                }
-                None => quote!(),
-            };
-            quote! { @t { @path { #path } @def { #def } @subast { #subast } #recurse } }
+            quote! { @t { @path { #path } @def { #def } @subast { #subast } } }
         })
         .collect();
     quote!( #(#blocks)* )
@@ -1229,6 +1126,13 @@ struct VType {
     own_params: Vec<GenericParam>,
     own_use: TokenStream,
     own_where: Vec<WherePredicate>,
+    /// In heterogeneous (method-generic) mode: this type's own params that are NOT trait-level (i.e.
+    /// not shared by all visited types), declared as generics on its `visit_*` method + free fn. Empty
+    /// in the common union mode (all params are trait-level).
+    method_params: Vec<GenericParam>,
+    /// Whether the visited type is crate-local (so an inherent `.visit()` impl is allowed; a foreign
+    /// target would be E0116, so its inherent is skipped — call `Visit::visit_*` instead).
+    local: bool,
     body: TokenStream,
     body_mut: TokenStream,
 }
@@ -1254,9 +1158,10 @@ fn gen_side(
     ancestors: &[Ancestor],
     base: &Option<Path>,
     union_where: &[WherePredicate],
-    // The base is a recurse visitor (depth-generic methods): emit a **struct-only** visitor — no
-    // `&mut V` blanket / closure `Driver`/`Hook`/`Chain`/`IntoVisitor`, and a direct
-    // `fn visit<__W: Visit>(&self, &mut __W)` inherent — since none of those can satisfy `base::Visit`.
+    // Heterogeneous (method-generic) mode: a non-shared param is concrete-filled in a cross-edge, so
+    // each `visit_*` carries its type's non-shared params as method generics. A closure can't be
+    // `for<T>` generic, so the closure machinery (`&mut V` blanket / `Driver`/`Hook`/`Chain`/
+    // `IntoVisitor`) is omitted and the inherent `.visit()` takes `&mut impl Visit` directly.
     struct_only: bool,
 ) -> TokenStream {
     let suffix = if mutable { "Mut" } else { "" };
@@ -1288,6 +1193,12 @@ fn gen_side(
     struct S {
         ty: TokenStream,
         method: Ident,
+        /// This type's non-shared params (heterogeneous mode), as the trait method's generics —
+        /// lifetimes-first; empty in union mode.
+        method_params: Vec<GenericParam>,
+        /// The free fn's full generic list (trait params ∪ this type's non-shared params), normalized
+        /// lifetimes-first so a non-shared lifetime never lands after a type/const param.
+        free_params: Vec<GenericParam>,
         hook: Ident,
         hook_struct: Ident,
         body: TokenStream,
@@ -1299,9 +1210,16 @@ fn gen_side(
             let own = &t.own_use;
             let path = &t.path;
             let ty = quote!( #path #own );
+            let mut method_params = t.method_params.clone();
+            sort_lifetimes_first(&mut method_params);
+            let mut free_params: Vec<GenericParam> =
+                g_params.iter().cloned().chain(t.method_params.iter().cloned()).collect();
+            sort_lifetimes_first(&mut free_params);
             S {
                 ty,
                 method: method_ident_m(&ident, mutable),
+                method_params,
+                free_params,
                 hook: Ident::new(
                     &format!("hook_{}{}", to_snake(&ident), mt(mutable)),
                     Span::call_site(),
@@ -1325,6 +1243,10 @@ fn gen_side(
     let inherent: Vec<TokenStream> = vtypes
         .iter()
         .map(|vt| {
+            // A foreign target can't carry an inherent impl (E0116); callers use `Visit::visit_*`.
+            if !vt.local {
+                return quote!();
+            }
             let own_names: HashSet<String> = vt.own_params.iter().map(param_name).collect();
             let extra: Vec<&GenericParam> = g_params
                 .iter()
@@ -1336,7 +1258,7 @@ fn gen_side(
             let own_use = &vt.own_use;
             let method = method_ident_m(&vt.ident, mutable);
             if struct_only {
-                // Direct `&mut impl Visit` (the `IntoVisitor`/closure machinery is off for a recurse base).
+                // Direct `&mut impl Visit` (the closure/`IntoVisitor` machinery is off in method-mode).
                 quote! {
                     impl #own_def #path #own_use #own_w {
                         pub fn #visit_method< #(#extra,)* #p_v: #visit_tr #g_use >(
@@ -1368,9 +1290,9 @@ fn gen_side(
     quote! {
         pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #base_g_use } #uw {
             #(for s in &sides) {
-                // `where Self: Sized` under struct-only: the body crosses into the recurse base's
-                // depth-generic `visit_*` (whose methods require `Self: Sized`).
-                fn #{&s.method}(&mut self, i: #amp #{&s.ty}) #(if struct_only) { where Self: ::core::marker::Sized } {
+                // In heterogeneous (struct-only) mode the method carries this type's non-shared params
+                // as generics, and `where Self: Sized` (the method-generic dispatch needs a sized Self).
+                fn #{&s.method}< #(for mp in &s.method_params) { #mp, } >(&mut self, i: #amp #{&s.ty}) #(if struct_only) { where Self: ::core::marker::Sized } {
                     #{&s.method}(self, i)
                 }
             }
@@ -1387,9 +1309,10 @@ fn gen_side(
         }
 
         #(for s in &sides) {
-            // No `?Sized` under struct-only: the body may cross into the recurse base's depth-generic
-            // `visit_*`, whose method requires `Self: Sized`.
-            pub fn #{&s.method}< #(#g_params,)* #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >(
+            // No `?Sized` under struct-only: the body may dispatch through `Self`'s method-generic
+            // `visit_*` (which requires `Self: Sized`). `free_params` = trait params ∪ this type's
+            // non-shared params, lifetimes-first.
+            pub fn #{&s.method}< #(for gp in &s.free_params) { #gp, } #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >(
                 this: &mut #p_v,
                 i: #amp #{&s.ty},
             ) #uw {
@@ -1471,455 +1394,98 @@ fn gen_side(
     }
 }
 
-/// A `visitor!()` listing one or more `#[recurse]` cycle types (one cycle), optionally **mixed** with
-/// acyclic types. Emits, for **both** sides (`Visit`/`visit_*` and `VisitMut`/`visit_*_mut`): a
-/// `VisitRec`/`VisitRecMut` dispatch trait, the unified `Visit`/`VisitMut` trait (fixed `visit_X(&X)`
-/// for acyclic targets + depth-generic `visit_Y<R…>(&YNode<…>)` for recurse targets), free fns,
-/// `VisitRec`/`VisitRecMut` impls (each root's node → its `visit_*`, each terminator → no-op), `XNode`
-/// aliases, and inherent `.visit()`/`.visit_mut()`. An acyclic body that follows a recurse field lowers
-/// (via `Lower`) to `this.visit_Y(field)`, which type-checks because the public alias
-/// `Y<…> = __YRec<…, default>` infers `R = default` — so one impl + one `.visit()` crosses the boundary
-/// automatically. Struct/`&mut`-visitors only (depth-generic methods can't back a closure `Driver`).
-fn generate_module_mixed(
-    st: &BuildInput,
-    targets: &[&DoneType],
-    method_set: &HashSet<String>,
-    done_by_path: &HashMap<String, &DoneType>,
-    path_of: &HashMap<String, &Path>,
-) -> TokenStream {
-    let rec: Vec<&DoneType> = targets.iter().copied().filter(|d| d.recurse.is_some()).collect();
-    let metas: Vec<&RecurseMeta> = rec.iter().map(|d| d.recurse.as_ref().unwrap()).collect();
-    // Each recurse target carries ITS cycle's roots/depth/terminators (a `visitor!()` may span several
-    // independent cycles); per-target depth info is computed in the `Rec` build below. Here we only
-    // need the union of every cycle's terminators (deduped by path) for the no-op dispatch impls.
-    let mut seen_t = HashSet::new();
-    let all_terms: Vec<Path> = metas
-        .iter()
-        .flat_map(|m| m.terms.iter().cloned())
-        .filter(|p| seen_t.insert(quote!(#p).to_string()))
-        .collect();
 
-    // Trait keying = the recurse cycles' ROOTS' params. Roots share params; a non-root cycle type's
-    // params *beyond* the roots' become `visit_*` method generics (`extra_decl` below) rather than
-    // trait params — only root nodes get `VisitRec` impls, so keeping non-root extras off the trait
-    // avoids unconstrained impl params (E0207) and lets a heterogeneous cycle (`Expr<S>` + `Stmt<S, T>`)
-    // be expressed. Built as the union of every target's params (deduped, `targets` order) filtered to
-    // those a root carries — so for a homogeneous cycle (every cycle type shares the roots' params,
-    // acyclic params ⊆ roots') this equals the full union and the emitted code is unchanged.
-    let union_params = param_union(targets, &st.base_generics);
-    // Trait keying filters the union to the cycle ROOTS' params (+ the inherited base's); a non-root's
-    // extra params become `visit_*` method generics rather than trait params.
-    let mut root_key_names: HashSet<String> = rec
+/// Does any visited type's field reference another visited type while filling a **non-shared** generic
+/// param position with something other than that param verbatim (e.g. `Box<Stmt<S, u8>>` where `Stmt`'s
+/// `T` is non-shared)? Such a *concrete fill* can't be expressed with the union-of-params trait model
+/// (the trait would fix `T`, but the cross-edge needs a specific `T`), so the visitor must instead make
+/// the non-shared params **per-method generics** (`visit_stmt<T>`). Closures can't be `for<T>` generic,
+/// so that mode is struct-only. The common case (no concrete fill) keeps the union model + closures.
+fn has_concrete_fill(targets: &[&DoneType], shared: &HashSet<String>) -> bool {
+    // Each visited type's own params, in declaration order (lifetimes precede types/consts, matching how
+    // generic *arguments* must be ordered — so args zip directly onto params).
+    let params_of: HashMap<String, Vec<GenericParam>> = targets
         .iter()
-        .filter(|d| {
-            let id = item_ident(&d.def).unwrap();
-            d.recurse.as_ref().unwrap().roots.iter().any(|rr| rr == id)
-        })
-        .flat_map(|d| gparams(item_generics(&d.def).unwrap()))
-        .map(|p| param_name(&p))
-        .collect();
-    root_key_names.extend(st.base_generics.iter().map(param_name));
-    let mut g_params: Vec<GenericParam> = union_params
-        .iter()
-        .filter(|p| root_key_names.contains(&param_name(p)))
-        .cloned()
-        .collect();
-    sort_lifetimes_first(&mut g_params);
-    let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
-    let g_use_angle: TokenStream = if g_args.is_empty() {
-        quote!()
-    } else {
-        quote!( < #(#g_args),* > )
-    };
-    // When inheriting a recurse base: the base's params in use form (its own arity), for the
-    // `New::Visit<…>: base::Visit<base_g_use>` supertrait.
-    let base_g_use: TokenStream = angle(&st.base_generics.iter().map(param_use).collect::<Vec<_>>());
-
-    // Independent cycles spanned by one `visitor!()` must share identical ROOT params: the depth
-    // dispatch trait is keyed on the union of all roots' params and each cycle's terminator implements
-    // it, so a root (hence its terminator) lacking a param another cycle contributes would be
-    // unconstrained (the E0107/E0277 cascade). Reject cleanly. A single cycle (incl. heterogeneous
-    // non-root extras) and same-param multi-cycle are unaffected.
-    for d in &rec {
-        let id = item_ident(&d.def).unwrap();
-        if d.recurse.as_ref().unwrap().roots.iter().any(|rr| rr == id) {
-            let names: HashSet<String> =
-                gparams(item_generics(&d.def).unwrap()).iter().map(param_name).collect();
-            if names != root_key_names {
-                abort!(
-                    Span::call_site(),
-                    "visitor!() over `#[recurse]` cycles: independent cycles in one `visitor!()` must \
-                     share identical root generic params, but root `{}` declares a different set. \
-                     Visit the cycles from separate `visitor!()` invocations.",
-                    id
-                );
-            }
-        }
-    }
-
-    // Every root of a (multi-root) cycle must be listed. A root defines its own depth dimension
-    // (`__ARec<S, __R0, __R1>` with each `__Ri: VisitRec`), but a `VisitRec` impl is emitted only for a
-    // *listed* root's node — so an omitted co-root leaves the other roots' `VisitRec` bound
-    // unsatisfiable (a cryptic `VisitRec not implemented for __BRec<…>` wall). Unlike a non-root
-    // cross-edge (drilled inline when unlisted), a root cannot be drilled — it must be listed.
-    for d in &rec {
-        let owner = item_ident(&d.def).unwrap();
-        for root in &d.recurse.as_ref().unwrap().roots {
-            if !method_set.contains(&root.to_string()) {
-                abort!(
-                    Span::call_site(),
-                    "visitor!() over a multi-root `#[recurse]` cycle: root `{}` of the cycle \
-                     containing `{}` is not listed. Every root of a multi-root cycle defines its own \
-                     depth dimension and cannot be drilled, so all roots must be listed in \
-                     `visitor!(...)`. Add `{}` to the visitor.",
-                    root,
-                    owner,
-                    root
-                );
-            }
-        }
-    }
-
-    // Mixed-visitor guard: an acyclic target's params must be ⊆ the roots' params. The depth-generic
-    // `VisitRec` impls are keyed on the roots' params only, so an acyclic-only param would be
-    // unconstrained there (E0207). Pure-recurse heterogeneity is supported; only an acyclic type that
-    // introduces an extra param is walled (split it out of this visitor, or share the roots' params).
-    for d in targets.iter().filter(|d| d.recurse.is_none()) {
-        for p in gparams(item_generics(&d.def).unwrap()) {
-            if !root_key_names.contains(&param_name(&p)) {
-                let id = item_ident(&d.def).unwrap();
-                abort!(
-                    Span::call_site(),
-                    "visitor!() over a `#[recurse]` cycle: acyclic type `{}` has generic param `{}` \
-                     not carried by any cycle root; the depth-generic `VisitRec` impls are keyed on \
-                     the roots' params, so this param would be unconstrained. Give `{}` only params \
-                     the roots also have, or visit it from a separate `visitor!()`.",
-                    id,
-                    param_name(&p),
-                    id
-                );
-            }
-        }
-    }
-    let mut seen_pred = HashSet::new();
-    let union_where: Vec<WherePredicate> = targets
-        .iter()
-        .flat_map(|d| item_where_preds(&d.def))
-        .filter(|p| seen_pred.insert(quote!(#p).to_string()))
-        .collect();
-    let uw = where_clause(&union_where);
-
-    // Fresh-name the generated helper idents — the visitor type param (`__V`/`__W`) and the per-root
-    // depth params (`__R{i}`) — against every target's param names, so a cycle/target type that
-    // declares a param literally named `__V` / `__R0` / `__W` doesn't collide (as the acyclic path
-    // already does via `fresh_ident`).
-    let reserved: HashSet<String> = targets
-        .iter()
-        .flat_map(|d| gparams(item_generics(&d.def).unwrap()))
-        .map(|p| param_name(&p))
-        .collect();
-    let p_v = fresh_ident("__V", &reserved);
-    let p_w = {
-        let mut r = reserved.clone();
-        r.insert(p_v.to_string());
-        fresh_ident("__W", &r)
-    };
-    let max_roots = rec
-        .iter()
-        .map(|d| d.recurse.as_ref().unwrap().roots.len())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let rpfx = {
-        let mut r = reserved.clone();
-        r.insert(p_v.to_string());
-        r.insert(p_w.to_string());
-        fresh_prefix("__R", &r, max_roots)
-    };
-
-    // Per recurse target: its own cycle's depth params `dps` (`__R0…`, one per root of THAT cycle),
-    // both sides' method names + bodies; `is_root` selects the `VisitRec` impls.
-    struct Rec {
-        node: Path,
-        own_args: Vec<TokenStream>,
-        /// This cycle type's params beyond the roots' (decl form) — lowered to `visit_*` method
-        /// generics, since the trait is keyed on the roots' params only. Empty for a root.
-        /// `extra_lts` / `extra_rest` are the same params split lifetime / non-lifetime, so the free
-        /// fn can emit all lifetimes before the root's type params (lifetimes-first rule).
-        extra_decl: Vec<TokenStream>,
-        extra_lts: Vec<TokenStream>,
-        extra_rest: Vec<TokenStream>,
-        dps: Vec<Ident>,
-        is_root: bool,
-        vm: Ident,
-        vm_mut: Ident,
-        body: TokenStream,
-        body_mut: TokenStream,
-    }
-    // Every fetched cycle type (listed or not): ident → (def, `__*Rec` node path), so an unlisted
-    // cross-edge can be inline-drilled by `recurse_lower_*`.
-    let cycle_defs: HashMap<String, (Item, Path)> = done_by_path
-        .values()
         .filter_map(|d| {
-            let r = d.recurse.as_ref()?;
             let id = item_ident(&d.def)?;
-            Some((id.to_string(), (d.def.clone(), r.node.clone())))
-        })
-        .collect();
-    let recs: Vec<Rec> = rec
-        .iter()
-        .map(|d| {
-            let id = item_ident(&d.def).unwrap();
-            let r = d.recurse.as_ref().unwrap();
-            let dps: Vec<Ident> = (0..r.roots.len())
-                .map(|i| Ident::new(&format!("{rpfx}{i}"), Span::call_site()))
-                .collect();
-            let root_dp: HashMap<String, Ident> = r
-                .roots
-                .iter()
-                .map(|x| x.to_string())
-                .zip(dps.iter().cloned())
-                .collect();
-            let cycle_set: HashSet<String> = r.cycle.iter().map(|i| i.to_string()).collect();
-            let extra: Vec<GenericParam> = gparams(item_generics(&d.def).unwrap())
-                .into_iter()
-                .filter(|p| !root_key_names.contains(&param_name(p)))
-                .collect();
-            let is_lt = |p: &&GenericParam| matches!(p, GenericParam::Lifetime(_));
-            Rec {
-                node: r.node.clone(),
-                own_args: gargs(item_generics(&d.def).unwrap()),
-                extra_decl: extra.iter().map(|p| param_tokens(p).0).collect(),
-                extra_lts: extra.iter().filter(is_lt).map(|p| param_tokens(p).0).collect(),
-                extra_rest: extra.iter().filter(|p| !is_lt(p)).map(|p| param_tokens(p).0).collect(),
-                is_root: r.roots.iter().any(|rr| rr == id),
-                vm: method_ident_m(id, false),
-                vm_mut: method_ident_m(id, true),
-                body: recurse_lower_body(
-                    &RecLower {
-                        method_set,
-                        root_dp: &root_dp,
-                        cycle: &cycle_set,
-                        cycle_defs: &cycle_defs,
-                        mutable: false,
-                    },
-                    &d.def,
-                    &r.node,
-                ),
-                body_mut: recurse_lower_body(
-                    &RecLower {
-                        method_set,
-                        root_dp: &root_dp,
-                        cycle: &cycle_set,
-                        cycle_defs: &cycle_defs,
-                        mutable: true,
-                    },
-                    &d.def,
-                    &r.node,
-                ),
-                dps,
-            }
+            Some((id.to_string(), gparams(item_generics(&d.def)?)))
         })
         .collect();
 
-    let lower = Lower { method_set, done_by_path, mutable: false };
-    let lower_mut = Lower { method_set, done_by_path, mutable: true };
-    struct Acy {
-        path: TokenStream,
-        own_use: TokenStream,
-        vm: Ident,
-        vm_mut: Ident,
-        body: TokenStream,
-        body_mut: TokenStream,
-    }
-    let acys: Vec<Acy> = targets
-        .iter()
-        .filter(|d| d.recurse.is_none())
-        .map(|d| {
-            let id = item_ident(&d.def).unwrap();
-            let scrut: &Path = path_of.get(&id.to_string()).copied().unwrap_or(&d.path);
-            let mut s0 = Vec::new();
-            let mut s1 = Vec::new();
-            Acy {
-                path: quote!(#scrut),
-                own_use: angle(&gargs(item_generics(&d.def).unwrap())),
-                vm: method_ident_m(id, false),
-                vm_mut: method_ident_m(id, true),
-                body: lower.destructure(&d.def, &d.subast, scrut, &quote!(i), 0, &mut s0),
-                body_mut: lower_mut.destructure(&d.def, &d.subast, scrut, &quote!(i), 0, &mut s1),
-            }
-        })
-        .collect();
-
-    // Inherent `.visit()`/`.visit_mut()` per type (acyclic + recurse alike): a recurse alias `Y<…>`
-    // infers the depth default, so `v.visit_Y(self)` works the same as for an acyclic type. Skipped for
-    // a **foreign** target (defined in another crate) — an inherent impl there is E0116, so a
-    // cross-crate `visitor!(upstream::Expr, …)` uses the `Visit::visit_*` trait method instead.
-    struct Inh {
-        scrut: TokenStream,
-        own_def: TokenStream,
-        own_use: TokenStream,
-        own_w: TokenStream,
-        extra: Vec<GenericParam>,
-        vm: Ident,
-        vm_mut: Ident,
-    }
-    let inhs: Vec<Inh> = targets
-        .iter()
-        .filter_map(|d| {
-            let id = item_ident(&d.def).unwrap();
-            let scrut: &Path = path_of.get(&id.to_string()).copied().unwrap_or(&d.path);
-            if !path_is_crate_local(scrut) {
-                return None;
-            }
-            let own_params = gparams(item_generics(&d.def).unwrap());
-            let own_names: HashSet<String> = own_params.iter().map(param_name).collect();
-            let extra: Vec<GenericParam> = g_params
-                .iter()
-                .filter(|p| !own_names.contains(&param_name(p)))
-                .cloned()
-                .collect();
-            Some(Inh {
-                scrut: quote!(#scrut),
-                own_def: angle(&own_params),
-                own_use: angle(&gargs(item_generics(&d.def).unwrap())),
-                own_w: where_clause(&item_where_preds(&d.def)),
-                extra,
-                vm: method_ident_m(id, false),
-                vm_mut: method_ident_m(id, true),
-            })
-        })
-        .collect();
-
-    let node_aliases: Vec<TokenStream> = rec
-        .iter()
-        .map(|d| {
-            let id = item_ident(&d.def).unwrap();
-            let node = &d.recurse.as_ref().unwrap().node;
-            let alias = Ident::new(&format!("{id}Node"), Span::call_site());
-            quote!( #[doc = "Depth-generic node type for the visitor."] pub use #node as #alias; )
-        })
-        .collect();
-
-    // Emit one mutability side (shared `false` / mutable `true`): the dispatch trait, the unified
-    // visitor trait, free fns, the dispatch impls (root nodes + terminators), and inherent entries.
-    let emit_side = |mutable: bool| -> TokenStream {
-        let visit_tr = Ident::new(if mutable { "VisitMut" } else { "Visit" }, Span::call_site());
-        let rec_tr = Ident::new(
-            if mutable { "VisitRecMut" } else { "VisitRec" },
-            Span::call_site(),
-        );
-        let rec_fn = Ident::new(
-            if mutable { "visit_rec_mut" } else { "visit_rec" },
-            Span::call_site(),
-        );
-        let amp = if mutable { quote!(&mut) } else { quote!(&) };
-        let inh_fn = Ident::new(if mutable { "visit_mut" } else { "visit" }, Span::call_site());
-        let inh_recv = if mutable { quote!(&mut self) } else { quote!(&self) };
-        let inh_ret = if mutable { quote!(&mut Self) } else { quote!(&Self) };
-        quote! {
-            /// Dispatch trait turning the cycle's depth recursion into trait calls.
-            pub trait #rec_tr < #(#g_params,)* #p_v > {
-                fn #rec_fn(#amp self, v: &mut #p_v);
-            }
-
-            /// Unified depth-aware visitor: fixed methods for acyclic types, depth-generic for
-            /// `#[recurse]` cycle types. One impl walks both; a field crossing into the cycle is
-            /// dispatched automatically. When inheriting, the base's trait is a supertrait.
-            pub trait #visit_tr < #(#g_params),* >
-                #(if let Some(b) = &st.base) { : #b::#visit_tr #base_g_use }
-                #uw
-            {
-                #(for a in &acys) {
-                    fn #{ if mutable { &a.vm_mut } else { &a.vm } }(&mut self, i: #amp #{&a.path} #{&a.own_use})
-                    where Self: ::core::marker::Sized {
-                        #{ if mutable { &a.vm_mut } else { &a.vm } }(self, i)
-                    }
-                }
-                #(for c in &recs) {
-                    fn #{ if mutable { &c.vm_mut } else { &c.vm } }< #(for e in &c.extra_decl) { #e, } #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* Self >, } >(
-                        &mut self,
-                        i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >,
-                    ) where Self: ::core::marker::Sized {
-                        #{ if mutable { &c.vm_mut } else { &c.vm } }(self, i)
-                    }
-                }
-            }
-
-            #(for a in &acys) {
-                // No `?Sized`: an acyclic body may cross into the cycle via `this.visit_<rec>(…)`,
-                // whose method requires `Self: Sized`.
-                pub fn #{ if mutable { &a.vm_mut } else { &a.vm } }< #(#g_params,)* #p_v: #visit_tr #g_use_angle >(
-                    this: &mut #p_v,
-                    i: #amp #{&a.path} #{&a.own_use},
-                ) #uw {
-                    #{ if mutable { &a.body_mut } else { &a.body } }
-                }
-            }
-            #(for c in &recs) {
-                pub fn #{ if mutable { &c.vm_mut } else { &c.vm } }<
-                    // lifetimes first (extra lifetimes, then the root's via `#g_params`), then types/consts
-                    #(for l in &c.extra_lts) { #l, }
-                    #(#g_params,)*
-                    #(for r in &c.extra_rest) { #r, }
-                    #p_v: #visit_tr #g_use_angle,
-                    #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* #p_v >, }
-                >(
-                    v: &mut #p_v,
-                    i: #amp #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >,
-                ) {
-                    #{ if mutable { &c.body_mut } else { &c.body } }
-                }
-            }
-
-            // One dispatch impl per ROOT node (drives its visit) + one per terminator (no-op).
-            #(for c in &recs) {
-                #(if c.is_root) {
-                    impl< #(#g_params,)* #(for d in &c.dps) { #d: #rec_tr < #(#g_args,)* #p_v >, } #p_v: #visit_tr #g_use_angle >
-                        #rec_tr < #(#g_args,)* #p_v > for #{&c.node} < #(for x in &c.own_args) { #x, } #(for d in &c.dps) { #d, } >
-                    {
-                        fn #rec_fn(#amp self, v: &mut #p_v) {
-                            <#p_v as #visit_tr #g_use_angle>::#{ if mutable { &c.vm_mut } else { &c.vm } }(v, self);
+    fn ty_fills(
+        ty: &Type,
+        params_of: &HashMap<String, Vec<GenericParam>>,
+        shared: &HashSet<String>,
+    ) -> bool {
+        match ty {
+            Type::Path(tp) => {
+                for seg in &tp.path.segments {
+                    if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+                        // Zip the actual args onto the referenced type's declared params (same order).
+                        // Only a non-shared TYPE or CONST param filled with a non-identity arg forces
+                        // method-generic mode — a lifetime fill (`Stmt<'static, S>`) is fine in the
+                        // union model via subtyping, so it does NOT trigger it.
+                        if let Some(decl) = params_of.get(&seg.ident.to_string()) {
+                            for (param, arg) in decl.iter().zip(ab.args.iter()) {
+                                match (param, arg) {
+                                    (GenericParam::Type(tp_), GenericArgument::Type(at)) => {
+                                        let pname = tp_.ident.to_string();
+                                        let bare = matches!(at, Type::Path(p)
+                                            if p.qself.is_none() && p.path.is_ident(&pname));
+                                        if !shared.contains(&pname) && !bare {
+                                            return true;
+                                        }
+                                    }
+                                    (GenericParam::Const(cp), GenericArgument::Const(ce)) => {
+                                        let pname = cp.ident.to_string();
+                                        let bare = matches!(ce, syn::Expr::Path(p)
+                                            if p.qself.is_none() && p.path.is_ident(&pname));
+                                        if !shared.contains(&pname) && !bare {
+                                            return true;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        // Recurse into every type argument (nested containers / cross-edges).
+                        for arg in &ab.args {
+                            if let GenericArgument::Type(at) = arg {
+                                if ty_fills(at, params_of, shared) {
+                                    return true;
+                                }
+                            }
                         }
                     }
                 }
+                false
             }
-            #(for t in &all_terms) {
-                impl< #(#g_params,)* #p_v: #visit_tr #g_use_angle > #rec_tr < #(#g_args,)* #p_v >
-                    for #t #g_use_angle
-                {
-                    fn #rec_fn(#amp self, _v: &mut #p_v) {}
-                }
-            }
-
-            #(for h in &inhs) {
-                impl #{&h.own_def} #{&h.scrut} #{&h.own_use} #{&h.own_w} {
-                    pub fn #inh_fn < #(for e in &h.extra) { #e, } #p_w: #visit_tr #g_use_angle >(
-                        #inh_recv,
-                        visitor: &mut #p_w,
-                    ) -> #inh_ret {
-                        visitor.#{ if mutable { &h.vm_mut } else { &h.vm } }(self);
-                        self
-                    }
-                }
-            }
+            Type::Reference(r) => ty_fills(&r.elem, params_of, shared),
+            Type::Slice(s) => ty_fills(&s.elem, params_of, shared),
+            Type::Array(a) => ty_fills(&a.elem, params_of, shared),
+            Type::Paren(p) => ty_fills(&p.elem, params_of, shared),
+            Type::Group(g) => ty_fills(&g.elem, params_of, shared),
+            Type::Tuple(t) => t.elems.iter().any(|e| ty_fills(e, params_of, shared)),
+            _ => false,
         }
-    };
-
-    let shared = emit_side(false);
-    let mutable = emit_side(true);
-
-    // Export `__syan_visited` so this recurse visitor can serve as a base for `visitor!(self => New)`.
-    // The `@recbase {}` marker tells the consumer the base is a recurse visitor (depth-generic methods
-    // ⇒ struct-only inheritance). `@an {}` is empty: a recurse base does not itself inherit (yet).
-    let visited_macro = emit_visited_macro(st, &g_params, quote!(), true);
-
-    quote! {
-        #(#node_aliases)*
-        #shared
-        #mutable
-        #visited_macro
     }
+
+    let fields_of = |def: &Item| -> Vec<Type> {
+        let mut out = Vec::new();
+        match def {
+            Item::Enum(e) => {
+                for v in &e.variants {
+                    out.extend(v.fields.iter().map(|f| f.ty.clone()));
+                }
+            }
+            Item::Struct(s) => out.extend(s.fields.iter().map(|f| f.ty.clone())),
+            _ => {}
+        }
+        out
+    };
+    targets
+        .iter()
+        .any(|d| fields_of(&d.def).iter().any(|t| ty_fills(t, &params_of, shared)))
 }
 
 fn generate_module(st: &BuildInput) -> TokenStream {
@@ -1973,26 +1539,52 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         abort!(Span::call_site(), "no AST definitions resolved for the visitor");
     }
 
-    // `#[recurse]` cycle types carry `@recurse`; they need a depth-generic visitor (Phase 1a). For
-    // now a single visitor!() is either all-recurse (one cycle) or all-acyclic; mixing is a later
-    // phase. An all-recurse visitor goes through `generate_recurse_module`; the acyclic path below is
-    // unchanged.
-    let recurse_targets = targets.iter().filter(|d| d.recurse.is_some()).count();
-    if recurse_targets > 0 {
-        // Recurse cycle types present (all-recurse or mixed with acyclic types): one unified
-        // depth-aware `Visit` trait, with any outer→inner boundary auto-crossed. `st.base` (if any) is
-        // a recurse base whose `Visit`/`VisitMut` become supertraits of the new traits.
-        return generate_module_mixed(st, &targets, &method_set, &done_by_path, &path_of);
-    }
-
     // The visitor trait is parameterized by the *union* of every visited type's generic params (+ the
     // base's, when inheriting), so one visitor can span e.g. `Expr<S, Tokens>` and `BinOp<S>`; each
     // type is referenced with its own subset, and `base_g_use` (below) names the base's args by the
     // union's idents for every `base::Visit<..>` reference.
-    let mut g_params = param_union(&targets, &st.base_generics);
+    let mut union_params = param_union(&targets, &st.base_generics);
+    sort_lifetimes_first(&mut union_params);
+
+    // Params shared by EVERY visited type (∪ the base's, which must stay trait-level to name
+    // `base::Visit<base params>`). A non-shared param appears in only some types.
+    let mut shared_names: Option<HashSet<String>> = None;
+    for d in &targets {
+        let own: HashSet<String> = gparams(item_generics(&d.def).unwrap())
+            .iter()
+            .map(param_name)
+            .collect();
+        shared_names = Some(match shared_names {
+            None => own,
+            Some(acc) => acc.intersection(&own).cloned().collect(),
+        });
+    }
+    let mut shared_names = shared_names.unwrap_or_default();
+    for bp in &st.base_generics {
+        shared_names.insert(param_name(bp));
+    }
+
+    // Heterogeneous mode: a non-shared param is *concrete-filled* in a cross-edge (e.g. `Stmt<S, u8>`),
+    // which the union-of-params trait can't express. Make non-shared params per-method generics and go
+    // struct-only (no closures — a closure can't be `for<T>` generic). Gated to the no-inheritance case
+    // (a recurse/heterogeneous base is out of scope) so the common union+closure path is untouched.
+    let method_mode = st.base.is_none() && has_concrete_fill(&targets, &shared_names);
+
+    // Trait params: the full union normally; only the shared subset in method-mode (non-shared params
+    // become method generics instead).
+    let mut g_params: Vec<GenericParam> = if method_mode {
+        union_params
+            .iter()
+            .filter(|p| shared_names.contains(&param_name(p)))
+            .cloned()
+            .collect()
+    } else {
+        union_params.clone()
+    };
     sort_lifetimes_first(&mut g_params);
+    let struct_only = method_mode;
     let by_name: HashMap<String, TokenStream> =
-        g_params.iter().map(|p| (param_name(p), param_use(p))).collect();
+        union_params.iter().map(|p| (param_name(p), param_use(p))).collect();
     let by_name_param: HashMap<String, GenericParam> =
         g_params.iter().map(|p| (param_name(p), p.clone())).collect();
     let base_args: Vec<TokenStream> = st
@@ -2080,6 +1672,17 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             let own_params = gparams(item_generics(def).unwrap());
             let own_use = angle(&gargs(item_generics(def).unwrap()));
             let own_where = item_where_preds(def);
+            // In method-mode, this type's non-shared params become method generics; in union mode the
+            // trait already carries every param, so none.
+            let method_params: Vec<GenericParam> = if method_mode {
+                own_params
+                    .iter()
+                    .filter(|p| !shared_names.contains(&param_name(p)))
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
             // The path the visited type is named by (its `visitor!(..)` path), also the scrutinee
             // path for its own body; falls back to the fetched path if somehow unmapped.
             let scrut_path: &Path = path_of.get(&ident.to_string()).copied().unwrap_or(&d.path);
@@ -2095,6 +1698,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 own_params,
                 own_use,
                 own_where,
+                method_params,
+                local: path_is_crate_local(scrut_path),
                 body,
                 body_mut,
             }
@@ -2144,21 +1749,17 @@ fn generate_module(st: &BuildInput) -> TokenStream {
 
     let shared = gen_side(
         false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
-        &union_where, st.base_is_recurse,
+        &union_where, struct_only,
     );
     let mutable = gen_side(
         true, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
-        &union_where, st.base_is_recurse,
+        &union_where, struct_only,
     );
 
     // Every visitor module exports its full visited-type set (idents), its generic-param union
     // (`@bg`), and its full ancestor chain (`@an`) so another visitor can inherit it (transitively).
     let anc_export = emit_ancestors(&chain);
-    // Propagate the recurse-base taint: if THIS (acyclic) visitor inherits a recurse base, it is built
-    // struct-only, and any downstream visitor inheriting it must be too (the transitive recurse
-    // supertrait's `visit_*` methods are `where Self: Sized`). So re-export `@recbase {}` iff tainted —
-    // an acyclic intermediate must not swallow the marker (`recurse-base => acyclic-mid => new`).
-    let visited_macro = emit_visited_macro(st, &g_params, anc_export, st.base_is_recurse);
+    let visited_macro = emit_visited_macro(st, &g_params, anc_export);
 
     // Items are emitted directly into the enclosing module (where `visitor!(...)` was invoked).
     quote! {

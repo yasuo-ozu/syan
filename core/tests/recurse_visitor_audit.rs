@@ -15,9 +15,8 @@
 fn recurse_visitor_audit() {
     let t = trybuild::TestCases::new();
 
-    // B (fixed): one `visitor!()` over independent cycles with DISJOINT root params now aborts cleanly
-    //   (was an E0107/E0277 cascade from the union being applied to per-cycle terminators).
-    t.compile_fail("tests/ui/audit_visitor_recurse_multicycle_disjoint_params.rs");
+    // (B is now SUPPORTED: with natural types, a `visitor!()` over independent cycles with disjoint
+    //  params is an ordinary union-param acyclic visitor — see `visitor_multicycle_disjoint_params.rs`.)
 
     // D (fixed): a rootless `C⇄D` sub-cycle with ≤1 self-referential root is now rejected (the
     //   `subgraph_is_cyclic` guard runs on the single-root path too) instead of silently compiling

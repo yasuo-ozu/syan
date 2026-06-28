@@ -47,7 +47,7 @@ fn nested_containers_visit_mut() {
     assert_eq!(n, 1);
 }
 
-// Nested containers in a `#[recurse]` cycle traverse too (back-edges still via the depth param).
+// Nested containers in a `#[recurse]` cycle traverse too (natural acyclic self-recursion).
 #[syan::parse::recurse]
 mod rec {
     use core::marker::PhantomData;
@@ -68,7 +68,7 @@ mod rv {
 #[derive(Default)]
 struct Counter(usize);
 impl<S> rv::Visit<S> for Counter {
-    fn visit_expr<R: rv::VisitRec<S, Self>>(&mut self, i: &rv::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &rec::Expr<S>) {
         self.0 += 1;
         rv::visit_expr(self, i);
     }
@@ -78,9 +78,9 @@ impl<S> rv::Visit<S> for Counter {
 fn recurse_nested_container_is_traversed() {
     // Expr::Many([Some(Lit), None, Some(Lit)]) → outer Expr + 2 inner Exprs.
     let e: rec::Expr<()> = rec::Expr::Many(vec![
-        Some(rv::ExprNode::Lit(PhantomData)),
+        Some(rec::Expr::Lit(PhantomData)),
         None,
-        Some(rv::ExprNode::Lit(PhantomData)),
+        Some(rec::Expr::Lit(PhantomData)),
     ]);
     let mut c = Counter::default();
     rv::Visit::visit_expr(&mut c, &e);

@@ -1,11 +1,10 @@
-//! Depth-generic traversal through container shapes and tuples — the cycle uses `#[recurse]` and the
-//! visitor is built by a sibling `visitor!()`. Regression tests for the fixes to audit problems #3 (a
-//! `Box` *around* an `Option`, via `Peeled::cont_box`) and #7 (a tuple-typed field, destructured and
-//! dispatched element-by-element), plus the already-working `Vec<Box<_>>` / `Option<Box<_>>` shapes
-//! for good measure.
+//! Natural acyclic traversal through container shapes and tuples — the cycle uses `#[recurse]` (which
+//! exposes natural recursive types) and the visitor is built by a sibling `visitor!()`. Regression
+//! tests for the fixes to audit problems #3 (a `Box` *around* an `Option`, via `Peeled::cont_box`) and
+//! #7 (a tuple-typed field, destructured and dispatched element-by-element), plus the already-working
+//! `Vec<Box<_>>` / `Option<Box<_>>` shapes for good measure.
 //!
-//! Back-edge slots are filled with `v_v_ast::ExprNode::Lit(PhantomData)` (the depth-generic node alias),
-//! letting each call site infer the one-level-shallower depth — as in `visitor_recurse_cycle.rs`.
+//! Recursive slots are filled with the natural type path `ast::Expr::Lit(PhantomData)`.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -40,7 +39,7 @@ mod v_ast {
 struct Nodes(usize);
 
 impl<S> v_ast::Visit<S> for Nodes {
-    fn visit_expr<R: v_ast::VisitRec<S, Self>>(&mut self, i: &v_ast::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &ast::Expr<S>) {
         self.0 += 1;
         v_ast::visit_expr(self, i);
     }
@@ -56,7 +55,7 @@ fn count(e: &ast::Expr<()>) -> usize {
 fn box_around_option_some() {
     // #3: Opt(Some(Lit)) → outer Opt-Expr + inner Lit = 2.
     let e: ast::Expr<()> =
-        ast::Expr::Opt(Box::new(Some(Box::new(v_ast::ExprNode::Lit(PhantomData)))));
+        ast::Expr::Opt(Box::new(Some(Box::new(ast::Expr::Lit(PhantomData)))));
     assert_eq!(count(&e), 2, "Box<Option<Box<Expr>>> descends through the Some");
 }
 
@@ -71,8 +70,8 @@ fn box_around_option_none() {
 fn tuple_field_both_operands() {
     // #7: Pair((Lit, Lit)) → outer Pair-Expr + both operands = 3.
     let e: ast::Expr<()> = ast::Expr::Pair((
-        Box::new(v_ast::ExprNode::Lit(PhantomData)),
-        Box::new(v_ast::ExprNode::Lit(PhantomData)),
+        Box::new(ast::Expr::Lit(PhantomData)),
+        Box::new(ast::Expr::Lit(PhantomData)),
     ));
     assert_eq!(count(&e), 3, "tuple field visits both cycle-ref operands");
 }
@@ -81,22 +80,22 @@ fn tuple_field_both_operands() {
 fn tuple_field_with_leaf() {
     // #7: Tagged((Lit, PhantomData)) → outer + the one followed element = 2.
     let e: ast::Expr<()> =
-        ast::Expr::Tagged((Box::new(v_ast::ExprNode::Lit(PhantomData)), PhantomData));
+        ast::Expr::Tagged((Box::new(ast::Expr::Lit(PhantomData)), PhantomData));
     assert_eq!(count(&e), 2, "leaf tuple element is skipped, cycle ref visited");
 }
 
 #[test]
 fn vec_of_boxed_exprs() {
     let e: ast::Expr<()> = ast::Expr::Many(vec![
-        Box::new(v_ast::ExprNode::Lit(PhantomData)),
-        Box::new(v_ast::ExprNode::Lit(PhantomData)),
-        Box::new(v_ast::ExprNode::Lit(PhantomData)),
+        Box::new(ast::Expr::Lit(PhantomData)),
+        Box::new(ast::Expr::Lit(PhantomData)),
+        Box::new(ast::Expr::Lit(PhantomData)),
     ]);
     assert_eq!(count(&e), 4, "outer Many + 3 elements");
 }
 
 #[test]
 fn option_of_boxed_expr() {
-    let e: ast::Expr<()> = ast::Expr::OptIn(Some(Box::new(v_ast::ExprNode::Lit(PhantomData))));
+    let e: ast::Expr<()> = ast::Expr::OptIn(Some(Box::new(ast::Expr::Lit(PhantomData))));
     assert_eq!(count(&e), 2, "outer OptIn + inner");
 }

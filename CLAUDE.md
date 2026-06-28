@@ -50,142 +50,94 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   given the intermediate's path, e.g. `super::base` off `syan_rust::inherit::mid_ss` ⇒
   `syan_rust::inherit::base`), via `base_host_crate`/`requalify_ancestor`. Tests:
   `cross_crate_inherit{,_multilevel,_4level,_downstream_mid}.rs`, `cross_crate_super_self.rs`.
-- **`#[recurse(limit = N)]`** (type transformer + metadata — *no* visitor): turns a module of
-  mutually-recursive AST types into depth-limited concrete types — renames each cycle type `Xxx` →
-  `__XxxRec<…, depth>`, emits per-root terminators / `__XxxDefault` depth chains / public `pub type Xxx`
-  aliases, and a `@recurse` metadata macro `visitor!()` consumes. Cycle types may carry
-  lifetime/type/const params, possibly **heterogeneous** across the cycle; a back-edge to a root repeats
-  the root's params **verbatim** (a non-identity arg like `Expr<Vec<S>>` is rejected). **Independent
-  cycles** are partitioned into SCCs (`find_cycle_sccs`, Tarjan), each with its own
-  root/chain/`XxxTerm`/aliases (`build_scc`). **Multi-root** cycles keep one depth dimension per root
-  (`build_multiroot_tail`); soundness guard: the SCC minus its roots must be acyclic
-  (`subgraph_is_cyclic`) else a clear `abort!`. Clean `abort!`s for a missing/non-identity root param
-  (`limit = 0` still panics). Tests: `recurse_multi_cycle.rs`, `recurse_multiroot.rs`,
-  `recurse_fixes.rs`, `recurse_audit_test.rs` + `ui/recurse_*.rs`.
-- **`visitor!(…)` over a `#[recurse]` cycle** (the **only** recurse-visitor path): consumes `@recurse`
-  to emit a **depth-generic** visitor (`generate_module_mixed`) — `visit_Y<R: VisitRec<…>>(&YNode<…>)`
-  per listed cycle type + `VisitRec`/`VisitRecMut` dispatch (root's depth chain drives, terminator a
-  no-op) + `YNode` aliases. **Struct/`&mut`-only** (a closure can't be depth-generic — see "Closures
-  over `#[recurse]`"). Keyed on the cycle **roots'** params; a non-root's extra params become `visit_*`
-  **method generics** (heterogeneous `Expr<S>` + `Stmt<S,T>` ⇒ `Visit<S>` + `visit_stmt<T,R>`). One
-  `visitor!()` can **mix** acyclic + recurse (auto-crosses the outer→inner boundary; acyclic params
-  must be ⊆ the roots' else a clear `abort!`), span **independent cycles**, handle **multi-root** (one
-  depth param per root), traverse containers + **tuples**, **drill** an unlisted cross-edge inline, and
-  emit shared + `&mut`. **Cross-crate**: resolves `$crate`-rooted `@node`/`@terms`; inherent `.visit()`
-  skipped for a foreign target (E0116 — use `Visit::visit_*`), via `path_is_crate_local`.
-  **Inheritance** `visitor!(base => New)` over a recurse base is struct-only via a `@recbase` marker
-  (drops the closure `Driver`) — `New(acyclic|recurse) => base(recurse)`, incl. through an acyclic
-  intermediate (`@recbase` re-exported iff `base_is_recurse`). Tests: `visitor_recurse_via_visitor.rs`
-  (+`visit_mut`), `…_heterogeneous`, `…_mixed`, `…_containers`, `…_multiroot_via_visitor`,
-  `…_multicycle_via_visitor`, `…_drill_unlisted`, `recurse_generics.rs`,
-  `visitor_inherit_recurse{,_acyclic_mid}.rs`, `rust/tests/cross_crate_recurse.rs`. Contract + limits:
-  "`#[recurse]` expansion" section below.
+- **`#[recurse(limit = N)]`** (type transformer): turns a module of mutually-recursive AST types into
+  **natural recursive public types** + an internal depth-limited **engine** used only for `Parse`. Per
+  SCC it emits: (1) the user's cycle types as **genuine natural recursive enums/structs** — the public
+  API `Expr<S>` (one type at all depths), carrying `#[derive(Ast)]` + `Debug`/`Default`/… with `Parse`
+  always **routed to the engine**; `Unparse`/`Spanned` stay on the natural type (with `#[ignore_bounds]`
+  injected on recursive-child fields) **only for a single self-recursive group-free cycle**, else they
+  too are engine-routed (`make_natural_item`, gated by `scc_us_natural`); (2) a `pub(crate)` depth-
+  limited engine `__XxxRec<…, __Rec = __XxxDefault<…>>` family + terminators `XxxTerm` + `__XxxDefault`
+  depth chains, deriving the engine-routed traits, emitted **only when needed** (`scc_needs_engine` — an
+  Ast-only cycle gets none) (`make_engine_item`); (3) per-cycle
+  `__ToNat_X` conversion traits/impls (engine→natural, depth-generic, terminator arm `unreachable!`) +
+  a **delegated `impl Parse for X`** that parses the engine then `.__to_nat()`s (`gen_natural_extras`,
+  `conv_body`/`conv_expr`). The public `pub type X = …` aliases are **gone** (the natural enum owns the
+  name); user inherent `impl`s land on the natural type verbatim. **Why Parse still needs the engine:**
+  deriving `Parse` directly on a natural recursive type fails two ways — (a) per-field `field_ty: Parse`
+  where-bounds form an infinite cycle (E0275); (b) backtracking `stream.dup(…)` wraps the stream in
+  another `Dup<…>` per descent level → infinite stream-type monomorphization (also E0275). The engine
+  bottoms both out. Cycle types may carry lifetime/type/const params, possibly **heterogeneous** across
+  the cycle; a back-edge to a root repeats the root's params **verbatim** (a non-identity arg like
+  `Expr<Vec<S>>` is rejected — an engine constraint, kept). **Independent cycles** are partitioned into
+  SCCs (`find_cycle_sccs`, Tarjan), each with its own natural+engine+conversions (`build_scc`).
+  **Multi-root** cycles keep one engine depth dimension per root (`build_multiroot_tail`). **Finite-size
+  precondition:** a natural recursive type must be finite-size, so a **pure by-value cycle** (no
+  `Box`/`Vec`/… on any cycle edge) is rejected with a clean `abort!` (would be E0072) — detected via the
+  direct-edge subgraph being acyclic (`subgraph_is_cyclic` on `direct_type_refs`). Clean `abort!`s also
+  for a missing/non-identity root param (`limit = 0` still panics) and a non-acyclic rootless subcycle.
+  Tests: `recurse_test.rs`, `recurse_multi_cycle.rs`, `recurse_multiroot.rs`, `recurse_fixes.rs`,
+  `recurse_problems_test.rs`, `recurse_audit_test.rs`, `ignore_bounds.rs` + `ui/recurse_*.rs`,
+  `ui/problem*.rs`.
+- **`visitor!(…)` over a `#[recurse]` cycle** is now an **ordinary acyclic visitor** — the public types
+  are natural (one type at all depths) and `Visit` methods carry no `field_ty: Visit` bounds, so there
+  is no E0275 and no depth-generic machinery. `visit_xxx(&mut self, &Expr<S>)` like any acyclic type.
+  **Closures** `|e: &Expr<S>|`, **tuples of closures**, inherent `.visit(closure)`, **`visit_mut`**, and
+  **inheritance** `visitor!(base => New)` (via the normal supertrait — no `@recbase`) all work — this
+  closes the long-deferred closure-over-recurse gap. **`#[subast]` is now required on cycle types** to
+  follow cross-edges (a field is followed iff its peeled head ∈ its `#[subast(…)]` or is the type's own
+  ident; e.g. `Expr` holding `Box<Stmt<S>>` needs `#[subast(crate::ast::Stmt)]`). **Heterogeneous
+  concrete-fill** — a non-shared param *concrete-filled* in a cross-edge (`Box<Stmt<S, u8>>` where
+  `Stmt<S,T>`'s `T` is non-root) keys the trait on the shared params and makes the non-shared param a
+  per-method generic (`visit_stmt<T>`), going **struct-only** (a closure can't be `for<T>`); detected by
+  `has_concrete_fill`. A non-shared *unbounded* param with **no** concrete fill (incl. a non-shared
+  lifetime — works via subtyping) stays in the union+closure path. **Multi-root / multi-cycle /
+  cross-crate** all work as ordinary acyclic visitors (no visitor-level depth dimensions — that's an
+  internal engine `Parse` detail); cross-crate skips the inherent `.visit()` for a foreign target
+  (E0116 — use `Visit::visit_*`), via `path_is_crate_local`. Tests: `visitor_recurse_cycle.rs` (incl.
+  `closure_over_recurse_cycle`), `visitor_recurse_via_visitor.rs` (+`visit_mut`), `…_heterogeneous`,
+  `…_mixed`, `…_containers`, `…_container_of_tuple`, `…_multiroot_via_visitor`,
+  `…_multicycle_via_visitor`, `…_drill_unlisted`, `recurse_generics.rs` (`het`),
+  `audit_visitor_recurse_nonroot_lifetime.rs`, `visitor_inherit_recurse{,_acyclic_mid}.rs`,
+  `rust/tests/cross_crate_recurse.rs`.
 
 ## Known gaps / limitations
 
-- **`visitor!(…)` over `#[recurse]` — only limit: no closures** (struct/`&mut`-only; the depth-generic
-  `visit_*<R>` would need type-level HRTB). **Deferred** — write a struct `impl Visit`; rationale +
-  per-option implementation plans in "Closures over `#[recurse]`" below. Everything else over recurse is supported (see
-  "Shipped & tested"): unlisted-cross-edge drill, nested containers + tuples, multi-root / multi-cycle /
-  mixed, inheritance, cross-crate.
+- **`Unparse`/`Spanned` on a natural former-`#[recurse]` cycle — natural everywhere except a group-ful
+  cycle.** A natural `Expr<S>` is always `Parse` (delegated through the engine). `Unparse`/`Spanned` are
+  emitted on the **natural** type in two ways: (a) **single self-recursive group-free** cycle — directly,
+  via injected `#[ignore_bounds]` (leaf-only bounds; the recursive `.unparse()`/`.span()` resolves
+  against the *same* impl, **arbitrary depth**); (b) **multi-type group-free** cycle — by **delegation
+  through the engine**: a generated `__FromNat_X` bridge converts the (borrowed) natural value to the
+  depth-default engine value (`Clone`ing leaves; the leaf-`Clone` bounds are *unioned* across the cycle
+  so a member can build its siblings) and calls the engine's `Unparse`/`Spanned` (`gen_natural_extras`).
+  Delegated `Unparse`/`Spanned` are **depth-limited** — a tree deeper than `limit` `panic!`s at the
+  terminator (within the limit they succeed). Tested in `recurse_unparse_spanned.rs` (single + multi-
+  type, incl. type params; `Spanned` needs `S: Span`, threaded through the conversion impls by
+  `param_decls`, and a generated terminator `Spanned`). A **group-ful** cycle still keeps them on the
+  `pub(crate)` engine only (the group `Fill<Substruct>: Unparse` chain isn't delegable) — there the
+  natural type is `Parse` but not directly `Unparse`/`Spanned`. Engine-free (Ast-only) cycles avoid the
+  engine-scoped guards — a `where`-clause and a user `ExprTerm` type are then fine
+  (`recurse_no_engine.rs`), whereas a Parse-deriving cycle still rejects them
+  (`ui/audit_recurse_{where_clause,terminator_collision}.rs`).
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names (the alias is one keyword — won't fix).
-- **Clean `abort!`s for footguns** (all `visitor_diagnostics.rs`): an **unlisted co-root** of a
-  multi-root recurse cycle (a root defines a depth dimension, can't be drilled → must be listed); a
-  **`where`-bounded param not shared by all visited types** (the bound would be undischargeable on a
-  type lacking it — an *unbounded* unshared param is fine); the mixed acyclic-param-not-a-root wall.
+- **Clean `abort!` for a `where`-bounded param not shared by all visited types** (the bound would be
+  undischargeable on a type lacking it — an *unbounded* unshared param is fine); `visitor_diagnostics.rs`,
+  `ui/visitor_union_where_unshared_param.rs`. (A cycle following an **unlisted intermediate** that forms
+  a cycle of unlisted intermediates is the general drill diagnostic — "list one" — incl. an omitted
+  co-root: `ui/visitor_recurse_unlisted_coroot.rs`.)
 
-## Closures over `#[recurse]` — implementation plans (deferred)
+## Closures over `#[recurse]` — now work (was deferred)
 
-**Why it's blocked.** A depth-generic `visit_*<R>` runs at *every* depth (`R` shrinks per back-edge),
-so a closure driver would need `for<R> FnMut(&__XxxRec<S, R>)` — *type*-level HRTB, which Rust lacks
-(one `FnMut` value is monomorphic over the full-depth alias: `(self.0)(i)` → "expected `&__XxxRec<S,
-default>`, found `&__XxxRec<S, R>`"). So recurse (and recurse-inheriting) visitors are
-**struct/`&mut`-only**. Five options below; **none implemented** (struct visitors are the pragmatic
-answer). The plans are concrete enough to execute.
-
-**Shared anchors (all implementable options).** Everything is emitted in `generate_module_mixed`
-(`macro/visitor.rs`), reusing metadata the consumer already fetches — `@ast` (each cycle type's
-variant/field structure) and `@recurse` (`@node`/`@roots`/`@depth`/`@terms`/`@cycle`). A field is a
-**recursive child** iff its `peel`ed head ∈ `@cycle` (the existing `recurse_lower_*` classification),
-else a **leaf**; reuse that split. The closure adapter impls the *already-generated* `Visit<S>` (its
-`visit_*<R>` calls the existing free `visit_*` to descend), so only the per-type support type + adapter
-+ inherent `.visit(f)` wiring is new. Multi-type / tuple-of-closures chains exactly like the acyclic
-`Hook`/`Driver`/`Chain` (one adapter per cycle type, combined in one pass).
-
-### Option 1 — Erased view (sound; no alloc; closure sees leaves only)
-
-- **Emit per cycle type `Xxx`:** `pub enum XxxView<'v, S> {…}` mirroring `Xxx`'s variants, but a leaf
-  field `L` → `&'v L` (a container/leaf field `Vec<L>` → `&'v Vec<L>` whole), and a recursive-child
-  field is **omitted** (a variant of only children becomes unit). Plus `impl<S, R> __XxxRec<S, R> { pub
-  fn as_view(&self) -> XxxView<'_, S> }` — a `match` per variant borrowing leaves, ignoring children.
-- **Adapter + inherent:** `pub struct XxxClo<F>(pub F); impl<S, F: FnMut(&XxxView<'_, S>)> Visit<S> for
-  XxxClo<F> { fn visit_x<R: VisitRec<S, Self>>(&mut self, i) { (self.0)(&i.as_view()); visit_x(self, i);
-  } }` (pre-order: fire closure, then descend). Inherent `pub fn visit(&self, f)` on the `XxxNode`
-  alias → `visit_x(&mut XxxClo(f), self)`.
-- **Mut side:** `XxxViewMut<'v, S>` with `&'v mut L` leaves, `as_view_mut`, `XxxCloMut`, `.visit_mut(f)`.
-- **Edge cases:** heterogeneous params → `XxxView<'v, S, T>`; multi-root → adapter `Visit` keyed on the
-  roots' params; unlisted *drilled* types get no view (still descended structurally, invisible to the
-  closure); a mixed leaf+child tuple field borrows only its leaf sub-parts.
-- **Tests:** closure counting leaves; mut closure editing a leaf; tuple `(f_expr, f_stmt)`.
-- **Cost / limit:** a `View`/`ViewMut` + `as_view*` per type; the closure **cannot read or descend
-  recursive children** (leaves only) — the inherent ceiling of this option; leaf borrows add `'v`.
-
-### Option 2 — Natural-type conversion (sound; closure can fully descend; deep-copies) — most faithful
-
-- **Emit per cycle type `Xxx`:** the natural recursive `pub enum XxxNat<S> {…}` — a recursive child to
-  cycle type `Y` → `Box<YNat<S>>` (containers preserved, `Vec<Box<YNat<S>>>`), a leaf `L` → `L`. Plus a
-  **free fn** `pub fn to_xxx_nat<R>(&__XxxRec<S, R>) -> XxxNat<S>` (a fn, so it *may* be `R`-generic
-  where a closure can't): `match` each variant, recurse `to_*_nat` on children (descending the depth),
-  `.clone()` leaves. Requires every leaf `: Clone`.
-- **Run an ordinary closure visitor over `XxxNat`:** `XxxNat` is a normal (mutually-)recursive enum —
-  one type at every depth — so the **acyclic `gen_side` machinery applies directly** (emit its
-  `Visit`/`Driver`/closure plumbing for the `*Nat` set, classifying `Box<YNat>` as the followed child).
-  `|n: &XxxNat<S>|` can `match` *and* descend. Inherent `.visit(f)` → `visit_xxx_nat(&to_xxx_nat(self),
-  &mut f)`.
-- **Mut side:** convert → mutate the `Nat` → write back with `from_xxx_nat<R>(&XxxNat<S>) -> __XxxRec<S,
-  R>`, which must rebuild the depth chain and so only succeeds up to `limit` (a `Nat` deeper than
-  `limit` can't be rebuilt). So `visit_mut` here is awkward — make this option **shared-side only**.
-- **Edge cases:** every leaf `: Clone`; `XxxNat` is another public type per cycle; heterogeneous params
-  carried through.
-- **Tests:** a closure that matches a variant AND descends into its child (what Option 1 can't do).
-- **Cost:** a deep copy + `Clone` bound per `.visit()`; the closure sees a real, fully-traversable value.
-
-### Option 3 — Cast `&__XxxRec<S, R>` → `&Xxx<S>` (UNSOUND — rejected; no plan)
-
-All `__XxxRec<S, R>` share a layout (`Box<R>` is a thin pointer), so `unsafe { &*(i as *const _ as
-*const Xxx<S>) }` type-checks — but a closure handed `&Xxx<S>` that descends a child reads a *shallower*
-node's `Box<R'>` as `Box<__XxxDefault>` and dereferences past its terminator → UB (and violates
-provenance/aliasing). No way to restrict to non-descending closures. **Not implementable.**
-
-### Option 4 — `dyn`-erased dispatch (sound; dynamic; awkward API)
-
-- **Emit per cycle type:** `pub enum XxxKind {…}` (variant tag) and an object-safe accessor trait. The
-  heterogeneity wrinkle: a cross-edge child is a *different* node type, so a per-type `XxxDyn` can't type
-  `child()` — emit one **cycle-wide** `pub trait CycleNode<S> { fn kind(&self) -> NodeKind; fn child(&self,
-  i: usize) -> Option<&dyn CycleNode<S>>; /* leaf accessors */ }`, impl'd for every `__YRec<S, R>` in the
-  cycle (`R`-generic): `child(i)` erases the i-th recursive child to `&dyn CycleNode`.
-- **Adapter + inherent:** `struct CloDyn<F>(F); impl<S, F: FnMut(&dyn CycleNode<S>)> Visit<S> for
-  CloDyn<F> { fn visit_x<R>(&mut self, i) { (self.0)(i as &dyn CycleNode<S>); visit_x(self, i); } }`. The
-  closure **can** descend via `child()`. Mut side: a parallel `CycleNodeMut<S>` with `child_mut`.
-- **Cost / limit:** object-safety bans generic/`Self`-returning methods → leaf access is an
-  accessor API (per-leaf-type method or index + enum return), **no pattern-matching**; the cycle-wide
-  supertrait must erase or fix heterogeneous params. Dynamic dispatch (a vtable per node type). Sound and
-  copy-free with descent, but the least ergonomic.
-
-### Option 5 — Per-depth monomorphization (impossible; no plan)
-
-Can't emit `limit+1` `Visit` impls for one `ClosureDriver<F>` (each redefines the same `visit_x<R>`),
-and one `FnMut` value can't be `FnMut(&__XxxRec<S, level_k>)` for every distinct level type `k`. No
-closure covers all depths — the type-HRTB wall restated. **Not implementable.**
-
-### Recommendation
-
-If ever lifted: **#2 (natural-type)** for a faithful, fully-traversable closure API (cost: deep copy +
-`Clone`, shared-side only); **#1 (erased view)** when the closure needs only leaves and a copy is
-unacceptable (and `&mut` is wanted). #4 only if dynamic dispatch + an accessor API are acceptable.
-#3 unsound, #5 impossible.
+**Closed.** `#[recurse]` now emits **natural recursive public types** (`make_natural_item`), so a
+former-recurse cycle is depth-*uniform* — one type at all depths. A `visitor!(…)` over it is therefore
+an ordinary acyclic visitor with **no** depth-generic `visit_*<R>` and no type-level HRTB wall, so
+closures, tuples-of-closures, inherent `.visit(closure)`, `visit_mut`, and inheritance all work via the
+existing `Hook`/`Driver`/`Chain`. The depth-limited types survive only as an internal `pub(crate)`
+engine for `Parse` (see "`#[recurse]` expansion" below). Tests: `visitor_recurse_cycle.rs`
+(`closure_over_recurse_cycle`), `visitor_recurse_via_visitor.rs`.
 
 ---
 
@@ -206,38 +158,38 @@ metadata ping-pong only supplies each type's structure. Code: `macro/ast.rs` + `
 
 ---
 
-# `#[recurse]` expansion & how `visitor!()` consumes it
+# `#[recurse]` expansion (natural types + internal Parse engine)
 
-`#[recurse(limit = N)]` renames each cycle type `Xxx` → `__XxxRec<…, __Rec = …>` (a back-edge to a
-root becomes the depth param `__Rec`; one per root), emits a terminator `XxxTerm` + depth chain
-`__XxxDefault` + the public `pub type Xxx<…> = __XxxRec<…, defaults…>` (each depth level a *distinct*
-type), and a `@recurse` metadata macro. Because each level is a different type, a fixed-type
-`visit_xxx(&Xxx)` can't recurse into its child — the visitor must be **depth-generic**.
+`#[recurse(limit = N)]` emits, per SCC:
 
-`visitor!(<cycle types>)` consumes `@recurse` to emit, per listed cycle type, a depth-generic
-`visit_*<R: VisitRec<…>>(&__XxxRec<…, R>)`, a `VisitRec<…, V>` dispatch trait (each root's depth chain
-drives its `visit_*`, terminators are no-ops), and a `XxxNode` alias. A back-edge dispatches via `R`, a
-cross-edge to a listed type via `this.visit_<head>`, an unlisted one is drilled inline. An outer
-(acyclic) field `Vec<Expr<S>>` lowers to `this.visit_expr(e)` and infers `R = __ExprDefault`, so one
-`Visit` trait + one `.visit()` crosses the outer→inner boundary automatically. Multi-root: one depth
-param per root. Trait/struct-only (a closure can't be depth-generic).
+1. **Natural public types** — the user's cycle types *un-renamed* (`Expr<S>`, one type at all depths),
+   with the `#[derive(…)]` list rewritten: `Parse` **removed**, everything else (`Ast`, `Debug`,
+   `Default`, `Unparse`, `Spanned`, …) kept, and `#[ignore_bounds]` injected on every recursive-child
+   field so the kept `Unparse`/`Spanned` derives emit **leaf-only** bounds (no E0275 where-cycle).
+   `make_natural_item`.
+2. **Engine types** (`pub(crate)`) — today's depth-limited `__XxxRec<…, __Rec = __XxxDefault<…>>` family
+   (a back-edge to a root becomes the depth param `__Rec`, one per root) + terminators `XxxTerm` +
+   `__XxxDefault` depth chains, deriving **only** `Parse`. Each depth level is a *distinct* finite type,
+   which bottoms out **both** Parse E0275 cycles (the per-field `field_ty: Parse` where-cycle **and** the
+   `stream.dup(…)` `Dup<…>` stream-monomorphization cycle). `make_engine_item`.
+3. **Conversion + delegated Parse** — a private depth-generic `__ToNat_X` trait/impl per cycle type
+   (engine→natural; a back-edge collapses to `__Rec`, a cross-edge bounds the sibling node, containers
+   map element-wise; terminator arm is `unreachable!`) + a hand-emitted **`impl Parse for Expr<S>`** that
+   parses the engine then `.__to_nat()`s. `gen_natural_extras`, `conv_body`/`conv_expr`. (Deep-copies
+   once per top-level parse; preserves the engine's lenient depth-truncation semantics.)
 
-## Metadata contract (`#[recurse]` → `visitor!()`)
+The public `pub type Xxx = …` alias is **gone** (the natural enum owns the name); user inherent `impl`s
+land on the natural type verbatim. A **pure by-value cycle** (no heap indirection on any edge) is
+rejected (`abort!`, would be E0072) — the natural type would be infinite-size; checked via the
+direct-edge subgraph being acyclic (`subgraph_is_cyclic` on `direct_type_refs`).
 
-For each cycle type, `#[recurse]` emits (additionally, under the type's *original* name) a muncher
-metadata macro that answers the visitor's fetch `X! { @ast $cb { $pre } }` by appending the type's
-`@ast { <ORIGINAL def> } @subast { … }` **plus** a `@recurse { … }` section the consumer keys on:
+## How `visitor!()` consumes it — ordinary acyclic metadata
 
-```text
-@recurse {
-    @node  { $crate::ast::__ExprRec }     // depth-generic node type (path, $crate-rooted)
-    @roots { Expr }                        // root idents (1 single-root; N multi-root)
-    @depth { __Rec }                       // depth-param idents, PARALLEL to @roots
-    @terms { $crate::ast::ExprTerm }       // terminator paths, PARALLEL to @roots
-    @cycle { Expr }                        // all cycle-type idents in this SCC
-}
-```
-
-An acyclic type emits **no** `@recurse` section (normal `#[derive(Ast)]` metadata). `visitor!()`'s
-`build` branches on `@recurse`: a recurse type gets the depth-generic `visit_*<R…>` + the shared
-`VisitRec` trait/impls above; an acyclic type is handled as today.
+There is **no `@recurse` metadata** anymore. The natural type's plain `#[derive(Ast)]` macro carries the
+visitor metadata (`@ast` + `@subast`, re-exported under the type name) exactly like any acyclic type. A
+`visitor!(<cycle types>)` builds a **non-depth-generic** acyclic visitor (`generate_module`/`gen_side`):
+`visit_xxx(&mut self, &Expr<S>)`, dispatch to listed cross-edges via `this.visit_<head>`, drill an
+unlisted cross-edge inline, descend containers/tuples — closures and `visit_mut` included. The engine,
+conversions, and terminators are **fully internal** (`pub(crate)`, in no metadata) — used only to
+implement `Parse`, which the defining crate emits (so a downstream cross-crate visitor over the natural
+type has no orphan issue and parses via the upstream `Expr<S>: Parse`).

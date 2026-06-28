@@ -1,6 +1,6 @@
 //! A complex tree spanning both visitor worlds: acyclic AST types **outside** a `#[recurse]` module
 //! (walked by the normal `visitor!()` with drill-in) whose tree contains a node from a cyclic AST
-//! **inside** a `#[recurse]` module (walked by the depth-generic recurse visitor built by a sibling
+//! **inside** a `#[recurse]` module (walked by the natural acyclic recurse visitor built by a sibling
 //! `visitor!()`). One `Walker` implements both visitor traits and crosses the boundary, so a single
 //! `.visit(&mut w)` walks the whole tree: outside `Func -> Param -> Type` (drilled) plus the inside
 //! `Expr/Stmt` cycle hanging off `Func::body`.
@@ -10,21 +10,21 @@ use core::marker::PhantomData;
 use syan::parse::recurse;
 use syan::visit::Ast;
 
-// ── inside: a recurse'd cycle, visited depth-generically ─────────────────────────────────────────
+// ── inside: a recurse'd cycle, visited as natural acyclic types ───────────────────────────────────
 #[recurse]
 mod rec {
     use core::marker::PhantomData;
     use syan::visit::Ast;
 
     #[derive(Ast)]
-    #[subast()]
+    #[subast(crate::rec::Stmt)]
     pub enum Expr<S> {
         Stmt(Box<Stmt<S>>),
         Lit(PhantomData<S>),
     }
 
     #[derive(Ast)]
-    #[subast()]
+    #[subast(crate::rec::Expr)]
     pub enum Stmt<S> {
         Expr(Box<Expr<S>>),
         Nop(PhantomData<S>),
@@ -82,13 +82,13 @@ impl<S> nv::Visit<S> for Walker {
     }
 }
 
-// Inside side: depth-generic visitor over the recurse cycle.
+// Inside side: natural acyclic visitor over the recurse cycle.
 impl<S> v_rec::Visit<S> for Walker {
-    fn visit_expr<R: v_rec::VisitRec<S, Self>>(&mut self, i: &v_rec::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &rec::Expr<S>) {
         self.exprs += 1;
         v_rec::visit_expr(self, i);
     }
-    fn visit_stmt<R: v_rec::VisitRec<S, Self>>(&mut self, i: &v_rec::StmtNode<S, R>) {
+    fn visit_stmt(&mut self, i: &rec::Stmt<S>) {
         self.stmts += 1;
         v_rec::visit_stmt(self, i);
     }
@@ -102,7 +102,7 @@ fn sample() -> Func<()> {
         ],
         ret: Type::Int(PhantomData),
         // Expr -> Stmt -> Expr: exercises a cross-edge and the recurse back-edge.
-        body: rec::Expr::Stmt(Box::new(rec::Stmt::Expr(Box::new(v_rec::ExprNode::Lit(PhantomData))))),
+        body: rec::Expr::Stmt(Box::new(rec::Stmt::Expr(Box::new(rec::Expr::Lit(PhantomData))))),
     }
 }
 

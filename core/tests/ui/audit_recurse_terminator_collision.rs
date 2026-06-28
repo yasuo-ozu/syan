@@ -1,24 +1,23 @@
-// AUDIT (hygiene): the generated terminator struct `ExprTerm` (format!("{root}Term"),
-// Span::call_site()) is emitted by `#[recurse]` into the user's module. A user item named `ExprTerm`
-// in the same module collides -> E0428, with the #[recurse] attribute flagged as the prior
-// definition. (The `__XxxDefault` alias and `__XxxRec` node types collide the same way but are
-// underscore-prefixed and less likely.) `XxxTerm` (no leading underscore, derived from the root name)
-// is the most plausible accidental clash. Fix: unguessable/hygienic generated names, or abort! on a clash.
-use syan::parse::recurse;
+// AUDIT (hygiene, now ENGINE-SCOPED): the generated terminator struct `ExprTerm`
+// (format!("{root}Term"), Span::call_site()) is emitted by `#[recurse]` into the user's module when the
+// cycle needs the depth-limited engine (i.e. derives `Parse`). A user item named `ExprTerm` in the same
+// module then collides -> E0428. (An Ast-only cycle needs no engine, so no `ExprTerm` is emitted and a
+// user `ExprTerm` is fine — see `recurse_no_engine.rs`.) `XxxTerm` (no leading underscore, derived from
+// the root name) is the plausible accidental clash. Fix: unguessable generated names, or abort! on clash.
+use syan::parse::{recurse, Parse, Unparse};
 
 #[recurse]
 mod m {
     use core::marker::PhantomData;
-    use syan::visit::Ast;
+    use syan::parse::{Parse, Unparse};
 
-    #[derive(Ast)]
-    #[subast()]
+    #[derive(Parse, Unparse)]
     pub enum Expr<S> {
         Nest(Box<Expr<S>>),
         Lit(PhantomData<S>),
     }
 
-    pub struct ExprTerm; // collides with the generated terminator `pub struct ExprTerm;`
+    pub struct ExprTerm; // collides with the generated terminator `pub struct ExprTerm<S>(…);`
 }
 
 fn main() {}

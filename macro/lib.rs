@@ -18,6 +18,21 @@ fn random() -> u64 {
         .finish()
 }
 
+/// Derive `Parse` — build the type from a token stream, field by field.
+///
+/// # Field attributes
+///
+/// - **`#[ignore_bounds]`** — suppress the `FieldTy: Parse<_>` where-predicate this derive would
+///   otherwise synthesize for the field. The field is still parsed (the obligation is just not added to
+///   the impl's `where`-clause), so its type must implement `Parse` at the call site by other means.
+///   The intended use is a **naturally-recursive child** (e.g. `Box<Expr<S>>` in a mutually-recursive
+///   AST), where the per-field bound would otherwise form an infinite `where`-clause cycle
+///   (`Expr: Parse ⇐ … ⇐ Expr: Parse`, E0275); with the bound dropped the recursion is discharged
+///   coinductively via the sibling type's own impl. `#[recurse]` injects this automatically on a
+///   single self-recursive cycle's recursive-child fields. (Caveat for `Parse` specifically: a
+///   *generic* field type with no other impl in scope, e.g. a bare `T`, will then fail to parse — the
+///   bound was the only thing satisfying it.)
+/// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
 #[proc_macro_error]
 #[proc_macro_derive(Parse, attributes(group, syan, joint, alone, ignore_bounds,))]
 pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
@@ -35,6 +50,20 @@ pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
     .into()
 }
 
+/// Derive `Unparse` — emit the type back to a token sink, field by field.
+///
+/// # Field attributes
+///
+/// - **`#[ignore_bounds]`** — suppress the `FieldTy: Unparse<_>` where-predicate this derive would
+///   otherwise synthesize for the field. The field is still unparsed (`.unparse(sink)` is still called),
+///   so its type must implement `Unparse`; the bound is merely omitted from the impl's `where`-clause.
+///   The intended use is a **naturally-recursive child**, where the per-field bound would form an
+///   infinite `where`-clause cycle (E0275); with it dropped, the recursive `.unparse()` resolves
+///   coinductively against the sibling type's own (leaf-only-bounded) impl. This makes a natural
+///   recursive `Unparse` compile — `#[recurse]` injects it on a single self-recursive cycle's
+///   recursive-child fields. (Unlike `Parse`, `Unparse` has no backtracking, so this works at arbitrary
+///   depth.)
+/// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
 #[proc_macro_error]
 #[proc_macro_derive(Unparse, attributes(group, syan, joint, alone, ignore_bounds,))]
 pub fn unparse(input: TokenStream1) -> TokenStream1 {
@@ -60,8 +89,20 @@ pub fn ast_derive(input: TokenStream1) -> TokenStream1 {
     ast::derive_ast(&input, random(), &syan).into()
 }
 
+/// Derive `Spanned` — compute the type's span by folding (`Span::migrate`) its fields' spans.
+///
+/// # Field attributes
+///
+/// - **`#[ignore_bounds]`** — suppress the `FieldTy: Spanned<Span = _>` where-predicate this derive
+///   would otherwise synthesize, AND exclude the field from the span fold. (Unlike `Parse`/`Unparse`,
+///   the field is *not* visited — the dropped predicate is what pins the field's associated `Span` type,
+///   so the field cannot be folded without it.) The intended use is a **naturally-recursive child**,
+///   whose per-field bound would otherwise form an infinite `where`-clause cycle (E0275); dropping it
+///   lets a natural recursive `Spanned` compile (the resulting span reflects the non-ignored leaves).
+///   `#[recurse]` injects it on a single self-recursive cycle's recursive-child fields.
+/// - `#[default]` — also excludes a field from the span fold.
 #[proc_macro_error]
-#[proc_macro_derive(Spanned)]
+#[proc_macro_derive(Spanned, attributes(group, syan, joint, alone, ignore_bounds,))]
 pub fn spanned(input: TokenStream1) -> TokenStream1 {
     let input: DeriveInput = parse_macro_input!(input);
     let syan = input.attrs.get_syan();
@@ -76,47 +117,53 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
     symbol::symbol(args).into()
 }
 
-/// Turn a module of mutually-recursive AST types (a *cycle*) into depth-limited concrete types plus
-/// `@recurse` metadata; `limit = N` sets the depth. A depth-generic visitor over the cycle is then
-/// built by `syan::visit::visitor!(<cycle types>)` (see the "Visiting" section).
+/// Turn a module of mutually-recursive AST types (a *cycle*) into **natural recursive public types**
+/// plus an internal depth-limited **engine** used only to satisfy `Parse`; `limit = N` sets the engine
+/// depth. The user's cycle types stay genuine recursive enums/structs (one type at all depths — the
+/// public API); `Parse` is *delegated* (parse the engine, convert back to the natural type), while
+/// `#[derive(Ast)]`/`Debug`/… land on the natural type directly. A `syan::visit::visitor!(<cycle
+/// types>)` over them is an **ordinary acyclic visitor** (closures included).
 ///
-/// # The recursion root
+/// # The recursion root (engine-internal)
 ///
-/// The **root** is the single cycle type that controls recursion depth (its back-edges become the
-/// depth parameter `__Rec`). It is chosen automatically: a directly **self-referential** cycle type
-/// if one exists (the alphabetically-first when several), otherwise the cycle type most referenced by
-/// the others (as a bare field; ties broken by total references, then alphabetically). Any directly
-/// self-referential type is *also* treated as a root and collapses to `__Rec`.
+/// The **root** is the cycle type whose back-edges drive the engine's depth parameter `__Rec`. It is
+/// chosen automatically: a directly **self-referential** cycle type if one exists (alphabetically-first
+/// when several), else the cycle type most referenced by the others. This is purely an internal-engine
+/// concept; the public types are uniform recursive types with no depth parameter.
 ///
 /// # Generic arguments on a reference to the recursion root
 ///
-/// A reference to a **root** type is the cycle's back-edge and collapses to the single depth
-/// parameter `__Rec`, so it must repeat the root's own parameters **verbatim (identity)**. A complex
-/// or substituted argument there is *non-regular* recursion (the param would grow at every level),
-/// which the single-`__Rec` depth machinery cannot express, so it is **rejected**:
+/// In the *engine*, a back-edge to a root collapses to the depth parameter `__Rec`, so it must repeat
+/// the root's own parameters **verbatim (identity)** — a substituted argument is non-regular recursion
+/// the depth machinery can't express, and is **rejected** (an engine constraint, kept):
 ///
 /// ```text
 /// // root `Expr<S>`:
 /// Box<Expr<S>>          // OK   — identity back-edge
 /// Box<Expr<Vec<S>>>     // ERROR — wrapped param
 /// Box<Expr<u8>>         // ERROR — concrete substitution
-/// Stmt<Expr<Vec<S>>>    // ERROR — even nested inside a cross-edge
 /// ```
 ///
-/// Complex arguments are only unsupported on a root back-edge. They are fine on a **cross-edge** to a
-/// non-root cycle type (`Box<Stmt<S, u8>>` — `u8` fills `Stmt`'s own param) and on **non-cycle** types
-/// (`Vec<S>`, `Option<S>`). Workaround for the rejected case: move the differing part into its own
-/// `#[derive(Ast)]` type.
+/// Complex args are fine on a **cross-edge** to a non-root cycle type (`Box<Stmt<S, u8>>`) and on
+/// **non-cycle** types (`Vec<S>`). Workaround for the rejected case: move the differing part into its
+/// own `#[derive(Ast)]` type.
 ///
-/// # Visiting & limitations
+/// # Finite-size precondition
 ///
-/// `#[recurse]` itself emits only the depth-limited *types* and `@recurse` metadata. A depth-generic
-/// visitor over the cycle is built by `syan::visit::visitor!(<cycle types>)` (which can also span
-/// acyclic/outer types in one `Visit` trait — the outer→inner boundary is crossed automatically).
-/// Such a recurse visitor is **trait/struct-based only** — its `visit_*<R>` methods are generic over
-/// the remaining depth, which a closure cannot be — and **cannot be inherited**: `visitor!(base =>
-/// New)` where `base`/`New` cover `#[recurse]` cycle types is not supported (the inheritance
-/// supertrait machinery does not interop with the depth-generic methods).
+/// A natural recursive type must be finite-size, so a **pure by-value cycle** (no `Box`/`Vec`/… on any
+/// cycle edge) is rejected with a clean error (it would be E0072) — put a `Box<…>` on a cycle edge.
+///
+/// # Visiting & the one limitation
+///
+/// `visitor!(<cycle types>)` builds an ordinary acyclic visitor over the natural types — closures,
+/// tuples-of-closures, `visit_mut`, and inheritance (`visitor!(base => New)`) all work, and it may span
+/// acyclic/outer types in one `Visit` trait. `#[subast]` on each cycle type lists its cross-edge
+/// children. `Parse` is always delegated through the engine. `Unparse`/`Spanned` are on the natural type
+/// for a **group-free** cycle — directly for a single self-recursive one (via injected
+/// `#[ignore_bounds]`, arbitrary depth), or by **engine delegation** (a generated natural→engine
+/// `from_nat` bridge, depth-limited) for a multi-type one. A **group-ful** cycle keeps `Unparse`/
+/// `Spanned` on the internal `pub(crate)` engine only — there the natural type is `Parse` but not
+/// directly `Unparse`/`Spanned` (see CLAUDE.md).
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {

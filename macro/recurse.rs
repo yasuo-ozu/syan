@@ -1,13 +1,12 @@
-use crate::ast::{cleaned_item, crate_rooted_tokens, parse_subast, subast_tokens};
-use crate::util::{param_tokens, to_snake};
+use crate::util::{first_ty_arg, param_tokens};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::{abort, set_dummy};
 use std::collections::{HashMap, HashSet};
 use syn::{
-    punctuated::Punctuated, AngleBracketedGenericArguments, Fields, FieldsNamed, FieldsUnnamed,
-    FnArg, GenericArgument, GenericParam, Generics, ImplItem, Item, ItemMod, Path, PathArguments,
-    ReturnType, Token, Type, TypePath, Visibility,
+    punctuated::Punctuated, AngleBracketedGenericArguments, Field, Fields, FieldsNamed,
+    FieldsUnnamed, FnArg, GenericArgument, GenericParam, Generics, ImplItem, Item, ItemMod, Path,
+    PathArguments, ReturnType, Token, Type, TypePath, Visibility,
 };
 use template_quote::quote;
 
@@ -328,6 +327,33 @@ fn generic_tokens(generics: &Generics) -> (Vec<TokenStream>, Vec<TokenStream>) {
     (decl, us)
 }
 
+/// A generic param list for an `impl`/trait header that **preserves bounds** (`S: Span`, `const N:
+/// usize`, …) — unlike `generic_tokens`, which strips them. Used by the engine→natural conversion +
+/// delegation impls so they can name a cycle type carrying a bounded param (e.g. `Spanned`'s
+/// `Expr<S: Span>`). A cycle type's own params never carry a default, so none is emitted here.
+fn param_decls(generics: &Generics) -> Vec<TokenStream> {
+    generics
+        .params
+        .iter()
+        .map(|p| {
+            // Drop any default (`= …`) — valid only in a type def, not an impl/trait header.
+            let mut p = p.clone();
+            match &mut p {
+                GenericParam::Type(t) => {
+                    t.eq_token = None;
+                    t.default = None;
+                }
+                GenericParam::Const(c) => {
+                    c.eq_token = None;
+                    c.default = None;
+                }
+                _ => {}
+            }
+            quote!(#p)
+        })
+        .collect()
+}
+
 fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
     match item {
         Item::Enum(mut e)
@@ -479,121 +505,511 @@ fn subgraph_is_cyclic(
     is_cyclic_directed(&g)
 }
 
-/// A `$crate::<mod>::<ident>` path, `$crate`-rooted via `crate_rooted_tokens` so it resolves to the
-/// defining crate even when the metadata macro is expanded downstream (mirrors `#[derive(Ast)]`'s
-/// `crate::`-rooted `#[subast]` paths). Used to spell `@node`/`@terms` in the recurse metadata.
-fn mod_local_path(mod_ident: &Ident, item: &Ident) -> TokenStream {
-    let path: Path = syn::parse_quote!(crate::#mod_ident::#item);
-    crate_rooted_tokens(&path)
+// ───────────────────────────── engine → natural conversion codegen ──────────────────────────────
+//
+// The public cycle types are emitted as *natural* recursive types; `Parse` is delegated to the
+// depth-limited engine (`__XRec`) and the parsed engine value is converted back to the natural type by
+// a generated `__ToNat_X` trait. See `docs/recurse-natural-types-plan.md` §4. A field is a *recursive
+// child* iff its container-peeled head ∈ the SCC (`child_heads`); the conversion descends children via
+// `.__to_nat()` (resolved by receiver type) and moves leaves as-is.
+
+/// Build the conversion *expression* for one engine field value `val` of (original) type `ty`: `None`
+/// for a leaf (caller uses `val` unchanged), else the converted natural value. `child_heads` is the set
+/// of SCC type names; a peeled head in it is a recursive child (`val.__to_nat()`). Containers
+/// (`Box`/`Vec`/`VecDeque`/`Punctuated`/`Option`) and tuples are lowered recursively; anything else is a
+/// leaf.
+fn conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) -> Option<TokenStream> {
+    match ty {
+        Type::Path(TypePath { qself: None, path }) => {
+            let seg = path.segments.last()?;
+            let name = seg.ident.to_string();
+            // A recursive-child reference is always a same-module *bare* ident (`Stmt`, `Stmt<S>`); a
+            // foreign multi-segment path (`other::Stmt`) whose last segment merely collides with a cycle
+            // name is a leaf. (Mirrors `transform_type`/`collect_refs` keying on the first segment.)
+            if path.segments.len() == 1 && child_heads.contains(&name) {
+                return Some(quote!( #val.__to_nat() ));
+            }
+            match name.as_str() {
+                "Box" => conv_expr(first_ty_arg(seg)?, quote!((*#val)), child_heads)
+                    .map(|c| quote!( ::std::boxed::Box::new(#c) )),
+                "Vec" | "VecDeque" | "Punctuated" => {
+                    conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads)
+                        .map(|c| quote!( #val.into_iter().map(|__e| #c).collect() ))
+                }
+                "Option" => conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads)
+                    .map(|c| quote!( #val.map(|__e| #c) )),
+                _ => None,
+            }
+        }
+        Type::Tuple(t) => {
+            let binds: Vec<Ident> = (0..t.elems.len())
+                .map(|i| Ident::new(&format!("__t{i}"), Span::call_site()))
+                .collect();
+            let convs: Vec<TokenStream> = t
+                .elems
+                .iter()
+                .zip(&binds)
+                .map(|(e, b)| conv_expr(e, quote!(#b), child_heads).unwrap_or_else(|| quote!(#b)))
+                .collect();
+            let any = t
+                .elems
+                .iter()
+                .zip(&binds)
+                .any(|(e, b)| conv_expr(e, quote!(#b), child_heads).is_some());
+            any.then(|| quote!( { let (#(#binds,)*) = #val; (#(#convs,)*) } ))
+        }
+        _ => None,
+    }
 }
 
-/// Emit, for **each cycle type** of an SCC, a `#[macro_export]` muncher metadata macro re-exported
-/// under the type's *original* name (so it is reachable as `path::to::X! { .. }`, coexisting with the
-/// `pub type X = …` alias — the macro and type namespaces don't clash, exactly as `#[derive(Ast)]`
-/// places a macro and a type under one ident). The macro answers the visitor's fetch
-/// `X! { @ast $cb { $pre } }` by appending this type's ORIGINAL (pre-transform) cleaned definition,
-/// its `#[subast]` allowlist, and a `@recurse { … }` section keyed on by `visitor!()`:
-///
-/// ```text
-/// @recurse {
-///     @node  { $crate::ast::__XRec }   // depth-generic node type for X (per type)
-///     @roots { A B }                   // root idents of the SCC      (SCC-level)
-///     @depth { __RecA __RecB }         // depth-param idents, parallel to @roots
-///     @terms { $crate::ast::ATerm $crate::ast::BTerm }  // terminator paths, parallel to @roots
-///     @cycle { A B C }                 // all cycle-type idents in the SCC
-/// }
-/// ```
-///
-/// The muncher shape (the `@ast`/`@subast` prefix) mirrors `#[derive(Ast)]`'s metadata macro so the
-/// consumer parses a `#[recurse]`-supplied def identically; `@recurse` is the only addition. Purely
-/// additive: the renamed `__XRec` keeps its own `#[derive(Ast)]` metadata macro; this is a *new* macro
-/// under the original name. `roots_sorted` fixes the parallel order of `@roots`/`@depth`/`@terms`;
-/// `rec_for_root` maps a root to its depth param (`__Rec` single-root, `__Rec<Root>` multi-root); each
-/// root's terminator is `<Root>Term`.
-fn recurse_metadata_macros(
+/// The `match self { … }` body that converts an engine value into the natural type `nat_id`, reusing
+/// the *original* item's variant/field names (engine and natural share them). `eng_id` is the engine
+/// ident (`__XRec`). Field-level conversion is `conv_expr`; a leaf field is moved unchanged.
+fn conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<String>) -> TokenStream {
+    let arm_fields = |fields: &Fields| -> (TokenStream, TokenStream) {
+        match fields {
+            Fields::Named(FieldsNamed { named, .. }) => {
+                let names: Vec<&Ident> = named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+                let vals: Vec<TokenStream> = named
+                    .iter()
+                    .map(|f| {
+                        let n = f.ident.as_ref().unwrap();
+                        let v = conv_expr(&f.ty, quote!(#n), child_heads).unwrap_or_else(|| quote!(#n));
+                        quote!( #n: #v )
+                    })
+                    .collect();
+                (quote!( { #(#names),* } ), quote!( { #(#vals),* } ))
+            }
+            Fields::Unnamed(FieldsUnnamed { unnamed, .. }) => {
+                let binds: Vec<Ident> = (0..unnamed.len())
+                    .map(|i| Ident::new(&format!("__f{i}"), Span::call_site()))
+                    .collect();
+                let vals: Vec<TokenStream> = unnamed
+                    .iter()
+                    .zip(&binds)
+                    .map(|(f, b)| conv_expr(&f.ty, quote!(#b), child_heads).unwrap_or_else(|| quote!(#b)))
+                    .collect();
+                (quote!( ( #(#binds),* ) ), quote!( ( #(#vals),* ) ))
+            }
+            Fields::Unit => (quote!(), quote!()),
+        }
+    };
+    match item {
+        Item::Enum(e) => {
+            let arms: Vec<TokenStream> = e
+                .variants
+                .iter()
+                .map(|v| {
+                    let vn = &v.ident;
+                    let (pat, ctor) = arm_fields(&v.fields);
+                    quote!( #eng_id::#vn #pat => #nat_id::#vn #ctor, )
+                })
+                .collect();
+            quote!( match self { #(#arms)* } )
+        }
+        Item::Struct(s) => {
+            let (pat, ctor) = arm_fields(&s.fields);
+            match &s.fields {
+                Fields::Unit => quote!( #nat_id ),
+                _ => quote!( { let #eng_id #pat = self; #nat_id #ctor } ),
+            }
+        }
+        _ => quote!(),
+    }
+}
+
+/// The reverse of `conv_expr`: build an *engine* field value from a borrowed *natural* field value
+/// `val` (a `&NatTy` expression). `None` for a leaf (caller `Clone`s it). A recursive child dispatches
+/// on its head's natural type via that type's `__FromNat_<Head>::__from_nat` (Self — the engine field
+/// type — is inferred from the surrounding engine constructor). Containers/tuples are lowered by ref.
+fn from_conv_expr(ty: &Type, val: TokenStream, child_heads: &HashSet<String>) -> Option<TokenStream> {
+    match ty {
+        Type::Path(TypePath { qself: None, path }) => {
+            let seg = path.segments.last()?;
+            let name = seg.ident.to_string();
+            if path.segments.len() == 1 && child_heads.contains(&name) {
+                let tn = Ident::new(&format!("__FromNat_{name}"), Span::call_site());
+                return Some(quote!( #tn::__from_nat(#val) ));
+            }
+            match name.as_str() {
+                "Box" => from_conv_expr(first_ty_arg(seg)?, quote!((&**#val)), child_heads)
+                    .map(|c| quote!( ::std::boxed::Box::new(#c) )),
+                "Vec" | "VecDeque" | "Punctuated" => {
+                    from_conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads)
+                        .map(|c| quote!( #val.iter().map(|__e| #c).collect() ))
+                }
+                "Option" => from_conv_expr(first_ty_arg(seg)?, quote!(__e), child_heads)
+                    .map(|c| quote!( #val.as_ref().map(|__e| #c) )),
+                _ => None,
+            }
+        }
+        Type::Tuple(t) => {
+            let binds: Vec<Ident> = (0..t.elems.len())
+                .map(|i| Ident::new(&format!("__t{i}"), Span::call_site()))
+                .collect();
+            let any = t
+                .elems
+                .iter()
+                .zip(&binds)
+                .any(|(e, b)| from_conv_expr(e, quote!(#b), child_heads).is_some());
+            if !any {
+                return None;
+            }
+            let convs: Vec<TokenStream> = t
+                .elems
+                .iter()
+                .zip(&binds)
+                .map(|(e, b)| {
+                    from_conv_expr(e, quote!(#b), child_heads)
+                        .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#b) ))
+                })
+                .collect();
+            Some(quote!( { let (#(#binds,)*) = #val; (#(#convs,)*) } ))
+        }
+        _ => None,
+    }
+}
+
+/// The `match __nat { … }` body that builds an engine value (`eng_id`, e.g. `__XRec`) from a borrowed
+/// natural value (`nat_id`). Recursive children convert via `from_conv_expr`; a leaf field is cloned
+/// (`Clone::clone(&field)` — the binding is a reference, so this clones the value, not the reference).
+fn from_conv_body(item: &Item, nat_id: &Ident, eng_id: &Ident, child_heads: &HashSet<String>) -> TokenStream {
+    let arm_fields = |fields: &Fields| -> (TokenStream, TokenStream) {
+        match fields {
+            Fields::Named(FieldsNamed { named, .. }) => {
+                let names: Vec<&Ident> = named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+                let vals: Vec<TokenStream> = named
+                    .iter()
+                    .map(|f| {
+                        let n = f.ident.as_ref().unwrap();
+                        let v = from_conv_expr(&f.ty, quote!(#n), child_heads)
+                            .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#n) ));
+                        quote!( #n: #v )
+                    })
+                    .collect();
+                (quote!( { #(#names),* } ), quote!( { #(#vals),* } ))
+            }
+            Fields::Unnamed(FieldsUnnamed { unnamed, .. }) => {
+                let binds: Vec<Ident> = (0..unnamed.len())
+                    .map(|i| Ident::new(&format!("__f{i}"), Span::call_site()))
+                    .collect();
+                let vals: Vec<TokenStream> = unnamed
+                    .iter()
+                    .zip(&binds)
+                    .map(|(f, b)| {
+                        from_conv_expr(&f.ty, quote!(#b), child_heads)
+                            .unwrap_or_else(|| quote!( ::core::clone::Clone::clone(#b) ))
+                    })
+                    .collect();
+                (quote!( ( #(#binds),* ) ), quote!( ( #(#vals),* ) ))
+            }
+            Fields::Unit => (quote!(), quote!()),
+        }
+    };
+    match item {
+        Item::Enum(e) => {
+            let arms: Vec<TokenStream> = e
+                .variants
+                .iter()
+                .map(|v| {
+                    let vn = &v.ident;
+                    let (pat, ctor) = arm_fields(&v.fields);
+                    quote!( #nat_id::#vn #pat => #eng_id::#vn #ctor, )
+                })
+                .collect();
+            quote!( match __nat { #(#arms)* } )
+        }
+        Item::Struct(s) => {
+            let (pat, ctor) = arm_fields(&s.fields);
+            match &s.fields {
+                Fields::Unit => quote!( #eng_id ),
+                _ => quote!( { let #nat_id #pat = __nat; #eng_id #ctor } ),
+            }
+        }
+        _ => quote!(),
+    }
+}
+
+/// The (whole) types of a cycle type's *leaf* fields — those `from_conv_expr` doesn't convert. Each must
+/// be `Clone` for the natural→engine `from_nat` (which clones leaves into the engine).
+fn leaf_field_types(item: &Item, child_heads: &HashSet<String>) -> Vec<Type> {
+    let mut out = Vec::new();
+    let mut push = |fields: &Fields| {
+        for f in fields.iter() {
+            if from_conv_expr(&f.ty, quote!(__x), child_heads).is_none() {
+                out.push(f.ty.clone());
+            }
+        }
+    };
+    match item {
+        Item::Enum(e) => e.variants.iter().for_each(|v| push(&v.fields)),
+        Item::Struct(s) => push(&s.fields),
+        _ => {}
+    }
+    out
+}
+
+/// For an SCC whose natural types own the public names, emit the engine→natural bridge: one
+/// `__ToNat_X` trait + impl per cycle type, a terminator `__to_nat` (`unreachable!`) per root, and the
+/// delegated `impl Parse for X` (parse the depth-limited engine, then `.__to_nat()`). When
+/// `Unparse`/`Spanned` are engine-routed (a multi-type or group-ful cycle), also emit the *reverse*
+/// `__FromNat_X` bridge (natural→engine, `Clone`ing leaves, terminator `panic!`s past the depth limit)
+/// and a delegated `impl Unparse`/`impl Spanned` for the natural type that converts then calls the
+/// engine's impl. Replaces the old `@recurse` metadata + public aliases. `default_for_root` maps each
+/// root to its `__<root>Default` depth alias; `rec_for_root` to its depth param; `root_generics` are the
+/// roots' (shared) params.
+#[allow(clippy::too_many_arguments)]
+fn gen_natural_extras(
     scc: &HashSet<String>,
     items: &[Item],
     internal_names: &HashMap<String, Ident>,
     roots_sorted: &[String],
     rec_for_root: &HashMap<String, Ident>,
-    mod_ident: &Ident,
-    nonce: u64,
+    default_for_root: &HashMap<String, Ident>,
+    root_generics: &Generics,
+    parse_types: &HashSet<String>,
+    unparse_types: &HashSet<String>,
+    spanned_types: &HashSet<String>,
 ) -> TokenStream {
-    // SCC-level `@recurse` rows (identical for every cycle type): roots, their depth params, their
-    // terminator paths (all parallel in `roots_sorted` order), and every cycle-type ident.
-    let root_idents: Vec<Ident> = roots_sorted
+    let child_heads: HashSet<String> = scc.clone();
+    // `root_decl`/`xdecl` (below) keep param BOUNDS (for naming a bounded cycle type like `Expr<S: Span>`
+    // in the conversion/delegation impls); `*_use` are the bound-free argument forms.
+    let root_decl = param_decls(root_generics);
+    let root_use = generic_tokens(root_generics).1;
+    let rec_params: Vec<&Ident> = roots_sorted.iter().map(|r| &rec_for_root[r]).collect();
+    let trait_name = |x: &str| Ident::new(&format!("__ToNat_{x}"), Span::call_site());
+    let from_trait_name = |x: &str| Ident::new(&format!("__FromNat_{x}"), Span::call_site());
+    // Whether THIS SCC delegates `Unparse`/`Spanned` natural→engine (a multi-type or group-ful cycle
+    // whose `Unparse`/`Spanned` derive(s) were routed to the engine). When so, emit the `__FromNat`
+    // bridge + the delegated impls. (A single self-recursive group-free cycle keeps them on the natural
+    // type directly, so `unparse_types`/`spanned_types` exclude it and this is empty.)
+    let delegate_unparse: Vec<&String> = scc.iter().filter(|n| unparse_types.contains(*n)).collect();
+    let delegate_spanned: Vec<&String> = scc.iter().filter(|n| spanned_types.contains(*n)).collect();
+    let needs_from_nat = !delegate_unparse.is_empty() || !delegate_spanned.is_empty();
+    // `R: __FromNat_<root>` per root — the natural→engine bridge's analogue of `root_bounds`.
+    let from_root_bounds: Vec<TokenStream> = roots_sorted
         .iter()
-        .map(|r| Ident::new(r, Span::call_site()))
-        .collect();
-    let depth_idents: Vec<&Ident> = roots_sorted.iter().map(|r| &rec_for_root[r]).collect();
-    let term_paths: Vec<TokenStream> = roots_sorted
-        .iter()
-        .map(|r| mod_local_path(mod_ident, &Ident::new(&format!("{r}Term"), Span::call_site())))
-        .collect();
-    let mut cycle_names: Vec<String> = scc.iter().cloned().collect();
-    cycle_names.sort();
-    let cycle_idents: Vec<Ident> = cycle_names
-        .iter()
-        .map(|n| Ident::new(n, Span::call_site()))
-        .collect();
-
-    // One metadata macro per cycle type, in deterministic (sorted) order.
-    let macros: Vec<TokenStream> = items
-        .iter()
-        .filter_map(|item| {
-            let (orig_ident, attrs): (&Ident, &[syn::Attribute]) = match item {
-                Item::Enum(e)
-                    if matches!(e.vis, Visibility::Public(_))
-                        && scc.contains(&e.ident.to_string()) =>
-                {
-                    (&e.ident, &e.attrs)
-                }
-                Item::Struct(s)
-                    if matches!(s.vis, Visibility::Public(_))
-                        && scc.contains(&s.ident.to_string()) =>
-                {
-                    (&s.ident, &s.attrs)
-                }
-                _ => return None,
-            };
-            // ORIGINAL definition (pre-transform): the field types stay `Box<Stmt<S>>` etc., NOT the
-            // renamed `__Rec` form. Cleaned so it re-parses as a `syn::Item` downstream.
-            let cleaned = cleaned_item(item);
-            let sub_tokens = subast_tokens(&parse_subast(attrs));
-            let node_path = mod_local_path(mod_ident, &internal_names[&orig_ident.to_string()]);
-            let macro_name = Ident::new(
-                &format!("__recurse_meta_{}_{}", to_snake(orig_ident), nonce),
-                Span::call_site(),
-            );
-            Some(quote! {
-                #[macro_export]
-                #[doc(hidden)]
-                macro_rules! #macro_name {
-                    // Callback muncher: append this cycle type's metadata (def + subast + recurse
-                    // section), then re-invoke the continuation `$cb`.
-                    (@ast $cb:path { $($pre:tt)* }) => {
-                        $cb ! {
-                            $($pre)*
-                            @ast { #cleaned }
-                            @subast { #(#sub_tokens),* }
-                            @recurse {
-                                @node { #node_path }
-                                @roots { #(#root_idents)* }
-                                @depth { #(#depth_idents)* }
-                                @terms { #(#term_paths)* }
-                                @cycle { #(#cycle_idents)* }
-                            }
-                        }
-                    };
-                }
-
-                #[doc(hidden)]
-                pub use #macro_name as #orig_ident;
-            })
+        .map(|r| {
+            let dp = &rec_for_root[r];
+            let tn = from_trait_name(r);
+            quote!( #dp: #tn<#(#root_use),*> )
         })
         .collect();
 
-    quote!( #(#macros)* )
+    // Each root depth param must convert to its root's natural type: `__Rec: __ToNat_Root<root gen>`.
+    let root_bounds: Vec<TokenStream> = roots_sorted
+        .iter()
+        .map(|r| {
+            let dp = &rec_for_root[r];
+            let tn = trait_name(r);
+            quote!( #dp: #tn<#(#root_use),*> )
+        })
+        .collect();
+
+    // `Clone` bounds for the natural→engine `from_nat` impls: the UNION of every SCC member's leaf
+    // field types. A member's `from_nat` calls its siblings' `from_nat` (for cross-edge children), so it
+    // must carry every sibling's leaf `Clone` bounds too — exactly as the engine-routed delegation
+    // requires (the members' leaf types generally differ). Computed once and applied to every impl.
+    let from_leaf_clones: Vec<TokenStream> = if needs_from_nat {
+        let mut seen = HashSet::new();
+        items
+            .iter()
+            .filter(|it| match it {
+                Item::Enum(e) => scc.contains(&e.ident.to_string()),
+                Item::Struct(s) => scc.contains(&s.ident.to_string()),
+                _ => false,
+            })
+            .flat_map(|it| leaf_field_types(it, &child_heads))
+            .filter(|t| seen.insert(quote!(#t).to_string()))
+            .map(|t| quote!( #t: ::core::clone::Clone ))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut out = TokenStream::new();
+    for item in items {
+        let (id, generics) = match item {
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) && scc.contains(&e.ident.to_string()) => {
+                (&e.ident, &e.generics)
+            }
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) && scc.contains(&s.ident.to_string()) => {
+                (&s.ident, &s.generics)
+            }
+            _ => continue,
+        };
+        let xs = id.to_string();
+        let tn = trait_name(&xs);
+        let engine = &internal_names[&xs];
+        let xdecl = param_decls(generics);
+        let xuse = generic_tokens(generics).1;
+        let body = conv_body(item, id, engine, &child_heads);
+        // engine instantiation at the public depth defaults: `__XRec<own…, __RootDefault<root>…>`
+        let default_args: Vec<TokenStream> = roots_sorted
+            .iter()
+            .map(|r| {
+                let d = &default_for_root[r];
+                quote!( #d<#(#root_use),*> )
+            })
+            .collect();
+        let engine_default = quote!( #engine<#(#xuse,)* #(#default_args),*> );
+
+        // Conversion trait + engine→natural impl (always emitted; used by the delegated `Parse`).
+        out.extend(quote! {
+            #[doc(hidden)]
+            trait #tn<#(#xdecl),*> {
+                fn __to_nat(self) -> #id<#(#xuse),*>;
+            }
+            impl<#(#xdecl,)* #(#rec_params),*> #tn<#(#xuse),*>
+                for #engine<#(#xuse,)* #(#rec_params),*>
+            #(if !root_bounds.is_empty()) { where #(#root_bounds),* }
+            {
+                fn __to_nat(self) -> #id<#(#xuse),*> { #body }
+            }
+        });
+        // Delegated `Parse` on the natural type — only when the user derived `Parse` (else the engine
+        // has no `Parse` impl to delegate to).
+        if parse_types.contains(&xs) {
+            out.extend(quote! {
+                impl<#(#xdecl,)* __Atom> ::syan::parse::Parse<__Atom> for #id<#(#xuse),*>
+                where
+                    __Atom: ::syan::span::Spanned + ::core::clone::Clone,
+                    #engine_default: ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError>,
+                    #engine_default: #tn<#(#xuse),*>,
+                {
+                    type Error = ::syan::error::ParseError;
+                    fn parse(
+                        __syan_s: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
+                    ) -> ::core::result::Result<Self, Self::Error> {
+                        ::core::result::Result::Ok(
+                            #tn::__to_nat(
+                                <#engine_default as ::syan::parse::Parse<__Atom>>::parse(__syan_s)?,
+                            ),
+                        )
+                    }
+                }
+            });
+        }
+
+        // Natural→engine bridge (`__FromNat_X`) for an engine-delegated `Unparse`/`Spanned` cycle, plus
+        // the delegated impls. The bridge `Clone`s leaves into the engine; recursive children recurse
+        // through it (terminator `panic!`s past the depth limit — see below). `Unparse`/`Spanned` then
+        // convert the (borrowed) natural value to the depth-default engine value and call the engine's
+        // own impl.
+        if needs_from_nat {
+            let ftn = from_trait_name(&xs);
+            let from_body = from_conv_body(item, id, engine, &child_heads);
+            out.extend(quote! {
+                #[doc(hidden)]
+                trait #ftn<#(#xdecl),*> {
+                    fn __from_nat(__nat: &#id<#(#xuse),*>) -> Self;
+                }
+                impl<#(#xdecl,)* #(#rec_params),*> #ftn<#(#xuse),*>
+                    for #engine<#(#xuse,)* #(#rec_params),*>
+                where
+                    #(#from_root_bounds,)*
+                    #(#from_leaf_clones,)*
+                {
+                    fn __from_nat(__nat: &#id<#(#xuse),*>) -> Self { #from_body }
+                }
+            });
+            if unparse_types.contains(&xs) {
+                out.extend(quote! {
+                    impl<#(#xdecl,)* __Atom> ::syan::parse::Unparse<__Atom> for #id<#(#xuse),*>
+                    where
+                        #engine_default: ::syan::parse::Unparse<__Atom> + #ftn<#(#xuse),*>,
+                    {
+                        fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                            &self,
+                            __sink: &mut __E,
+                        ) -> ::core::result::Result<(), __E::Error> {
+                            let __e: #engine_default = #ftn::__from_nat(self);
+                            <#engine_default as ::syan::parse::Unparse<__Atom>>::unparse(&__e, __sink)
+                        }
+                    }
+                });
+            }
+            if spanned_types.contains(&xs) {
+                // The cycle's span type is its first type param (recurse convention) — and the engine's
+                // `Spanned::Span` equals it (the `WithSpan<_, S>` leaves pin it). Use `type Span = S`
+                // directly so the *private* engine type doesn't leak into this public assoc type (E0446);
+                // the body delegates through the engine (bounded `Spanned<Span = S>`).
+                let span_param = generics.params.iter().find_map(|p| match p {
+                    GenericParam::Type(t) => Some(&t.ident),
+                    _ => None,
+                });
+                if let Some(sp) = span_param {
+                    out.extend(quote! {
+                        impl<#(#xdecl),*> ::syan::span::Spanned for #id<#(#xuse),*>
+                        where
+                            #engine_default: ::syan::span::Spanned<Span = #sp> + #ftn<#(#xuse),*>,
+                        {
+                            type Span = #sp;
+                            fn span(&self) -> Self::Span {
+                                let __e: #engine_default = #ftn::__from_nat(self);
+                                <#engine_default as ::syan::span::Spanned>::span(&__e)
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    // Terminator → natural: never reached at runtime (the terminator's `Parse` always errors).
+    for r in roots_sorted {
+        let tn = trait_name(r);
+        let term = Ident::new(&format!("{r}Term"), Span::call_site());
+        let root_id = Ident::new(r, Span::call_site());
+        let term_args: TokenStream = if root_decl.is_empty() {
+            quote!()
+        } else {
+            quote!( <#(#root_use),*> )
+        };
+        out.extend(quote! {
+            impl<#(#root_decl),*> #tn<#(#root_use),*> for #term #term_args {
+                fn __to_nat(self) -> #root_id<#(#root_use),*> {
+                    ::core::unreachable!("#[recurse]: depth-limit terminator can never be parsed")
+                }
+            }
+        });
+        // Terminator side of the natural→engine bridge: a natural tree deeper than the engine's depth
+        // limit reaches the terminator here and cannot be represented — so delegated `Unparse`/`Spanned`
+        // panic on a tree deeper than `limit` (within the limit they succeed).
+        if needs_from_nat {
+            let ftn = from_trait_name(r);
+            out.extend(quote! {
+                impl<#(#root_decl),*> #ftn<#(#root_use),*> for #term #term_args {
+                    fn __from_nat(_: &#root_id<#(#root_use),*>) -> Self {
+                        ::core::panic!(
+                            "#[recurse]: cannot Unparse/Spanned a natural tree deeper than the \
+                             recursion limit (delegated through the depth-limited engine)"
+                        )
+                    }
+                }
+            });
+        }
+        // When delegating `Spanned`, the engine's `Spanned` chain bottoms at the terminator, so it too
+        // must be `Spanned`. By the recurse convention the cycle's span type is its first type param;
+        // the terminator is never constructed (its `Parse` errors), so `span()` is unreachable.
+        if !delegate_spanned.is_empty() {
+            if let Some(sp) = root_generics.params.iter().find_map(|p| match p {
+                GenericParam::Type(t) => Some(&t.ident),
+                _ => None,
+            }) {
+                out.extend(quote! {
+                    impl<#(#root_decl),*> ::syan::span::Spanned for #term #term_args
+                    where #sp: ::syan::span::Span {
+                        type Span = #sp;
+                        fn span(&self) -> Self::Span {
+                            ::core::unreachable!("#[recurse]: depth-limit terminator has no span")
+                        }
+                    }
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Build the recurse machinery for ONE independent cycle (`scc`): pick its root, rename its types,
@@ -610,7 +1026,9 @@ fn build_scc(
     direct_type_refs: &HashMap<String, HashSet<String>>,
     recursion_depth: usize,
     mod_ident: &Ident,
-    nonce: u64,
+    parse_types: &HashSet<String>,
+    unparse_types: &HashSet<String>,
+    spanned_types: &HashSet<String>,
 ) -> (TransformCtx, TokenStream) {
     // Root types: this cycle's types that directly reference themselves.
     let root_types: HashSet<String> = scc
@@ -669,7 +1087,6 @@ fn build_scc(
         candidates[0].clone()
     };
 
-    let root_ident = Ident::new(&root_name, Span::call_site());
     let term_ident = Ident::new(&format!("{root_name}Term"), Span::call_site());
     let default_alias = Ident::new(&format!("__{root_name}Default"), Span::call_site());
 
@@ -885,36 +1302,10 @@ fn build_scc(
             depth_ty = quote!(#root_internal<#(#gen_use,)* #depth_ty>);
         }
 
-        // Public alias per non-root cycle type, using *its own* generic params (a type may carry
-        // extras beyond the root's): `pub type Stmt<S, T> = __StmtRec<S, T, __RootDefault<root>>`.
-        let non_root_aliases: Vec<TokenStream> = items
-            .iter()
-            .filter_map(|item| {
-                let (id, generics): (&Ident, &Generics) = match item {
-                    Item::Enum(e)
-                        if matches!(e.vis, Visibility::Public(_))
-                            && scc.contains(&e.ident.to_string())
-                            && e.ident != root_name =>
-                    {
-                        (&e.ident, &e.generics)
-                    }
-                    Item::Struct(s)
-                        if matches!(s.vis, Visibility::Public(_))
-                            && scc.contains(&s.ident.to_string())
-                            && s.ident != root_name =>
-                    {
-                        (&s.ident, &s.generics)
-                    }
-                    _ => return None,
-                };
-                let internal = &internal_names[&id.to_string()];
-                let (decl, us) = generic_tokens(generics);
-                Some(quote! {
-                    pub type #id<#(#decl),*> =
-                        #internal<#(#us,)* #default_alias<#(#gen_use),*>>;
-                })
-            })
-            .collect();
+        // NOTE (natural-type design): the public `pub type Expr = __ExprRec<…>` aliases are *not*
+        // emitted — the natural recursive enums/structs own those names. Only the internal depth-chain
+        // alias `__ExprDefault` is kept (the delegated `Parse` references `__ExprRec<…, __ExprDefault>`).
+        let _ = &default_alias;
 
         quote! {
             #term_decl
@@ -938,10 +1329,6 @@ fn build_scc(
             }
 
             type #default_alias<#(#gen_decl),*> = #depth_ty;
-            pub type #root_ident<#(#gen_decl),*> =
-                #root_internal<#(#gen_use,)* #default_alias<#(#gen_use),*>>;
-
-            #(#non_root_aliases)*
         }
     } else {
         // ── several self-referential roots in one cycle ─────────────────────────────────────────
@@ -963,20 +1350,23 @@ fn build_scc(
         )
     };
 
-    // Per cycle type: a `visitor!()`-consumable metadata macro under the type's original name (additive
-    // — the renamed `__XRec` keeps its own `#[derive(Ast)]` macro). Emitted for both the single-root
-    // and multi-root tails; `roots_sorted` / `rec_for_root` give the parallel `@roots`/`@depth` order.
-    let meta = recurse_metadata_macros(
+    // Engine→natural bridge: `__ToNat_X` conversion traits/impls + terminator `unreachable!` +
+    // delegated `impl Parse for X` (parse the depth-limited engine, then convert). Replaces the old
+    // `@recurse` metadata + public `pub type` aliases.
+    let extras = gen_natural_extras(
         scc,
         items,
         &internal_names,
         &roots_sorted,
         &rec_for_root,
-        mod_ident,
-        nonce,
+        &default_for_root,
+        &root_generics,
+        parse_types,
+        unparse_types,
+        spanned_types,
     );
 
-    (ctx, quote!( #tail #meta ))
+    (ctx, quote!( #tail #extras ))
 }
 
 /// Emit the tail (terminators, depth-chain aliases, public aliases) for a cycle with **several
@@ -1121,50 +1511,195 @@ fn build_multiroot_tail(
         })
         .collect();
 
-    // Public alias for EVERY cycle type: `pub type X<own> = __XRec<own, __ADefault<gen>, …>` — its
-    // own params, then one root-default per root (in canonical order).
-    let default_args: Vec<TokenStream> = roots_sorted
-        .iter()
-        .map(|r| {
-            let d = &default_for_root[r];
-            quote!( #d<#(#gen_use),*> )
-        })
-        .collect();
-    let aliases: Vec<TokenStream> = items
-        .iter()
-        .filter_map(|item| {
-            let (id, generics): (&Ident, &Generics) = match item {
-                Item::Enum(e)
-                    if matches!(e.vis, Visibility::Public(_))
-                        && scc.contains(&e.ident.to_string()) =>
-                {
-                    (&e.ident, &e.generics)
-                }
-                Item::Struct(s)
-                    if matches!(s.vis, Visibility::Public(_))
-                        && scc.contains(&s.ident.to_string()) =>
-                {
-                    (&s.ident, &s.generics)
-                }
-                _ => return None,
-            };
-            let internal = &internal_names[&id.to_string()];
-            let (decl, us) = generic_tokens(generics);
-            Some(quote! {
-                pub type #id<#(#decl),*> =
-                    #internal< #(#us,)* #(#default_args,)* >;
-            })
-        })
-        .collect();
-
+    // NOTE (natural-type design): no public `pub type X = __XRec<…>` aliases — the natural recursive
+    // types own those names. Only the internal terminators + depth-chain aliases are emitted.
     quote! {
         #(#term_items)*
         #(#default_decls)*
-        #(#aliases)*
     }
 }
 
-pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStream1 {
+/// Split a cycle type's `#[derive(...)]`: route the *structural* syan derives that emit per-field
+/// `field_ty: Trait` bounds (`Parse`/`Unparse`/`Spanned`) to the depth-limited **engine** (they would
+/// form an E0275 where-bound cycle on the natural type; on the engine the recursive child is the depth
+/// param, breaking the cycle). Everything else (`Ast`, `Debug`, `Clone`, `#[subast]`, docs, …) stays on
+/// the natural type. Returns `(natural attrs, engine-routed derive paths)`. `Parse` on the natural type
+/// is re-supplied as a delegating impl (parse engine → convert); `Unparse`/`Spanned` currently live on
+/// the engine only (a direct natural impl needs cycle-wide union bounds — see
+/// `docs/recurse-natural-types-plan.md` §5).
+/// Partition a cycle type's `#[derive(...)]` into (kept-on-natural attrs, engine-routed derive paths),
+/// routing the derives in `engine_routed` to the engine. `Parse` is *always* engine-routed (it needs
+/// the depth-limited engine — see `make_natural_item`'s doc); `Unparse`/`Spanned` are engine-routed only
+/// for a **group-ful** cycle (their natural derive would need cycle-wide union bounds the group `Fill`
+/// machinery makes infeasible). Everything else (`Ast`, `Debug`, `#[subast]`, docs, …) stays on natural.
+fn split_cycle_derives(
+    attrs: &[syn::Attribute],
+    engine_routed: &[&str],
+) -> (Vec<syn::Attribute>, Vec<Path>) {
+    let mut natural = Vec::new();
+    let mut engine_paths = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("derive") {
+            if let syn::Meta::List(list) = &attr.meta {
+                let paths: Punctuated<Path, Token![,]> = list
+                    .parse_args_with(Punctuated::parse_terminated)
+                    .unwrap_or_default();
+                let mut kept: Vec<Path> = Vec::new();
+                for p in paths {
+                    if p.segments.last().is_some_and(|s| engine_routed.iter().any(|t| s.ident == t)) {
+                        engine_paths.push(p);
+                    } else {
+                        kept.push(p);
+                    }
+                }
+                if !kept.is_empty() {
+                    natural.push(syn::parse_quote!( #[derive(#(#kept),*)] ));
+                }
+                continue;
+            }
+        }
+        natural.push(attr.clone());
+    }
+    (natural, engine_paths)
+}
+
+/// Whether `attrs` contains a `#[derive(...)]` mentioning any of `names`.
+fn derives_any(attrs: &[syn::Attribute], names: &[&str]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("derive")
+            && matches!(&a.meta, syn::Meta::List(l)
+                if l.parse_args_with(Punctuated::<Path, Token![,]>::parse_terminated)
+                    .map(|ps| ps.iter().any(|p| p.segments.last().is_some_and(|s| names.iter().any(|n| s.ident == n))))
+                    .unwrap_or(false))
+    })
+}
+
+/// Strip the structural-derive field helper attributes from a field set. Used on the natural type when
+/// it carries NO structural derive (else the attrs would be unregistered "cannot find attribute").
+fn strip_field_helper_attrs(fields: &mut Fields) {
+    fn is_struct_helper(attr: &syn::Attribute) -> bool {
+        ["group", "joint", "alone", "ignore_bounds", "default", "predicate", "predicate_parse", "predicate_unparse"]
+            .iter()
+            .any(|n| attr.path().is_ident(n))
+    }
+    let go = |f: &mut Field| f.attrs.retain(|a| !is_struct_helper(a));
+    match fields {
+        Fields::Named(n) => n.named.iter_mut().for_each(go),
+        Fields::Unnamed(u) => u.unnamed.iter_mut().for_each(go),
+        Fields::Unit => {}
+    }
+}
+
+/// Inject `#[ignore_bounds]` on every field whose type references a cycle type (a *recursive child*),
+/// so the natural type's `Unparse`/`Spanned` derive emits leaf-only bounds (the recursion resolves
+/// coinductively at the body's `.unparse()`/`.span()` call sites, not via an E0275 where-bound cycle).
+/// A user-written `#[ignore_bounds]` is left as-is (not doubled).
+fn inject_ignore_bounds(fields: &mut Fields, scc: &HashSet<String>) {
+    let go = |f: &mut Field| {
+        let mut refs = HashSet::new();
+        collect_refs(&f.ty, scc, &mut refs);
+        if !refs.is_empty() && !f.attrs.iter().any(|a| a.path().is_ident("ignore_bounds")) {
+            f.attrs.push(syn::parse_quote!(#[ignore_bounds]));
+        }
+    };
+    match fields {
+        Fields::Named(n) => n.named.iter_mut().for_each(go),
+        Fields::Unnamed(u) => u.unnamed.iter_mut().for_each(go),
+        Fields::Unit => {}
+    }
+}
+
+/// The public **natural** form of a cycle type. `Parse` is always routed to the engine (it needs the
+/// depth-limited engine: a natural `Parse` overflows both on the per-field where-bound cycle and on the
+/// backtracking `Dup<…>` stream-type recursion). `Unparse`/`Spanned` are kept on the natural type when
+/// the cycle is **group-free** (`us_natural`) — then `#[ignore_bounds]` is injected on recursive-child
+/// fields so their leaf-only-bounded impls compile (the recursion resolves at the body's call sites);
+/// for a **group-ful** cycle they too are engine-routed (the group `Fill` bounds would need cycle-wide
+/// unioning). When the natural type carries a structural derive its field helper attrs are kept (the
+/// derive consumes them); otherwise they are stripped (else unregistered). Returns `(natural item,
+/// engine-routed derive paths)`.
+fn make_natural_item(item: &Item, scc: &HashSet<String>, us_natural: bool) -> (Item, Vec<Path>) {
+    let engine_routed: &[&str] = if us_natural {
+        &["Parse"]
+    } else {
+        &["Parse", "Unparse", "Spanned"]
+    };
+    let mut it = item.clone();
+    let engine_paths = match &mut it {
+        Item::Enum(e) => {
+            let (nat, ep) = split_cycle_derives(&e.attrs, engine_routed);
+            // Does the natural type still carry a structural derive (Unparse/Spanned) that consumes the
+            // field helper attrs and needs `#[ignore_bounds]` on recursive children?
+            let structural = derives_any(&nat, &["Unparse", "Spanned"]);
+            e.attrs = nat;
+            for v in &mut e.variants {
+                if structural {
+                    inject_ignore_bounds(&mut v.fields, scc);
+                } else {
+                    strip_field_helper_attrs(&mut v.fields);
+                }
+            }
+            ep
+        }
+        Item::Struct(s) => {
+            let (nat, ep) = split_cycle_derives(&s.attrs, engine_routed);
+            let structural = derives_any(&nat, &["Unparse", "Spanned"]);
+            s.attrs = nat;
+            if structural {
+                inject_ignore_bounds(&mut s.fields, scc);
+            } else {
+                strip_field_helper_attrs(&mut s.fields);
+            }
+            ep
+        }
+        _ => Vec::new(),
+    };
+    (it, engine_paths)
+}
+
+/// The internal **engine** form of a cycle type: `transform_item` (rename `X` → `__XRec`, thread the
+/// depth params) then made `pub(crate)` and carrying the engine-routed structural derives
+/// (`#[derive(Parse, Unparse, Spanned)]` as the user wrote them). The depth-limited engine is finite, so
+/// the normal derives apply. Must be called while the original is still `pub` (transform_item keys on
+/// that), then the visibility is narrowed.
+fn make_engine_item(item: &Item, ctx: &TransformCtx, engine_paths: &[Path]) -> Item {
+    let mut eng = transform_item(item.clone(), ctx);
+    let derives: Vec<syn::Attribute> = if engine_paths.is_empty() {
+        vec![]
+    } else {
+        vec![syn::parse_quote!(#[derive(#(#engine_paths),*)])]
+    };
+    // Strip any `#[ignore_bounds]` from the engine's fields: the engine's recursive child is the depth
+    // param `__Rec` (a *finite* chain), so its derives need the FULL `__Rec: Trait` bound — dropping it
+    // would leave the derive body's `__Rec::parse()`/`unparse()` call unsatisfiable. (A user-written
+    // `#[ignore_bounds]` is meant for the natural type, not the engine.)
+    let strip_ib = |fields: &mut Fields| {
+        let go = |f: &mut Field| f.attrs.retain(|a| !a.path().is_ident("ignore_bounds"));
+        match fields {
+            Fields::Named(n) => n.named.iter_mut().for_each(go),
+            Fields::Unnamed(u) => u.unnamed.iter_mut().for_each(go),
+            Fields::Unit => {}
+        }
+    };
+    match &mut eng {
+        Item::Enum(e) => {
+            e.attrs = derives;
+            e.vis = syn::parse_quote!(pub(crate));
+            for v in &mut e.variants {
+                strip_ib(&mut v.fields);
+            }
+        }
+        Item::Struct(s) => {
+            s.attrs = derives;
+            s.vis = syn::parse_quote!(pub(crate));
+            strip_ib(&mut s.fields);
+        }
+        _ => {}
+    }
+    eng
+}
+
+pub fn recurse(attr: TokenStream1, input: TokenStream1, _nonce: u64) -> TokenStream1 {
     let args: RecurseArgs = match syn::parse(attr) {
         Ok(a) => a,
         Err(e) => return e.to_compile_error().into(),
@@ -1232,12 +1767,143 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
         .into();
     }
 
-    // Build every cycle's `(transform ctx, tail tokens)` up front from the ORIGINAL items (the
-    // visitor and aliases read the un-renamed defs), then rewrite the module's items by applying each
-    // cycle's transform in turn. A transform only matches the types named in its own cycle, and once
-    // a type is renamed to `__XxxRec` no later cycle's transform matches it — so the passes compose.
-    // A field referencing another cycle's type is left as-is and resolves to that cycle's public
-    // alias.
+    // Finite-size precondition (natural-type design): each cycle is exposed as a *natural* recursive
+    // type, which Rust admits only if it is finite-size — i.e. every cycle passes through a heap
+    // indirection (`Box`/`Vec`/…). Detect a pure value-cycle as a cyclic *direct-edge* subgraph
+    // (`direct_type_refs`, the by-value references) and reject it with guidance rather than emitting an
+    // infinite-size type (E0072). `subgraph_is_cyclic` with no removed roots tests exactly this.
+    for scc in &sccs {
+        if subgraph_is_cyclic(scc, &HashSet::new(), &direct_type_refs) {
+            let mut names: Vec<&String> = scc.iter().collect();
+            names.sort();
+            abort!(
+                mod_ident,
+                "#[recurse]: the cycle ({}) has no heap indirection on a by-value reference cycle, so \
+                 its natural recursive type would be infinite-size. Wrap a cyclic field in `Box<…>` \
+                 (or `Vec`/`Option<Box<…>>`) to break the value cycle.",
+                names.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+
+    // Map each cycle type to the index of its SCC, so an engine type is transformed with ONLY its own
+    // cycle's `ctx` (a cross-SCC reference stays the *natural* type of the other cycle — a finite type
+    // reached via a DAG edge, parsed through its own delegated `Parse`).
+    let mut type_to_scc: HashMap<String, usize> = HashMap::new();
+    for (i, scc) in sccs.iter().enumerate() {
+        for n in scc {
+            type_to_scc.insert(n.clone(), i);
+        }
+    }
+
+    // Per SCC: does any member have a `#[group(...)]` field? `Unparse`/`Spanned` are kept on the natural
+    // type only for a GROUP-FREE cycle — a group field's `Fill<Substruct>: Unparse` bound would have to
+    // be unioned across every cycle member (the substruct is derive-internal), which the per-type derive
+    // can't do, so a group-ful cycle keeps `Unparse`/`Spanned` on the engine instead.
+    let field_has_group = |f: &Field| f.attrs.iter().any(|a| a.path().is_ident("group"));
+    let item_has_group = |item: &Item| match item {
+        Item::Enum(e) => e
+            .variants
+            .iter()
+            .any(|v| v.fields.iter().any(&field_has_group)),
+        Item::Struct(s) => s.fields.iter().any(&field_has_group),
+        _ => false,
+    };
+    let item_in_scc = |item: &Item, scc: &HashSet<String>| match item {
+        Item::Enum(e) => scc.contains(&e.ident.to_string()),
+        Item::Struct(s) => scc.contains(&s.ident.to_string()),
+        _ => false,
+    };
+    fn item_attrs(item: &Item) -> &[syn::Attribute] {
+        match item {
+            Item::Enum(e) => &e.attrs,
+            Item::Struct(s) => &s.attrs,
+            _ => &[],
+        }
+    }
+    let scc_has_group: Vec<bool> = sccs
+        .iter()
+        .map(|scc| {
+            items
+                .iter()
+                .any(|item| item_in_scc(item, scc) && item_has_group(item))
+        })
+        .collect();
+    // Keep `Unparse`/`Spanned` on the *natural* type only for a **single, self-recursive, group-free**
+    // cycle. There the leaf-only-bounded impl (via injected `#[ignore_bounds]`) always type-checks: the
+    // body's recursive `.unparse()`/`.span()` call resolves against the *same* impl, so no sibling's
+    // bounds need to be in scope. A multi-type cycle would need each member to carry every *other*
+    // member's leaf bounds (the members' leaf field types generally differ), and a group-ful cycle would
+    // additionally need the derive-internal `Fill<Substruct>` bounds unioned — neither is expressible
+    // per-type, so those keep `Unparse`/`Spanned` on the engine (where the depth param breaks the
+    // cycle). See `docs/recurse-natural-types-plan.md` §5.
+    let scc_us_natural: Vec<bool> = sccs
+        .iter()
+        .enumerate()
+        .map(|(i, scc)| scc.len() == 1 && !scc_has_group[i])
+        .collect();
+    // The depth-limited engine (+ terminators + `__ToNat_*` conversion) backs `Parse` and any
+    // engine-routed `Unparse`/`Spanned`. A cycle that derives no `Parse` and keeps its
+    // `Unparse`/`Spanned` on the natural type (or derives none) needs no engine — emit just the natural
+    // types (with their direct `Unparse`/`Spanned`/`Ast`).
+    let scc_needs_engine: Vec<bool> = sccs
+        .iter()
+        .enumerate()
+        .map(|(i, scc)| {
+            let has_parse = items
+                .iter()
+                .any(|item| item_in_scc(item, scc) && derives_any(item_attrs(item), &["Parse"]));
+            let has_us = items.iter().any(|item| {
+                item_in_scc(item, scc) && derives_any(item_attrs(item), &["Unparse", "Spanned"])
+            });
+            has_parse || (!scc_us_natural[i] && has_us)
+        })
+        .collect();
+
+    // Which cycle types derive `Parse`? Only those get a delegated `impl Parse for X` on the natural
+    // type (the engine derives `Parse` only when the user asked for it; emitting the delegation
+    // otherwise would reference a non-existent engine `Parse` impl).
+    let derives_parse = |attrs: &[syn::Attribute]| -> bool {
+        attrs.iter().any(|a| {
+            a.path().is_ident("derive")
+                && matches!(&a.meta, syn::Meta::List(l)
+                    if l.parse_args_with(Punctuated::<Path, Token![,]>::parse_terminated)
+                        .map(|ps| ps.iter().any(|p| p.segments.last().is_some_and(|s| s.ident == "Parse")))
+                        .unwrap_or(false))
+        })
+    };
+    let parse_types: HashSet<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e) if derives_parse(&e.attrs) => Some(e.ident.to_string()),
+            Item::Struct(s) if derives_parse(&s.attrs) => Some(s.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    // Cycle types that get a *delegated* natural `Unparse`/`Spanned` via the `__FromNat` bridge to the
+    // engine: a **multi-type, group-free** cycle that derives the trait. (A single self-recursive
+    // group-free cycle keeps the trait on the natural type directly — `us_natural`; a **group-ful** cycle
+    // keeps it on the engine only — the recursive `Fill<Substruct>: Unparse` chain isn't delegable.)
+    let delegated_trait = |trait_name: &str| -> HashSet<String> {
+        items
+            .iter()
+            .filter_map(|item| {
+                let (id, attrs) = match item {
+                    Item::Enum(e) => (e.ident.to_string(), &e.attrs),
+                    Item::Struct(s) => (s.ident.to_string(), &s.attrs),
+                    _ => return None,
+                };
+                let idx = *type_to_scc.get(&id)?;
+                (!scc_us_natural[idx] && !scc_has_group[idx] && derives_any(attrs, &[trait_name]))
+                    .then_some(id)
+            })
+            .collect()
+    };
+    let unparse_types = delegated_trait("Unparse");
+    let spanned_types = delegated_trait("Spanned");
+
+    // Per SCC: the transform `ctx` + the engine/conversion/delegated-`Parse`/`Unparse`/`Spanned` tail.
     let plans: Vec<(TransformCtx, TokenStream)> = sccs
         .iter()
         .map(|scc| {
@@ -1248,23 +1914,55 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
                 &direct_type_refs,
                 recursion_depth,
                 mod_ident,
-                nonce,
+                &parse_types,
+                &unparse_types,
+                &spanned_types,
             )
         })
         .collect();
 
-    let mut items = items;
-    for (ctx, _) in &plans {
-        items = items
-            .into_iter()
-            .map(|item| transform_item(item, ctx))
-            .collect();
+    // Emit, for each cycle enum/struct: the natural public type (derives split, `#[ignore_bounds]`
+    // injected) AND the internal `pub(crate)` engine type. Non-cycle items (incl. user `impl` blocks on
+    // cycle types — now plain impls on the natural type) pass through unchanged.
+    let mut out_items: Vec<TokenStream> = Vec::new();
+    for item in &items {
+        let cycle_name = match item {
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => Some(e.ident.to_string()),
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => Some(s.ident.to_string()),
+            _ => None,
+        }
+        .filter(|n| type_to_scc.contains_key(n));
+
+        match cycle_name {
+            Some(name) => {
+                let idx = type_to_scc[&name];
+                let scc = &sccs[idx];
+                // Keep Unparse/Spanned on the natural type only for a single self-recursive group-free
+                // cycle; engine-route them otherwise.
+                let us_natural = scc_us_natural[idx];
+                let (natural, engine_paths) = make_natural_item(item, scc, us_natural);
+                if scc_needs_engine[idx] {
+                    let ctx = &plans[idx].0;
+                    let engine = make_engine_item(item, ctx, &engine_paths);
+                    out_items.push(quote!(#natural #engine));
+                } else {
+                    // No engine: just the natural type (+ its direct Unparse/Spanned/Ast).
+                    out_items.push(quote!(#natural));
+                }
+            }
+            None => out_items.push(quote!(#item)),
+        }
     }
-    let tails: Vec<TokenStream> = plans.into_iter().map(|(_, tail)| tail).collect();
+    // Emit each cycle's engine/conversion/delegated-Parse tail only when that cycle needs the engine.
+    let tails: Vec<TokenStream> = plans
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, (_, tail))| scc_needs_engine[i].then_some(tail))
+        .collect();
 
     quote! {
         #(#mod_attrs)* #mod_vis mod #mod_ident {
-            #(#items)*
+            #(#out_items)*
 
             #(#tails)*
         }

@@ -1,18 +1,17 @@
-// AUDIT (compile error): a where-clause on a #[recurse] cycle type is copied verbatim onto the
-// internal `__ExprRec` but is NOT threaded onto the regenerated public alias, depth default, or the
-// `visitor!()`-generated Visit / VisitRec traits/impls. So `where S: Clone` stays a bound on
-// `__ExprRec` while the visitor traits that instantiate it do not satisfy it -> cryptic E0277
-// "required by a bound in `__ExprRec`". recurse never inspects generics.where_clause. Removing the
-// clause makes the identical type compile. Fix: thread it through, or abort! clearly.
-use syan::parse::recurse;
+// AUDIT (compile error, now ENGINE-SCOPED): a where-clause on a `#[recurse]` cycle type that needs the
+// depth-limited engine (i.e. derives `Parse`) is carried onto the internal `__ExprRec` and the
+// `__ToNat`/delegated-`Parse` conversion, but is NOT threaded onto those generated items' own bounds,
+// so `where S: Clone` is required by the conversion's `-> Expr<S>` yet undischarged -> E0277. (An
+// Ast-only cycle needs no engine and handles a where-clause fine — see `recurse_no_engine.rs`.)
+// Fix: thread the where-clause through the engine/conversion, or abort! clearly.
+use syan::parse::{recurse, Parse, Unparse};
 
 #[recurse]
 mod m {
     use core::marker::PhantomData;
-    use syan::visit::Ast;
+    use syan::parse::{Parse, Unparse};
 
-    #[derive(Ast)]
-    #[subast()]
+    #[derive(Parse, Unparse)]
     pub enum Expr<S>
     where
         S: Clone,
@@ -20,10 +19,6 @@ mod m {
         Nest(Box<Expr<S>>),
         Lit(PhantomData<S>),
     }
-}
-
-mod v {
-    syan::visit::visitor!(crate::m::Expr);
 }
 
 fn main() {}

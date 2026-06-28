@@ -1,6 +1,7 @@
-//! AUDIT finding (recurse path): a tuple nested inside a container holding a back-edge
+//! AUDIT finding (recurse path): a tuple nested inside a container holding a recursive ref
 //! (`Vec<(Box<Expr<S>>, Box<Expr<S>>)>`) was silently skipped — the same missing `Type::Tuple` arm in
-//! `peel`, now reached through `recurse_lower_field` instead of `Lower::lower_field`.
+//! `peel`. With the natural-type design the cycle is acyclic and the visitor is ordinary; this pins
+//! the tuple-in-container traversal.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -31,7 +32,7 @@ struct Counter {
     e: usize,
 }
 impl<S> v::Visit<S> for Counter {
-    fn visit_expr<R: v::VisitRec<S, Self>>(&mut self, i: &v::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &ast::Expr<S>) {
         self.e += 1;
         v::visit_expr(self, i);
     }
@@ -39,11 +40,10 @@ impl<S> v::Visit<S> for Counter {
 
 #[test]
 fn recurse_vec_of_tuple_back_edges() {
-    // VecPair with two pairs ⇒ outer(1) + 4 inner Lits = 5. Inner back-edges use the depth-generic
-    // `ExprNode` form so they unify with the next depth level.
+    // VecPair with two pairs ⇒ outer(1) + 4 inner Lits = 5. Inner nodes use the natural type path.
     let e: ast::Expr<()> = ast::Expr::VecPair(vec![
-        (Box::new(v::ExprNode::Lit(PhantomData)), Box::new(v::ExprNode::Lit(PhantomData))),
-        (Box::new(v::ExprNode::Lit(PhantomData)), Box::new(v::ExprNode::Lit(PhantomData))),
+        (Box::new(ast::Expr::Lit(PhantomData)), Box::new(ast::Expr::Lit(PhantomData))),
+        (Box::new(ast::Expr::Lit(PhantomData)), Box::new(ast::Expr::Lit(PhantomData))),
     ]);
     let mut c = Counter::default();
     v::Visit::visit_expr(&mut c, &e);
@@ -54,8 +54,8 @@ fn recurse_vec_of_tuple_back_edges() {
 fn recurse_opt_of_tuple_back_edges() {
     // OptPair(Some) ⇒ outer(1) + 2 inner Lits = 3
     let e: ast::Expr<()> = ast::Expr::OptPair(Some((
-        Box::new(v::ExprNode::Lit(PhantomData)),
-        Box::new(v::ExprNode::Lit(PhantomData)),
+        Box::new(ast::Expr::Lit(PhantomData)),
+        Box::new(ast::Expr::Lit(PhantomData)),
     )));
     let mut c = Counter::default();
     v::Visit::visit_expr(&mut c, &e);

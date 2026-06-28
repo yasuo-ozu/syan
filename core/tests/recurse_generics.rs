@@ -1,7 +1,7 @@
-//! `#[recurse]` cycle types may carry lifetime / type / const generic parameters alongside the
-//! depth `__Rec`. The params thread through the regenerated aliases and through a depth-generic
-//! `visitor!()` over the cycle (keyed on the roots' params; a non-root cycle type's *extra* params
-//! become `visit_*` method generics — see the heterogeneous `het` case below).
+//! `#[recurse]` cycle types may carry lifetime / type / const generic parameters. The params thread
+//! through the natural recursive types and through the acyclic `visitor!()` over the cycle. A non-root
+//! cycle type's *extra*, concretely-filled param becomes a `visit_*` method generic — see the
+//! heterogeneous `het` case below.
 //!
 //! Was previously rejected: a lifetime param produced a confusing E0106; const params were refused.
 #![allow(dead_code)]
@@ -31,7 +31,7 @@ mod v_lt {
 }
 
 impl<'a, S> v_lt::Visit<'a, S> for Counter {
-    fn visit_expr<R: v_lt::VisitRec<'a, S, Self>>(&mut self, i: &v_lt::ExprNode<'a, S, R>) {
+    fn visit_expr(&mut self, i: &lt::Expr<'a, S>) {
         self.0 += 1;
         v_lt::visit_expr(self, i);
     }
@@ -39,7 +39,7 @@ impl<'a, S> v_lt::Visit<'a, S> for Counter {
 
 #[test]
 fn lifetime_param_visitor() {
-    let e: lt::Expr<'static, ()> = lt::Expr::Nest(Box::new(v_lt::ExprNode::Lit(PhantomData)));
+    let e: lt::Expr<'static, ()> = lt::Expr::Nest(Box::new(lt::Expr::Lit(PhantomData)));
     let mut c = Counter::default();
     v_lt::Visit::visit_expr(&mut c, &e);
     assert_eq!(c.0, 2, "outer Nest + inner Lit (reached via the back-edge)");
@@ -64,7 +64,7 @@ mod v_ct {
 }
 
 impl<S, const N: usize> v_ct::Visit<S, N> for Counter {
-    fn visit_expr<R: v_ct::VisitRec<S, N, Self>>(&mut self, i: &v_ct::ExprNode<S, N, R>) {
+    fn visit_expr(&mut self, i: &ct::Expr<S, N>) {
         self.0 += 1;
         v_ct::visit_expr(self, i);
     }
@@ -72,7 +72,7 @@ impl<S, const N: usize> v_ct::Visit<S, N> for Counter {
 
 #[test]
 fn const_param_visitor() {
-    let e: ct::Expr<(), 2> = ct::Expr::Nest(Box::new(v_ct::ExprNode::Lit(PhantomData)));
+    let e: ct::Expr<(), 2> = ct::Expr::Nest(Box::new(ct::Expr::Lit(PhantomData)));
     let mut c = Counter::default();
     v_ct::Visit::visit_expr(&mut c, &e);
     assert_eq!(c.0, 2, "const param N threads through the depth-generic visitor");
@@ -100,7 +100,7 @@ mod v_ct_char {
 }
 
 impl<S, const C: char> v_ct_char::Visit<S, C> for Counter {
-    fn visit_expr<R: v_ct_char::VisitRec<S, C, Self>>(&mut self, i: &v_ct_char::ExprNode<S, C, R>) {
+    fn visit_expr(&mut self, i: &ct_char::Expr<S, C>) {
         self.0 += 1;
         v_ct_char::visit_expr(self, i);
     }
@@ -109,7 +109,7 @@ impl<S, const C: char> v_ct_char::Visit<S, C> for Counter {
 #[test]
 fn non_usize_const_param_visitor() {
     let e: ct_char::Expr<(), 'x'> =
-        ct_char::Expr::Nest(Box::new(v_ct_char::ExprNode::Lit(PhantomData)));
+        ct_char::Expr::Nest(Box::new(ct_char::Expr::Lit(PhantomData)));
     let mut c = Counter::default();
     v_ct_char::Visit::visit_expr(&mut c, &e);
     assert_eq!(c.0, 2, "const C: char threads through; terminator no longer needs `[(); N]`");
@@ -122,14 +122,14 @@ mod multi {
     use syan::visit::Ast;
 
     #[derive(Ast)]
-    #[subast()]
+    #[subast(crate::multi::Stmt)]
     pub enum Expr<S, T> {
         Stmt(Box<Stmt<S, T>>),
         Lit(PhantomData<(S, T)>),
     }
 
     #[derive(Ast)]
-    #[subast()]
+    #[subast(crate::multi::Expr)]
     pub enum Stmt<S, T> {
         Expr(Box<Expr<S, T>>),
         Nop(PhantomData<(S, T)>),
@@ -141,11 +141,11 @@ mod v_multi {
 }
 
 impl<S, T> v_multi::Visit<S, T> for Counter {
-    fn visit_expr<R: v_multi::VisitRec<S, T, Self>>(&mut self, i: &v_multi::ExprNode<S, T, R>) {
+    fn visit_expr(&mut self, i: &multi::Expr<S, T>) {
         self.0 += 1;
         v_multi::visit_expr(self, i);
     }
-    fn visit_stmt<R: v_multi::VisitRec<S, T, Self>>(&mut self, i: &v_multi::StmtNode<S, T, R>) {
+    fn visit_stmt(&mut self, i: &multi::Stmt<S, T>) {
         self.0 += 1;
         v_multi::visit_stmt(self, i);
     }
@@ -155,7 +155,7 @@ impl<S, T> v_multi::Visit<S, T> for Counter {
 fn two_type_params_cross_edge() {
     // Expr -> Stmt (cross) -> Expr (back-edge).
     let e: multi::Expr<(), u8> = multi::Expr::Stmt(Box::new(multi::Stmt::Expr(Box::new(
-        v_multi::ExprNode::Lit(PhantomData),
+        multi::Expr::Lit(PhantomData),
     ))));
     let mut c = Counter::default();
     v_multi::Visit::visit_expr(&mut c, &e);
@@ -172,14 +172,14 @@ mod het {
     use syan::visit::Ast;
 
     #[derive(Ast)]
-    #[subast()]
+    #[subast(crate::het::Stmt)]
     pub enum Expr<S> {
         Stmt(Box<Stmt<S, u8>>),
         Lit(PhantomData<S>),
     }
 
     #[derive(Ast)]
-    #[subast()]
+    #[subast(crate::het::Expr)]
     pub enum Stmt<S, T> {
         Back(Box<Expr<S>>),
         Tag(PhantomData<(S, T)>),
@@ -191,11 +191,11 @@ mod v_het {
 }
 
 impl<S> v_het::Visit<S> for Counter {
-    fn visit_expr<R: v_het::VisitRec<S, Self>>(&mut self, i: &v_het::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &het::Expr<S>) {
         self.0 += 1;
         v_het::visit_expr(self, i);
     }
-    fn visit_stmt<T, R: v_het::VisitRec<S, Self>>(&mut self, i: &v_het::StmtNode<S, T, R>) {
+    fn visit_stmt<T>(&mut self, i: &het::Stmt<S, T>) {
         self.0 += 1;
         v_het::visit_stmt(self, i);
     }
@@ -205,7 +205,7 @@ impl<S> v_het::Visit<S> for Counter {
 fn heterogeneous_generics_visitor() {
     // Expr -> Stmt<_, u8> (cross) -> Expr (back-edge).
     let e: het::Expr<()> =
-        het::Expr::Stmt(Box::new(het::Stmt::Back(Box::new(v_het::ExprNode::Lit(PhantomData)))));
+        het::Expr::Stmt(Box::new(het::Stmt::Back(Box::new(het::Expr::Lit(PhantomData)))));
     let mut c = Counter::default();
     v_het::Visit::visit_expr(&mut c, &e);
     assert_eq!(c.0, 3, "Expr + Stmt (extra param T=u8) + inner Expr");

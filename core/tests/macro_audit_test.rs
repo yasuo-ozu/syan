@@ -36,8 +36,8 @@ fn macro_audit_compile_fail() {
     //  where_clause_attribute.rs.)
     // Unparse on a zero-variant enum → E0004 (non-exhaustive empty match).
     t.compile_fail("tests/ui/audit_unparse_empty_enum.rs");
-    // #[ignore_bounds] is a silent no-op — the field bound is still emitted.
-    t.compile_fail("tests/ui/audit_ignore_bounds_noop.rs");
+    // (#[ignore_bounds] is now HONORED — it suppresses the field's `: Parse` bound; a positive
+    //  regression test lives in `ignore_bounds.rs`.)
     // Generated parse-stream local `__syan_stream` is not hygienic (collides with a like-named field).
     t.compile_fail("tests/ui/audit_attribute_hygiene_local.rs");
 
@@ -50,6 +50,9 @@ fn macro_audit_compile_fail() {
     // ── #[derive(Ast)] / visitor!() ─────────────────────────────────────────────────────────────
     // #[subast(path<GenericArgs>)] accepted silently → cryptic error when the intermediate is drilled.
     t.compile_fail("tests/ui/audit_subast_generic_args.rs");
+    // A non-fully-qualified `#[subast(..)]` path (bare ident / `self::` / `super::`) is rejected with a
+    // clear message (it would otherwise resolve in the consumer's scope, not the definition's).
+    t.compile_fail("tests/ui/subast_non_full_path.rs");
     // A union listed in visitor!() is silently dropped (misleading "no AST definitions resolved").
     t.compile_fail("tests/ui/audit_visitor_union.rs");
 

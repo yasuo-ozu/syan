@@ -72,8 +72,25 @@ pub(crate) fn crate_rooted_tokens(path: &Path) -> TokenStream {
     }
 }
 
-/// Collect the `#[subast(..)]` allowlist from the type's attributes. Two entries resolving to the
-/// same `matchkey` is an error (a bare field head can't disambiguate them — alias one).
+/// Whether a `#[subast(..)]` path is **fully qualified (rooted)** — so it still resolves when this
+/// type's metadata macro is expanded elsewhere (a sibling module, or a downstream crate building a
+/// visitor that drills through it). Rooted forms: a leading `::` (absolute), `crate::…` (re-rooted to
+/// `$crate::…` for downstream), or an external-crate path (`other_crate::…`) — i.e. a multi-segment path
+/// whose first segment is not `self`/`super`. NOT rooted: a bare single-segment ident, or a
+/// `self::`/`super::`-relative path — those resolve in the *consumer's* context, not the definition's.
+fn subast_path_is_rooted(path: &Path) -> bool {
+    if path.leading_colon.is_some() {
+        return true;
+    }
+    match path.segments.first() {
+        Some(seg) if seg.ident == "self" || seg.ident == "super" => false,
+        _ => path.segments.len() >= 2,
+    }
+}
+
+/// Collect the `#[subast(..)]` allowlist from the type's attributes. Each path must be fully qualified
+/// (see `subast_path_is_rooted`). Two entries resolving to the same `matchkey` is an error (a bare field
+/// head can't disambiguate them — alias one).
 pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
     let mut entries = Vec::new();
     for attr in attrs {
@@ -87,6 +104,23 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
         match Punctuated::<SubastEntry, Token![,]>::parse_terminated.parse2(list) {
             Ok(parsed) => entries.extend(parsed),
             Err(e) => abort!(e.span(), "invalid `#[subast(..)]`: {}", e),
+        }
+    }
+    // Reject a non-fully-qualified path with a clear, actionable message — otherwise it surfaces far
+    // away as a cryptic "cannot find macro/type" (or wrong-type) error when a visitor drills the entry.
+    for e in &entries {
+        if !subast_path_is_rooted(&e.path) {
+            let p = &e.path;
+            abort!(
+                e.path,
+                "`#[subast(..)]` path `{}` is not fully qualified. Use a `crate`-rooted path \
+                 (`crate::path::to::{}`) — or an external-crate path (`other_crate::path::{}`) for a \
+                 type from another crate. A bare ident or a `self::`/`super::`-relative path resolves \
+                 in the consumer's scope (where the metadata macro is expanded), not here.",
+                quote!(#p).to_string().replace(' ', ""),
+                e.matchkey(),
+                e.matchkey(),
+            );
         }
     }
     let mut seen: HashMap<String, ()> = HashMap::new();
@@ -133,39 +167,6 @@ pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
         }
     }
     di
-}
-
-/// Like `cleaned_definition` but for a `syn::Item` (`#[recurse]` works with `Item::Enum`/`Item::
-/// Struct`, not a `DeriveInput`): strip all attributes, force `pub`, and clear field attrs/vis so the
-/// item re-parses cleanly as a `syn::Item` downstream. The emitted token shape matches what
-/// `cleaned_definition` produces for the equivalent `DeriveInput`, so `__visitor_build` parses a
-/// `#[recurse]`-supplied `@ast { .. }` identically to a `#[derive(Ast)]` one. A non-enum/-struct item
-/// is returned unchanged (the caller only passes cycle enums/structs).
-pub(crate) fn cleaned_item(item: &Item) -> Item {
-    let mut it = item.clone();
-    match &mut it {
-        Item::Enum(e) => {
-            e.attrs.clear();
-            e.vis = Visibility::Public(Default::default());
-            for v in &mut e.variants {
-                v.attrs.clear();
-                for f in &mut v.fields {
-                    f.attrs.clear();
-                    f.vis = Visibility::Inherited;
-                }
-            }
-        }
-        Item::Struct(s) => {
-            s.attrs.clear();
-            s.vis = Visibility::Public(Default::default());
-            for f in &mut s.fields {
-                f.attrs.clear();
-                f.vis = Visibility::Inherited;
-            }
-        }
-        _ => {}
-    }
-    it
 }
 
 /// Build a `type_leak::Referrer` for the definition (the ordered list of field types that depend on
