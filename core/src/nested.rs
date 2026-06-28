@@ -2,9 +2,9 @@ pub mod choice;
 pub mod group;
 pub mod joint;
 pub mod punctuated;
+pub mod unordered;
 
 pub use choice::Choice;
 pub use joint::Joint;
 pub use punctuated::Punctuated;
-
-// TODO: impl Unordered
+pub use unordered::Unordered;
