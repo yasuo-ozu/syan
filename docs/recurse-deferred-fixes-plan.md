@@ -22,7 +22,19 @@ Status quo recap (what's already shipped):
 
 ---
 
-## #1 — Group-ful cycle `Unparse`/`Spanned` on the natural type — ✅ DONE (delegation wired)
+## #1 — Group-ful cycle `Unparse`/`Spanned` on the natural type — ✅ FULLY DONE
+
+> **Closed at the library level (`nested/group.rs`).** The recurse delegation was wired first (below);
+> the remaining library-level leaf gaps are now also fixed, so a group-ful cycle's `.unparse()`/`.span()`
+> actually work (`recurse_group_ful.rs`):
+>  - **Unparse**: `Group`'s `Unparse<TokenTree>` is hand-written per real delimiter (Paren/Brace/Bracket)
+>    to emit a *single* `TokenTree::Group` carrying the slot's sub-stream — a brace group is one token,
+>    not three, and the delimiter symbols (which don't `Unparse` to `TokenTree` standalone) never need to.
+>    (`#[derive(Unparse)]` dropped from `Group`.)
+>  - **Spanned**: `Group`'s `Spanned` takes its span from its *delimiters* (`open`/`close`), not the slot,
+>    so an empty `Group<(),…>` slot needs no `Spanned` — the `impl Spanned for ()` hack was reverted.
+>
+> Historical note below (the delegation-wiring step + the corrected probe write-up).
 
 > **CORRECTION + RESOLUTION.** The earlier probe write-up here was **wrong**: it claimed
 > `__ExprRec<S,__ExprDefault<S>>: Unparse` was "not provable" because of the engine's
