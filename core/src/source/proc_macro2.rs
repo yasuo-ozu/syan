@@ -189,9 +189,18 @@ impl<T: Default + core::fmt::Display> Parse<proc_macro2::TokenTree> for Symbol<T
 
 impl<T: Default + core::fmt::Display> Unparse<proc_macro2::TokenTree> for Symbol<T> {
     fn unparse<S: Emitter<proc_macro2::TokenTree>>(&self, sink: &mut S) -> Result<(), S::Error> {
-        let ident =
-            proc_macro2::Ident::new(&Self::default().to_string(), proc_macro2::Span::call_site());
-        sink.write_one(proc_macro2::TokenTree::Ident(ident))
+        // A symbol may be an identifier keyword (`let`) OR punctuation (`=`, `;`, `::`, `->`). Let
+        // proc-macro2's own lexer turn the symbol's text into the right token(s) — an `Ident`, a single
+        // `Punct`, or a sequence of joint `Punct`s for multi-char operators — rather than forcing it
+        // through `Ident::new` (which panics on punctuation).
+        let text = Self::default().to_string();
+        let stream: proc_macro2::TokenStream = text
+            .parse()
+            .expect("symbol text is not a valid Rust token sequence");
+        for tt in stream {
+            sink.write_one(tt)?;
+        }
+        Ok(())
     }
 }
 
