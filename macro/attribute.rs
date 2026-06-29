@@ -768,6 +768,36 @@ fn map_fields_to_idents<'a>(
         .collect::<Vec<_>>()
 }
 
+/// One mapped field: its `Member` (for construction), the binding `Ident`, and the source `Field`.
+type MappedField<'a> = (Member, Ident, &'a Field);
+/// A variant paired with its mapped fields.
+type VariantFields<'a> = (&'a Variant, Vec<MappedField<'a>>);
+
+/// The number of leading fields that EVERY variant shares with identical parse behaviour — same member
+/// (so the binding ident aligns for construction), type, and attributes. Drives the enum `Parse`
+/// prefix-dedup. Zero when there are no variants, any variant is fieldless, or the first fields already
+/// differ — in which case the derive keeps the per-variant backtracking scheme unchanged.
+fn common_field_prefix_len(variants: &[VariantFields]) -> usize {
+    let sig = |(m, _, f): &(Member, Ident, &Field)| -> String {
+        let ty = &f.ty;
+        let attrs: String =
+            f.attrs.iter().map(|a| quote!(#a).to_string()).collect::<Vec<_>>().join(",");
+        format!("{}|{}|{}", quote!(#m), quote!(#ty), attrs)
+    };
+    let Some(min_len) = variants.iter().map(|(_, fs)| fs.len()).min() else {
+        return 0;
+    };
+    let mut lcp = 0;
+    for i in 0..min_len {
+        let s0 = sig(&variants[0].1[i]);
+        if variants[1..].iter().any(|(_, fs)| sig(&fs[i]) != s0) {
+            break;
+        }
+        lcp += 1;
+    }
+    lcp
+}
+
 impl Adt for DataStruct {
     fn all_fields(&self) -> Vec<&Field> {
         self.fields.iter().collect()
@@ -828,37 +858,126 @@ impl Adt for DataEnum {
         syan: &Path,
         ident: &Ident,
         tp_error_final: &Type,
-        mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        mut f: impl FnMut(&[MappedField]) -> TokenStream,
     ) -> TokenStream {
-        let variants = self.variants.iter().map(|v| {
-            let fields = map_fields_to_idents(&v.fields);
-            let inner = f(&fields[..]);
-            (v, fields, inner)
-        });
-        quote! {
-            let mut __syan_errors = ::std::vec::Vec::new();
-            #(for (variant, fields, inner) in variants) {
-                match #syan::parse::ParseStream::dup(&mut __syan_stream, |mut __syan_stream| {
-                    #inner
-                    ::core::result::Result::Ok(
-                        #ident :: #{ &variant.ident }
-                        #(if let Fields::Unnamed(_) = &variant.fields) {
-                            (#(for (_, field_ident, _) in &fields) {#field_ident,})
-                        }
-                        #(if let Fields::Named(_) = &variant.fields) {
-                            {#(for (_, field_ident, _) in &fields) {#field_ident,}}
-                        }
-                    )
-                }) {
-                    ::core::result::Result::Err(err) => {
-                        __syan_errors.push(err);
-                    }
-                    ok => { return ok; }
+        let variants: Vec<VariantFields> = self
+            .variants
+            .iter()
+            .map(|v| (v, map_fields_to_idents(&v.fields)))
+            .collect();
+
+        // Construct `Ident::Variant { fields… }` / `Ident::Variant(fields…)` from the field bindings.
+        let construct_of = |variant: &Variant, fields: &[MappedField]| -> TokenStream {
+            quote! {
+                #ident :: #{ &variant.ident }
+                #(if let Fields::Unnamed(_) = &variant.fields) {
+                    (#(for (_, id, _) in fields) {#id,})
+                }
+                #(if let Fields::Named(_) = &variant.fields) {
+                    {#(for (_, id, _) in fields) {#id,}}
                 }
             }
-            ::core::result::Result::Err(
-                <#tp_error_final as #syan::error::Error>::from_cause(__syan_errors)
-            )
+        };
+
+        // **Prefix-dedup**: the length of the leading run of fields that EVERY variant shares (same
+        // member + type + attrs, hence same parse + binding). When non-zero, those fields are parsed ONCE
+        // up front instead of being re-parsed inside each variant's backtracking attempt (`E | E!`). When
+        // zero (or <2 variants) — the common case, e.g. variants distinguished by their first token, incl.
+        // every recurse-engine enum — codegen is the per-variant-`dup` scheme, unchanged.
+        let lcp = common_field_prefix_len(&variants);
+
+        if lcp == 0 || variants.len() < 2 {
+            let blocks: Vec<TokenStream> = variants
+                .iter()
+                .map(|(variant, fields)| {
+                    let inner = f(&fields[..]);
+                    let construct = construct_of(variant, fields);
+                    quote! {
+                        match #syan::parse::ParseStream::dup(&mut __syan_stream, |mut __syan_stream| {
+                            #inner
+                            ::core::result::Result::Ok(#construct)
+                        }) {
+                            ::core::result::Result::Err(err) => { __syan_errors.push(err); }
+                            ok => { return ok; }
+                        }
+                    }
+                })
+                .collect();
+            return quote! {
+                let mut __syan_errors = ::std::vec::Vec::new();
+                #(#blocks)*
+                ::core::result::Result::Err(
+                    <#tp_error_final as #syan::error::Error>::from_cause(__syan_errors)
+                )
+            };
+        }
+
+        // ── factored: parse the shared prefix once, branch on the per-variant suffix ──
+        // The whole thing runs in one outer `dup` so a total failure still rewinds the stream (preserving
+        // the "enum parse rewinds on failure" property of the per-variant scheme); the prefix is parsed
+        // once inside it, and each non-empty suffix gets its own inner `dup` so a failed variant rewinds
+        // only the suffix and the next variant is tried from the post-prefix position.
+        let prefix_parse = f(&variants[0].1[..lcp]);
+
+        // A variant whose fields are exactly the prefix is an unconditional fallback (empty suffix); the
+        // FIRST such variant ends the chain (later variants are unreachable). It becomes the closure's tail
+        // `Ok(..)`; the variants before it each get a suffix `dup` and `return` on success. With a fallback
+        // a failed suffix is discarded; without one the suffix errors are collected for `from_cause`.
+        let fallback = variants.iter().position(|(_, fs)| fs.len() == lcp);
+        let tried = &variants[..fallback.unwrap_or(variants.len())];
+        let has_fallback = fallback.is_some();
+
+        let branches: Vec<TokenStream> = tried
+            .iter()
+            .map(|(variant, fields)| {
+                let construct = construct_of(variant, fields);
+                let suffix = &fields[lcp..]; // non-empty (the first empty one is the fallback, excluded)
+                let suffix_parse = f(suffix);
+                let suffix_ids: Vec<&Ident> = suffix.iter().map(|(_, id, _)| id).collect();
+                let on_err = if has_fallback {
+                    quote!( ::core::result::Result::Err(_) => {} )
+                } else {
+                    quote!( ::core::result::Result::Err(err) => { __syan_errors.push(err); } )
+                };
+                quote! {
+                    // Turbofish pins the suffix `dup`'s error type (a discarded `Err(_)` arm wouldn't).
+                    match #syan::parse::ParseStream::dup::<_, #tp_error_final, _>(
+                        &mut __syan_stream,
+                        |mut __syan_stream| {
+                            #suffix_parse
+                            ::core::result::Result::Ok((#(#suffix_ids,)*))
+                        },
+                    ) {
+                        ::core::result::Result::Ok((#(#suffix_ids,)*)) => {
+                            return ::core::result::Result::Ok(#construct);
+                        }
+                        #on_err
+                    }
+                }
+            })
+            .collect();
+
+        let tail = match fallback {
+            Some(i) => {
+                let (variant, fields) = &variants[i];
+                let construct = construct_of(variant, fields);
+                quote!( ::core::result::Result::Ok(#construct) )
+            }
+            None => quote! {
+                ::core::result::Result::Err(
+                    <#tp_error_final as #syan::error::Error>::from_cause(__syan_errors)
+                )
+            },
+        };
+        let errors_decl =
+            (!has_fallback).then(|| quote!( let mut __syan_errors = ::std::vec::Vec::new(); ));
+        quote! {
+            #syan::parse::ParseStream::dup(&mut __syan_stream, |mut __syan_stream| {
+                #prefix_parse
+                #errors_decl
+                #(#branches)*
+                #tail
+            })
         }
     }
 

@@ -250,4 +250,11 @@ group-free cycle's direct `Unparse`/`Spanned` impls also live on the natural typ
       `Option`, which becomes `None`). A transparent `Deref` wrapper, peeled by the visitor like `Box`, so
       it works as a derived AST field type. `Parse::attempt(self) -> Attempt<Self>` is the value
       constructor (sugar for `Attempt(self)`). Tests: `nested_attempt.rs`.
-- [ ] in #[derive(Parse)] macro, support prefix-duplicated syntax (like E | E!) without memorize or backtracking, just comparing fields in each variants
+- [x] in #[derive(Parse)] macro, support prefix-duplicated syntax (like E | E!) without memorize or backtracking, just comparing fields in each variants
+      → enum `Parse` derive now **prefix-dedups**: the longest run of leading fields shared by ALL variants
+      (same member+type+attrs — `common_field_prefix_len`) is parsed ONCE, then each variant's suffix is
+      tried (the shared prefix is not re-parsed). Scoped: an enum with no shared prefix (LCP 0) or <2
+      variants — incl. every recurse-engine enum — keeps the per-variant-`dup` scheme byte-identical.
+      Declaration order (which variant wins) is preserved. `macro/attribute.rs`
+      (`DataEnum::extract_parse_inner`); tests `parse_prefix_dedup.rs` (chain, divergent suffixes, named
+      fields, inside a `#[recurse]` cycle, parse-count proof).
