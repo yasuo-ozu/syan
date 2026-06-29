@@ -6,6 +6,14 @@ pub trait Parse<Atom>: Sized {
     type Error: crate::error::Error;
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error>;
 
+    /// Wrap this value in [`Attempt`](crate::nested::Attempt), the **atomic-parse** marker: parsing an
+    /// `Attempt<Self>` parses `Self` but rewinds the stream on failure (it requires `Atom: Clone`) — see
+    /// [`Attempt`](crate::nested::Attempt). This is the value constructor; `value.attempt()` is sugar for
+    /// `Attempt(value)`.
+    fn attempt(self) -> crate::nested::Attempt<Self> {
+        crate::nested::Attempt(self)
+    }
+
     // TODO: add rollback_subsequent_error()
 }
 

@@ -244,5 +244,10 @@ group-free cycle's direct `Unparse`/`Spanned` impls also live on the natural typ
 
 # TODOs
 
-- [ ] implement attempt() feature which requires Atom: Clone
+- [x] implement attempt() feature which requires Atom: Clone
+      → `nested::Attempt<T>(pub T)` is the atomic-parse wrapper: its `Parse` parses `T` but **rewinds** the
+      stream on failure (via `dup`, hence `Atom: Clone`) while still propagating the error (unlike
+      `Option`, which becomes `None`). A transparent `Deref` wrapper, peeled by the visitor like `Box`, so
+      it works as a derived AST field type. `Parse::attempt(self) -> Attempt<Self>` is the value
+      constructor (sugar for `Attempt(self)`). Tests: `nested_attempt.rs`.
 - [ ] in #[derive(Parse)] macro, support prefix-duplicated syntax (like E | E!) without memorize or backtracking, just comparing fields in each variants

@@ -216,12 +216,14 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
                 return Some(direct(seg.ident.clone()));
             }
             match name.as_str() {
-                "Box" => {
+                // `Box` and `Attempt` are both transparent single-`Deref` wrappers — peel through them
+                // (`*x` yields the inner value), counting one deref layer like a box.
+                "Box" | "Attempt" => {
                     let mut inner = peel(first_ty_arg(seg)?, user_types)?;
                     match inner.conts.first_mut() {
-                        // Box around the outermost container: that layer derefs through it.
+                        // Wrapper around the outermost container: that layer derefs through it.
                         Some(layer) => layer.boxes += 1,
-                        // Box directly around the head.
+                        // Wrapper directly around the head.
                         None => inner.head_box += 1,
                     }
                     Some(inner)
