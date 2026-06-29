@@ -59,6 +59,7 @@ pub trait ParseStream {
     ) -> std::result::Result<T, E>
     where
         Self: Sized,
+        Self::Atom: Clone,
     {
         let mut dup = Dup {
             slot: self,
