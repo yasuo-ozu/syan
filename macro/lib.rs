@@ -137,15 +137,19 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 ///   type). Deriving `Parse` directly on a natural recursive type can't work — the per-field
 ///   `field_ty: Parse` where-bounds form an infinite cycle (E0275), and backtracking `stream.dup(…)`
 ///   wraps the stream in a fresh `Dup<…>` per descent level (infinite stream-type monomorphization). The
-///   fixed-depth engine bottoms both out, so `Parse` is **depth-limited** (a tree deeper than the engine
-///   depth is silently truncated).
+///   fixed-depth engine bottoms both out at compile time. `Parse` is **unbounded** at runtime, though: the
+///   engine's depth-floor *terminator* is an inhabited newtype whose `Parse` **re-enters the top-level
+///   natural parser through a type-erased fn pointer** (`core::parse::vtable`) instead of erroring, so a
+///   tree deeper than the fixed engine depth parses fully (ceiling = the OS call stack, as for any
+///   recursive-descent parser — a *left-recursive* grammar therefore recurses forever rather than being
+///   silently truncated).
 /// - **`Unparse`/`Spanned`** are derived **directly on the natural type** for a **group-free** cycle
 ///   (`#[ignore_bounds]` on recursive children drops the per-field where-cycle, and an injected
 ///   `#[predicate_unparse/spanned(<cycle leaf union>)]` supplies the leaf bounds a member's body needs to
 ///   unparse its siblings). These are **unbounded** — any tree depth works. For a **group-ful** cycle
 ///   (a self-recursive `#[group]` field, whose `for<'a> Fill<Substruct>: Unparse` HRTB forms a
-///   trait-solver cycle `#[ignore_bounds]` can't break) `Unparse`/`Spanned` stay **engine-delegated**,
-///   hence depth-limited like `Parse`.
+///   trait-solver cycle `#[ignore_bounds]` can't break) `Unparse`/`Spanned` stay **engine-delegated** and
+///   are therefore the one remaining **depth-limited** case.
 ///
 /// # The recursion root (engine-internal)
 ///
@@ -181,9 +185,10 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// `visitor!(<cycle types>)` builds an ordinary acyclic visitor over the natural types — closures,
 /// tuples-of-closures, `visit_mut`, and inheritance (`visitor!(base => New)`) all work, and it may span
 /// acyclic/outer types in one `Visit` trait. `#[subast]` on each cycle type lists its cross-edge
-/// children. `Parse` is delegated through the internal fixed-depth engine; `Unparse`/`Spanned` are direct
-/// (unbounded) for a group-free cycle and engine-delegated (depth-limited) for a group-ful one (see
-/// "Which traits go through the engine" above and CLAUDE.md).
+/// children. `Parse` is delegated through the internal fixed-depth engine but **unbounded** at runtime
+/// (the terminator re-enters via `core::parse::vtable`); `Unparse`/`Spanned` are direct (unbounded) for a
+/// group-free cycle and engine-delegated (depth-limited) for a group-ful one (see "Which traits go through
+/// the engine" above and CLAUDE.md).
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {

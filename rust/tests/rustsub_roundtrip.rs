@@ -44,6 +44,29 @@ fn round_trips_each_construct() {
     }
 }
 
+#[test]
+fn parse_deep_parens_is_unbounded() {
+    // `rustsub` is **group-ful**, so its `Parse` is delegated through the fixed-depth engine — but the
+    // engine's terminator re-enters the top-level parser at runtime, making `Parse` UNBOUNDED. Parsing a
+    // 60-deep `( ( … 1 … ) )` (far past the fixed engine depth) succeeds, and exercises backtracking
+    // through the re-entry boundaries (the `Expr` enum tries `Block`/`Paren`/`Lit`/`Var` via `dup` at each
+    // level). (`Unparse` stays engine-bounded for a group-ful cycle, so this is a parse-depth check.)
+    const N: usize = 60;
+    let mut inner = quote! { 1 };
+    for _ in 0..N {
+        inner = quote! { ( #inner ) };
+    }
+    let e: Expr<Sp> = Parse::parse(inner).expect("deep nested parens parse");
+    // Count the `Paren` nesting on the natural type (uniform at every depth).
+    fn paren_depth(e: &Expr<Sp>) -> usize {
+        match e {
+            ast::Expr::Paren { inner, .. } => 1 + paren_depth(inner),
+            _ => 0,
+        }
+    }
+    assert_eq!(paren_depth(&e), N, "all {N} paren levels parsed (re-entry past the engine depth)");
+}
+
 #[derive(Default)]
 struct Counter {
     stmts: usize,

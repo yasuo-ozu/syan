@@ -1,5 +1,17 @@
 # Plan: remove the depth `limit` of `#[recurse]` via a fn-pointer re-entry vtable
 
+> **STATUS: IMPLEMENTED for `Parse`.** The unbounded `Parse` re-entry shipped — `core::parse::vtable`
+> (the registry, keyed on `type_name` of a `(terminator, atom, stream-error)` `ReKey` marker, value
+> copied-out `usize`), the inhabited terminator + erased re-entry (`emit_terminator_and_reentry`), and the
+> registering delegated `Parse` (`emit_delegated_parse`) in `macro/recurse.rs`. The `Error`-erasure
+> sub-problem (§3) was resolved by erasing to the stream's **own** `Error` (always a valid coercion),
+> threaded via an inner `__run` fn that names `__St::Error` — no `Infallible` pin needed. The hot-path
+> `Mutex` lock (§8.4) is kept (negligible at compile time). Tests: `recurse_problems_test::parse_is_unbounded`
+> (depth 8), `recurse_unparse_spanned::parse_unbounded_depth` (depth 200), `rustsub_roundtrip::parse_deep_parens_is_unbounded`
+> (depth 60, group-ful + backtracking). **Remaining (deferred):** group-ful `Unparse`/`Spanned` are still
+> engine-depth-bounded (the `Fill` HRTB cycle — §7); a left-recursive cycle grammar now loops forever
+> (the OS-stack ceiling of any recursive-descent parser) instead of being silently truncated.
+
 ## Goal
 
 Today `#[recurse]` builds a **fixed-depth engine** (`DEFAULT_RECURSION_DEPTH`; the old `limit = N`

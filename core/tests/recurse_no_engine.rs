@@ -40,10 +40,13 @@ mod engine {
     use core::marker::PhantomData;
     use syan::parse::{Parse, Unparse};
 
+    // `Lit` is tried first: `Nest(Box<Expr>)` consumes no leading token, so a `Nest`-first grammar is
+    // left-recursive — with the now-unbounded `Parse` re-entry that would recurse forever (a standard
+    // recursive-descent limitation the old depth cap silently masked by truncating).
     #[derive(Parse, Unparse)]
     pub enum Expr<S> {
-        Nest(Box<Expr<S>>),
         Lit(::syan::source::proc_macro2::literal::Integer, PhantomData<S>),
+        Nest(Box<Expr<S>>),
     }
 
     // Same name as the generated terminator's *stem* — no clash now that it's `__ExprTerm_<nonce>`.

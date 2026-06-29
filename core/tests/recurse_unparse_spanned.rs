@@ -45,6 +45,25 @@ fn unparse_roundtrip_with_type_param() {
 }
 
 #[test]
+fn parse_unbounded_depth() {
+    use pu::Expr;
+    // `Parse` is delegated through a FIXED-depth engine whose terminator **re-enters the top-level
+    // parser at runtime** (`core::parse::vtable`), so it is **unbounded**: a stream of 200 integers —
+    // far past the fixed engine depth (4) — parses into a 200-deep `Cons` list with no truncation.
+    let mut ts = proc_macro2::TokenStream::new();
+    for _ in 0..200 {
+        ts.extend(quote! { 1 });
+    }
+    let mut e: Expr<()> = Parse::parse(ts).unwrap();
+    let mut depth = 0usize;
+    while let Expr::Cons { tail, .. } = e {
+        depth += 1;
+        e = *tail;
+    }
+    assert_eq!(depth, 200, "all 200 levels parsed (re-entry past the fixed engine depth)");
+}
+
+#[test]
 fn unparse_unbounded_depth() {
     use pu::Expr;
     use syan::source::proc_macro2::literal::Integer;

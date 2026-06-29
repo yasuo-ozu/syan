@@ -4,6 +4,8 @@ pub mod into_parse_stream;
 pub mod parse;
 pub mod parse_stream;
 pub mod unparse;
+#[doc(hidden)]
+pub mod vtable;
 
 mod tuple;
 

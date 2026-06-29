@@ -685,6 +685,162 @@ fn to_nat_name(name: &str, nonce: u64) -> Ident {
 fn from_nat_name(name: &str, nonce: u64) -> Ident {
     Ident::new(&format!("__FromNat_{name}_{nonce}"), Span::call_site())
 }
+/// Per-root erased re-entry parser fn: `__reentry_<root>_<nonce>`.
+fn reentry_name(root: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__reentry_{root}_{nonce}"), Span::call_site())
+}
+/// Per-root re-entry fn-pointer type alias: `__ReFn_<root>_<nonce>`.
+fn reentry_fn_alias(root: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__ReFn_{root}_{nonce}"), Span::call_site())
+}
+
+/// The `Generics` of a (public) cycle item by name.
+fn item_generics(items: &[Item], name: &str) -> Generics {
+    items
+        .iter()
+        .find_map(|it| match it {
+            Item::Enum(e) if e.ident == name => Some(e.generics.clone()),
+            Item::Struct(s) if s.ident == name => Some(s.generics.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// A `Generics`' `where`-clause predicates as token lists (empty if none).
+fn where_preds(generics: &Generics) -> Vec<TokenStream> {
+    generics
+        .where_clause
+        .as_ref()
+        .map(|w| w.predicates.iter().map(|p| quote!(#p)).collect())
+        .unwrap_or_default()
+}
+
+/// Emit, for ONE recursion root, the **unbounded-`Parse`** machinery (replaces the old depth-limit
+/// `Err`/`panic!` terminator): the inhabited terminator newtype `pub struct __XxxTerm(Box<Root<…>>)`, an
+/// erased re-entry helper `__reentry_X` (the top-level natural parse monomorphized at the type-erased
+/// `&mut dyn ParseStream`), and the terminator's `Parse` impl, which — instead of erroring at the depth
+/// floor — **looks up the registered re-entry fn and calls it at runtime**, so parsing recurses to any
+/// depth (ceiling = the OS call stack). The terminator carries NO `Root: Parse` bound (that would re-form
+/// the E0275 where-cycle the engine breaks); the re-entry is resolved dynamically. A group-ful cycle's
+/// engine-derived `Unparse` still bottoms out here (its `__from_nat` panics first, so this is a
+/// belt-and-braces unreachable `panic!`), keeping group-ful `Unparse`/`Spanned` depth-limited. See
+/// `core::parse::vtable` and `docs/recurse-unbounded-plan.md`.
+fn emit_terminator_and_reentry(
+    items: &[Item],
+    root_name: &str,
+    nonce: u64,
+    derives_parse: bool,
+) -> TokenStream {
+    let term = term_name(root_name, nonce);
+    let reentry = reentry_name(root_name, nonce);
+    let refn = reentry_fn_alias(root_name, nonce);
+    let root_id = Ident::new(root_name, Span::call_site());
+    let g = item_generics(items, root_name);
+    let (gen_bf, gen_use) = generic_tokens(&g); // bound-free decl, use
+    let root_decl = param_decls(&g); // bound-preserving decl (e.g. `S: Span`)
+    let rwp = where_preds(&g);
+    let has_gen = !gen_bf.is_empty();
+    let targs: TokenStream = if has_gen { quote!( <#(#gen_use),*> ) } else { quote!() };
+
+    // The inhabited terminator wraps the natural root, so it must carry the root's param bounds +
+    // `where`-clause (it now *names* `Root<S>`, valid only when `S: Span` etc. hold). Its `__to_nat`
+    // (in `gen_natural_extras`) just unwraps the `Box`.
+    let decl = if has_gen {
+        quote! {
+            pub struct #term<#(#root_decl),*>(::std::boxed::Box<#root_id<#(#gen_use),*>>)
+            #(if !rwp.is_empty()) { where #(#rwp),* } ;
+        }
+    } else {
+        quote!( pub struct #term(::std::boxed::Box<#root_id>); )
+    };
+
+    // The re-entry `Parse` machinery is only needed when the cycle actually derives `Parse` (else the
+    // engine derives only `Unparse`/`Spanned`, whose terminator impls are emitted in `gen_natural_extras`
+    // and the inhabited terminator is never constructed). Emitting it unconditionally would leave a dead
+    // `__reentry` fn (whose `Root: Parse` bound also wouldn't hold for a non-`Parse` cycle).
+    let parse_machinery = if derives_parse {
+        quote! {
+            // The fn-ptr type stored in the registry per (terminator, atom, error). `+ '_` carries the
+            // stream's (non-`'static`) borrow lifetime (becomes higher-ranked in the alias).
+            #[allow(non_camel_case_types)]
+            type #refn<#(#gen_bf,)* __Atom, __E> =
+                fn(&mut (dyn ::syan::parse::ParseStream<Atom = __Atom, Error = __E> + '_))
+                    -> ::core::result::Result<#root_id #targs, ::syan::error::ParseError>;
+
+            // The erased re-entry parser: the top-level natural parse, monomorphized at the dyn stream
+            // type (the blanket `&mut dyn ParseStream: IntoParseStream` lets `Root::parse` accept it).
+            #[allow(non_snake_case)]
+            fn #reentry<#(#root_decl,)* __Atom, __E>(
+                __s: &mut (dyn ::syan::parse::ParseStream<Atom = __Atom, Error = __E> + '_),
+            ) -> ::core::result::Result<#root_id #targs, ::syan::error::ParseError>
+            where
+                __Atom: ::syan::span::Spanned + ::core::clone::Clone,
+                #root_id #targs: ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError>,
+                #(#rwp,)*
+            {
+                <#root_id #targs as ::syan::parse::Parse<__Atom>>::parse(__s)
+            }
+
+            // ── terminator `Parse`: re-enter at runtime via the registry (no static `Root: Parse`
+            // bound — that would re-form the E0275 cycle the engine breaks). ──
+            impl<#(#root_decl,)* __Atom> ::syan::parse::Parse<__Atom> for #term #targs
+            where
+                __Atom: ::syan::span::Spanned + ::core::clone::Clone,
+                #(#rwp,)*
+            {
+                type Error = ::syan::error::ParseError;
+                fn parse(
+                    __stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
+                ) -> ::core::result::Result<Self, Self::Error> {
+                    // Inner `__run` names the concrete stream type `__St`, so we can spell `__St::Error`.
+                    fn __run<#(#root_decl,)* __Atom, __St>(
+                        mut __st: __St,
+                    ) -> ::core::result::Result<#term #targs, ::syan::error::ParseError>
+                    where
+                        __Atom: ::syan::span::Spanned + ::core::clone::Clone,
+                        __St: ::syan::parse::ParseStream<Atom = __Atom>,
+                        #(#rwp,)*
+                    {
+                        let __raw = ::syan::parse::vtable::lookup::<
+                            ::syan::parse::vtable::ReKey<#term #targs, __Atom, __St::Error>,
+                        >();
+                        // SAFETY: the (terminator, atom, error) key always stores exactly this concrete
+                        // fn type (the delegated `Parse` registered it at this key before descending).
+                        let __f: #refn<#(#gen_use,)* __Atom, __St::Error> =
+                            unsafe { ::core::mem::transmute::<usize, #refn<#(#gen_use,)* __Atom, __St::Error>>(__raw) };
+                        let __dyns: &mut (dyn ::syan::parse::ParseStream<Atom = __Atom, Error = __St::Error> + '_) =
+                            &mut __st;
+                        ::core::result::Result::Ok(#term(::std::boxed::Box::new(__f(__dyns)?)))
+                    }
+                    __run::<#(#gen_use,)* __Atom, _>(__stream.into_parse_stream())
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
+
+    quote! {
+        #decl
+        #parse_machinery
+
+        // ── terminator `Unparse`: a group-ful engine's derived `Unparse` needs `__Rec: Unparse`; it is
+        // never actually reached (the natural→engine `__from_nat` panics at the depth floor first), so
+        // group-ful `Unparse`/`Spanned` stay depth-limited. ──
+        impl<#(#root_decl,)* __Atom> ::syan::parse::Unparse<__Atom> for #term #targs
+        #(if !rwp.is_empty()) { where #(#rwp),* }
+        {
+            fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                &self,
+                _sink: &mut __E,
+            ) -> ::core::result::Result<(), __E::Error> {
+                ::core::panic!(
+                    "#[recurse]: group-ful Unparse/Spanned past the fixed engine depth (still depth-limited)"
+                )
+            }
+        }
+    }
+}
 
 /// The (whole) types of a cycle type's *leaf* fields — those `conv_expr` doesn't convert. Each must be
 /// `Clone` for the natural→engine `__FromNat` (which clones leaves into the engine). Leaf-ness is
@@ -717,9 +873,10 @@ fn leaf_field_types(item: &Item, child_heads: &HashSet<String>) -> Vec<Type> {
 ///   * `Parse` produces `Self` → build the engine value, then `__ToNat` it to the natural type.
 ///   * `Unparse`/`Spanned` consume `&self` → `__FromNat` the natural value to the engine, then call the
 ///     engine's method.
+// `Parse` is emitted by the dedicated `emit_delegated_parse` (it must register the re-entry parser), so
+// this shared emitter now models only the two `&self`-consuming, natural→engine (`__FromNat`) delegations.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecTrait {
-    Parse,
     Unparse,
     Spanned,
 }
@@ -763,31 +920,12 @@ struct DelegTarget<'a> {
 /// *delegating* counterpart.
 fn emit_delegated_impl(t: RecTrait, tg: &DelegTarget) -> TokenStream {
     let DelegTarget { id, xdecl, xuse, engine_default, to_nat, from_nat, span_param, where_preds } = *tg;
-    // The conversion-trait bound the delegation goes through: `__ToNat` (engine→natural, for `Parse`) or
-    // `__FromNat` (natural→engine, for `Unparse`/`Spanned`).
+    // The conversion-trait bound the delegation goes through: `__FromNat` (natural→engine).
+    let _ = to_nat;
     let conv_bound = match t {
-        RecTrait::Parse => quote!( #to_nat<#(#xuse),*> ),
         RecTrait::Unparse | RecTrait::Spanned => quote!( #from_nat<#(#xuse),*> ),
     };
     let spec = match t {
-        RecTrait::Parse => DelegSpec {
-            impl_extra: quote!(__Atom),
-            trait_ref: quote!( ::syan::parse::Parse<__Atom> ),
-            extra_where: quote!( __Atom: ::syan::span::Spanned + ::core::clone::Clone, ),
-            engine_trait_bound: quote!( ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError> ),
-            assoc_items: quote!( type Error = ::syan::error::ParseError; ),
-            method: quote! {
-                fn parse(
-                    __syan_s: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
-                ) -> ::core::result::Result<Self, Self::Error> {
-                    ::core::result::Result::Ok(
-                        #to_nat::__to_nat(
-                            <#engine_default as ::syan::parse::Parse<__Atom>>::parse(__syan_s)?,
-                        ),
-                    )
-                }
-            },
-        },
         RecTrait::Unparse => DelegSpec {
             impl_extra: quote!(__Atom),
             trait_ref: quote!( ::syan::parse::Unparse<__Atom> ),
@@ -836,6 +974,94 @@ fn emit_delegated_impl(t: RecTrait, tg: &DelegTarget) -> TokenStream {
     }
 }
 
+/// Per-root data the delegated `Parse` needs to register its re-entry parser: the terminator type, the
+/// re-entry fn, the root's natural type name, and the root's name (to skip a self-bound).
+struct RootReentry {
+    term: Ident,
+    reentry: Ident,
+    root_id: Ident,
+    name: String,
+}
+
+/// Emit the delegated `impl Parse for <natural type>` — the **unbounded** variant. Unlike the
+/// `Unparse`/`Spanned` delegations (which go through `emit_delegated_impl`), `Parse` must, before running
+/// the engine, **register** each root's erased re-entry parser into `core::parse::vtable` so the engine's
+/// terminator can re-enter at runtime (giving unbounded depth). An inner `__run` fn names the concrete
+/// stream type `__St` so the registry key/erasure can spell `__St::Error` (the `Parse` trait method's
+/// `impl IntoParseStream` is anonymous). Registering ALL roots (not just self) is required because parsing
+/// *any* cycle type descends through the root terminator(s).
+fn emit_delegated_parse(
+    tg: &DelegTarget,
+    roots: &[RootReentry],
+    root_use: &[TokenStream],
+    root_targs: &TokenStream,
+    self_name: &str,
+) -> TokenStream {
+    let DelegTarget { id, xdecl, xuse, engine_default, to_nat, where_preds, .. } = *tg;
+    let engine_bound = quote! {
+        #engine_default: ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError> + #to_nat<#(#xuse),*>
+    };
+    // `Root: Parse` for every root (needed so the `reentry::<…> as usize` cast type-checks). On the inner
+    // `__run` we list ALL roots; on the impl header we omit `self` (a root's own impl assumes `Self: Parse`).
+    let run_root_bounds: Vec<TokenStream> = roots
+        .iter()
+        .map(|r| {
+            let rid = &r.root_id;
+            quote!( #rid #root_targs: ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError> )
+        })
+        .collect();
+    let impl_root_bounds: Vec<TokenStream> = roots
+        .iter()
+        .filter(|r| r.name != self_name)
+        .map(|r| {
+            let rid = &r.root_id;
+            quote!( #rid #root_targs: ::syan::parse::Parse<__Atom, Error = ::syan::error::ParseError> )
+        })
+        .collect();
+    let registrations: Vec<TokenStream> = roots
+        .iter()
+        .map(|r| {
+            let RootReentry { term, reentry, .. } = r;
+            quote! {
+                ::syan::parse::vtable::register::<
+                    ::syan::parse::vtable::ReKey<#term #root_targs, __Atom, __St::Error>,
+                >(#reentry::<#(#root_use,)* __Atom, __St::Error> as usize);
+            }
+        })
+        .collect();
+    quote! {
+        impl<#(#xdecl,)* __Atom> ::syan::parse::Parse<__Atom> for #id<#(#xuse),*>
+        where
+            __Atom: ::syan::span::Spanned + ::core::clone::Clone,
+            #engine_bound,
+            #(#impl_root_bounds,)*
+            #(#where_preds,)*
+        {
+            type Error = ::syan::error::ParseError;
+            fn parse(
+                __syan_s: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
+            ) -> ::core::result::Result<Self, Self::Error> {
+                fn __run<#(#xdecl,)* __Atom, __St>(
+                    mut __st: __St,
+                ) -> ::core::result::Result<#id<#(#xuse),*>, ::syan::error::ParseError>
+                where
+                    __Atom: ::syan::span::Spanned + ::core::clone::Clone,
+                    __St: ::syan::parse::ParseStream<Atom = __Atom>,
+                    #engine_bound,
+                    #(#run_root_bounds,)*
+                    #(#where_preds,)*
+                {
+                    #(#registrations)*
+                    let __e: #engine_default =
+                        <#engine_default as ::syan::parse::Parse<__Atom>>::parse(&mut __st)?;
+                    ::core::result::Result::Ok(#to_nat::__to_nat(__e))
+                }
+                __run::<#(#xuse,)* __Atom, _>(__syan_s.into_parse_stream())
+            }
+        }
+    }
+}
+
 /// Which cycle types delegate which trait through the engine, computed once per `#[recurse]` expansion. A
 /// type name is in `parse`/`unparse`/`spanned` iff it `#[derive]`s that trait; `gen_natural_extras` emits
 /// the matching delegated impl (+ `__FromNat` bridge for `unparse`/`spanned`) for it.
@@ -878,6 +1104,17 @@ fn gen_natural_extras(
     // in the conversion/delegation impls); `*_use` are the bound-free argument forms.
     let root_decl = param_decls(root_generics);
     let root_use = generic_tokens(root_generics).1;
+    // Per-root re-entry data + the shared `<root params>` arg list, for the unbounded delegated `Parse`.
+    let root_targs: TokenStream = if root_use.is_empty() { quote!() } else { quote!( <#(#root_use),*> ) };
+    let roots: Vec<RootReentry> = roots_sorted
+        .iter()
+        .map(|r| RootReentry {
+            term: term_name(r, nonce),
+            reentry: reentry_name(r, nonce),
+            root_id: Ident::new(r, Span::call_site()),
+            name: r.clone(),
+        })
+        .collect();
     let rec_params: Vec<&Ident> = roots_sorted.iter().map(|r| &rec_for_root[r]).collect();
     let trait_name = |x: &str| to_nat_name(x, nonce);
     let from_trait_name = |x: &str| from_nat_name(x, nonce);
@@ -1006,10 +1243,10 @@ fn gen_natural_extras(
             where_preds: &where_preds,
         };
         // Delegated `Parse` on the natural type — only when the user derived `Parse` (else the engine
-        // has no `Parse` impl to delegate to). Emitted by the unified algorithm (engine→natural via
-        // `__ToNat`).
+        // has no `Parse` impl to delegate to). The unbounded variant: register each root's erased
+        // re-entry parser, run the engine, then `__to_nat`.
         if deleg.parse.contains(&xs) {
-            out.extend(emit_delegated_impl(RecTrait::Parse, &target));
+            out.extend(emit_delegated_parse(&target, &roots, &root_use, &root_targs, &xs));
         }
 
         // Natural→engine bridge (`__FromNat_X`) for a delegated `Unparse`/`Spanned` cycle, plus the
@@ -1047,7 +1284,8 @@ fn gen_natural_extras(
         }
     }
 
-    // Terminator → natural: never reached at runtime (the terminator's `Parse` always errors).
+    // Terminator → natural: the inhabited terminator simply *wraps* the natural root (it was filled by
+    // the re-entry parser), so `__to_nat` unwraps the `Box`.
     for r in roots_sorted {
         let tn = trait_name(r);
         let term = term_name(r, nonce);
@@ -1065,7 +1303,7 @@ fn gen_natural_extras(
             #(if !rwp.is_empty()) { where #(#rwp),* }
             {
                 fn __to_nat(self) -> #root_id<#(#root_use),*> {
-                    ::core::unreachable!("#[recurse]: depth-limit terminator can never be parsed")
+                    *self.0
                 }
             }
         });
@@ -1233,31 +1471,6 @@ fn build_scc(
     } else {
         quote!()
     };
-    // One PhantomData element per lifetime / type root param: lifetime `'a` -> `&'a ()`; type
-    // `T` -> `T`. Const params are *omitted*: only lifetime and type params trigger the unused-
-    // parameter error (E0392), so a const param can stay unused in `PhantomData` — which also frees
-    // us from the `[(); N]` encoding that only works for `const N: usize` (now any const type, e.g.
-    // `const C: char`, is supported).
-    let phantom_elems: Vec<TokenStream> = root_generics
-        .params
-        .iter()
-        .filter_map(|p| match p {
-            GenericParam::Lifetime(l) => {
-                let lt = &l.lifetime;
-                Some(quote!(& #lt ()))
-            }
-            GenericParam::Type(t) => {
-                let i = &t.ident;
-                Some(quote!(#i))
-            }
-            GenericParam::Const(_) => None,
-        })
-        .collect();
-    let term_decl: TokenStream = if has_gen {
-        quote!( pub struct #term_ident < #(#gen_decl),* > ( ::core::marker::PhantomData<( #(#phantom_elems,)* )> ); )
-    } else {
-        quote!( pub struct #term_ident; )
-    };
     for item in items {
         let (id, generics): (&Ident, &Generics) = match item {
             Item::Enum(e)
@@ -1362,6 +1575,10 @@ fn build_scc(
         root_ident_args,
     };
 
+    // Whether the cycle derives `Parse` (all-or-none across a cycle): controls whether the terminator
+    // gets the runtime re-entry `Parse` machinery (vs. only the engine-derived `Unparse`/`Spanned` floor).
+    let derives_parse = scc.iter().any(|n| deleg.parse.contains(n));
+
     let tail = if single_root {
         // ── single root: the original depth machinery ───────────────────────────────────────────
         // Soundness: the depth decrements only at the root's back-edge, so a sub-cycle that never
@@ -1393,28 +1610,12 @@ fn build_scc(
         // emitted — the natural recursive enums/structs own those names. Only the internal depth-chain
         // alias `__ExprDefault` is kept (the delegated `Parse` references `__ExprRec<…, __ExprDefault>`).
         let _ = &default_alias;
+        // The inhabited terminator + erased re-entry give `Parse` unbounded depth (the terminator
+        // re-enters the top-level parser at runtime instead of erroring at the depth floor).
+        let terminator = emit_terminator_and_reentry(items, &root_name, nonce, derives_parse);
 
         quote! {
-            #term_decl
-
-            impl< #(#gen_decl,)* __Atom: ::syan::span::Spanned > ::syan::parse::Parse<__Atom> for #term_ident #term_args {
-                type Error = ::syan::error::ParseError;
-                fn parse(
-                    _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
-                ) -> ::core::result::Result<Self, Self::Error> {
-                    Err(::syan::error::ParseError::new((), "recursion depth limit reached"))
-                }
-            }
-
-            impl< #(#gen_decl,)* __Atom > ::syan::parse::Unparse<__Atom> for #term_ident #term_args {
-                fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
-                    &self,
-                    _sink: &mut __E,
-                ) -> ::core::result::Result<(), __E::Error> {
-                    ::core::panic!("recursion depth limit reached")
-                }
-            }
-
+            #terminator
             type #default_alias<#(#gen_decl),*> = #depth_ty;
         }
     } else {
@@ -1435,6 +1636,7 @@ fn build_scc(
             type_refs,
             mod_ident,
             nonce,
+            derives_parse,
         )
     };
 
@@ -1472,7 +1674,7 @@ fn build_multiroot_tail(
     roots_sorted: &[String],
     internal_names: &HashMap<String, Ident>,
     default_for_root: &HashMap<String, Ident>,
-    root_generics: &Generics,
+    _root_generics: &Generics,
     gen_decl: &[TokenStream],
     gen_use: &[TokenStream],
     root_keys: &HashSet<String>,
@@ -1481,6 +1683,7 @@ fn build_multiroot_tail(
     type_refs: &HashMap<String, HashSet<String>>,
     mod_ident: &Ident,
     nonce: u64,
+    derives_parse: bool,
 ) -> TokenStream {
     // The depth decrements only at a root (self-referential) back-edge, so every cycle in the SCC
     // must pass through a root. If the SCC with all roots removed is still cyclic, the generated
@@ -1523,52 +1726,12 @@ fn build_multiroot_tail(
         .map(|r| (r.clone(), term_name(r, nonce)))
         .collect();
 
-    let has_gen = !gen_decl.is_empty();
-    let phantom_elems: Vec<TokenStream> = root_generics
-        .params
-        .iter()
-        .filter_map(|p| match p {
-            GenericParam::Lifetime(l) => {
-                let lt = &l.lifetime;
-                Some(quote!(& #lt ()))
-            }
-            GenericParam::Type(t) => {
-                let i = &t.ident;
-                Some(quote!(#i))
-            }
-            GenericParam::Const(_) => None,
-        })
-        .collect();
-
-    // One terminator per root (+ its Parse/Unparse impls).
+    // One terminator per root (inhabited newtype + erased re-entry `Parse` + group-ful `Unparse` floor),
+    // giving each root's `Parse` unbounded depth via runtime re-entry.
     let term_items: Vec<TokenStream> = roots_sorted
         .iter()
         .map(|r| {
-            let term = &term_for_root[r];
-            let decl = if has_gen {
-                quote!( pub struct #term < #(#gen_decl),* > ( ::core::marker::PhantomData<( #(#phantom_elems,)* )> ); )
-            } else {
-                quote!( pub struct #term; )
-            };
-            quote! {
-                #decl
-                impl< #(#gen_decl,)* __Atom: ::syan::span::Spanned > ::syan::parse::Parse<__Atom> for #term #term_args {
-                    type Error = ::syan::error::ParseError;
-                    fn parse(
-                        _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
-                    ) -> ::core::result::Result<Self, Self::Error> {
-                        Err(::syan::error::ParseError::new((), "recursion depth limit reached"))
-                    }
-                }
-                impl< #(#gen_decl,)* __Atom > ::syan::parse::Unparse<__Atom> for #term #term_args {
-                    fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
-                        &self,
-                        _sink: &mut __E,
-                    ) -> ::core::result::Result<(), __E::Error> {
-                        ::core::panic!("recursion depth limit reached")
-                    }
-                }
-            }
+            emit_terminator_and_reentry(items, r, nonce, derives_parse)
         })
         .collect();
 

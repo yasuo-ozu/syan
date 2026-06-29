@@ -70,26 +70,35 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   so e.g. a `Stmt` lacking an `Integer` leaf still gets `Integer: Unparse` so it can build an `Expr`
   sibling) — making them **unbounded** (any depth); a **group-ful** cycle keeps them **engine-delegated**
   (the self-recursive `#[group]` field's `for<'a> Fill<Substruct>: Unparse` HRTB forms a trait-solver
-  cycle `#[ignore_bounds]` can't break), hence **depth-limited** like `Parse`; (2) a `pub(crate)`
-  fixed-depth engine `__XxxRec<…, __Rec = __XxxDefault<…>>` family + terminators `__XxxTerm` +
-  `__XxxDefault` depth chains (all **nonce-stamped**, so a user item named e.g. `ExprTerm` never
-  collides), deriving the engine-routed traits, emitted **only when needed** (`scc_needs_engine` =
-  derives `Parse`, or is group-ful and derives `Unparse`/`Spanned`; a cycle deriving none of those, e.g.
-  Ast-only, gets no engine) (`make_engine_item`); (3) per-cycle `__ToNat_X` (engine→natural) and, when
-  the cycle **engine-delegates** `Unparse`/`Spanned` (group-ful only), `__FromNat_X` (natural→engine)
-  conversion traits/impls (depth-generic, terminator arm `unreachable!`/`panic!`) + the **delegated
-  `impl`s** emitted by ONE algorithm (`emit_delegated_impl`, modelling each trait via the `RecTrait`
-  enum): `Parse` parses the engine then `.__to_nat()`s; group-ful `Unparse`/`Spanned` `.__from_nat()`
-  then call the engine's impl (`gen_natural_extras`, `conv_body`/`from_conv_body`). A cycle type's
-  `where`-clause is threaded onto the generated impls (`where_preds_of`); a **group-ful** cycle's `Group`
-  uses a hand-written `Unparse<TokenTree>` emitting a single `TokenTree::Group` and a `Spanned` taking
-  the span from its delimiters (`nested/group.rs`). The natural enum owns the name (no `pub type` alias);
-  user inherent `impl`s land on the natural type verbatim. **Why Parse still needs the engine:** deriving
-  `Parse` directly on a natural recursive type fails two ways — (a) per-field `field_ty: Parse`
-  where-bounds form an infinite cycle (E0275); (b) backtracking `stream.dup(…)` wraps the stream in
-  another `Dup<…>` per descent level → infinite stream-type monomorphization (also E0275). The engine
-  bottoms both out. (`Unparse`/`Spanned` only hit (a) — which `#[ignore_bounds]` defuses — so they can be
-  direct; they have no backtracking.) Cycle types may carry lifetime/type/const params, possibly
+  cycle `#[ignore_bounds]` can't break), hence **depth-limited** (the one residual limitation); (2) a
+  `pub(crate)` fixed-depth engine `__XxxRec<…, __Rec = __XxxDefault<…>>` family + **inhabited**
+  terminators `__XxxTerm` (newtypes wrapping `Box<Root<…>>`) + `__XxxDefault` depth chains (all
+  **nonce-stamped**, so a user item named e.g. `ExprTerm` never collides), deriving the engine-routed
+  traits, emitted **only when needed** (`scc_needs_engine` = derives `Parse`, or is group-ful and derives
+  `Unparse`/`Spanned`; a cycle deriving none of those, e.g. Ast-only, gets no engine) (`make_engine_item`,
+  `emit_terminator_and_reentry`); (3) per-cycle `__ToNat_X` (engine→natural; the terminator's just unwraps
+  its `Box`) and, when the cycle **engine-delegates** `Unparse`/`Spanned` (group-ful only), `__FromNat_X`
+  (natural→engine) conversion traits/impls (depth-generic, `__FromNat`'s terminator arm `panic!`s) + the
+  **delegated `impl`s**: group-ful `Unparse`/`Spanned` via ONE algorithm (`emit_delegated_impl`, the
+  `RecTrait` enum) `.__from_nat()` then call the engine's impl, while `Parse` (`emit_delegated_parse`)
+  **registers** each root's erased re-entry parser into `core::parse::vtable`, runs the engine, then
+  `.__to_nat()`s (`gen_natural_extras`). A cycle type's `where`-clause is threaded onto the generated
+  impls (`where_preds_of`); a **group-ful** cycle's `Group` uses a hand-written `Unparse<TokenTree>`
+  emitting a single `TokenTree::Group` and a `Spanned` taking the span from its delimiters
+  (`nested/group.rs`). The natural enum owns the name (no `pub type` alias); user inherent `impl`s land on
+  the natural type verbatim. **`Parse` is UNBOUNDED** despite the fixed engine depth: the engine's
+  depth-floor terminator is inhabited and its `Parse` **re-enters the top-level natural parser at runtime
+  through a type-erased `&mut dyn ParseStream` fn pointer** (keyed per `(terminator, atom, stream-error)`
+  in `core::parse::vtable`; the delegated `Parse` registers it before descending) instead of erroring — so
+  a tree deeper than the engine depth parses fully (ceiling = the OS call stack; a *left-recursive* grammar
+  therefore loops forever rather than being silently truncated as the old depth cap did). **Why Parse
+  still needs the engine:** deriving `Parse` directly on a natural recursive type fails two ways — (a)
+  per-field `field_ty: Parse` where-bounds form an infinite cycle (E0275); (b) backtracking `stream.dup(…)`
+  wraps the stream in another `Dup<…>` per descent level → infinite stream-type monomorphization (also
+  E0275). The fixed engine bottoms both out at compile time, and the erased re-entry restarts at one fixed
+  `Dup<&mut dyn …>` layer that never grows. (`Unparse`/`Spanned` only hit (a) — which `#[ignore_bounds]`
+  defuses — so they can be direct; they have no backtracking.) Cycle types may carry
+  lifetime/type/const params, possibly
   **heterogeneous** across the cycle; a back-edge to a root repeats the root's params **verbatim** (a
   non-identity arg like `Expr<Vec<S>>` is rejected — an engine constraint, kept). **Independent cycles**
   are partitioned into SCCs (`find_cycle_sccs`, Tarjan), each with its own natural+engine+conversions
@@ -100,8 +109,10 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `abort!`s also for a missing/non-identity root param and a non-acyclic rootless subcycle; passing any
   argument to `#[recurse]` is a clean compile error (`ui/recurse_takes_no_args.rs`). Tests:
   `recurse_test.rs`, `recurse_multi_cycle.rs`, `recurse_multiroot.rs`, `recurse_fixes.rs`,
-  `recurse_problems_test.rs`, `recurse_audit_test.rs`, `recurse_unparse_spanned.rs`, `recurse_group_ful.rs`,
-  `ignore_bounds.rs` + `ui/recurse_*.rs`, `ui/problem*.rs`.
+  `recurse_problems_test.rs` (`parse_is_unbounded`), `recurse_audit_test.rs`, `recurse_unparse_spanned.rs`
+  (`parse_unbounded_depth`), `recurse_group_ful.rs`, `recurse_no_engine.rs`, `ignore_bounds.rs` +
+  `ui/recurse_*.rs`, `ui/problem*.rs`; unbounded group-ful `Parse` w/ backtracking: `rust/tests/rustsub_roundtrip.rs`
+  (`parse_deep_parens_is_unbounded`).
 - **`visitor!(…)` over a `#[recurse]` cycle** is now an **ordinary acyclic visitor** — the public types
   are natural (one type at all depths) and `Visit` methods carry no `field_ty: Visit` bounds, so there
   is no E0275 and no depth-generic machinery. `visit_xxx(&mut self, &Expr<S>)` like any acyclic type.
@@ -126,14 +137,19 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
 
 ## Known gaps / limitations
 
-- **Group-ful `Unparse`/`Spanned` are depth-limited** (the one residual `#[recurse]` limitation). A
-  **group-free** cycle derives `Unparse`/`Spanned` directly on the natural type (via `#[ignore_bounds]` +
-  the injected leaf-bound `#[predicate_*]` union) and is therefore **unbounded** — any tree depth works
-  (`recurse_unparse_spanned.rs`: single-type depth-5000, multi-type depth-2000). A **group-ful** cycle
-  (a self-recursive `#[group]` field, whose `for<'a> Fill<Substruct>: Unparse` HRTB forms a trait-solver
-  cycle `#[ignore_bounds]` can't break) must instead **engine-delegate** them, so — like `Parse` — a tree
-  deeper than the fixed engine depth panics at the terminator (`recurse_group_ful.rs`, `rustsub`). Lifting
-  this would need a way to break the group HRTB cycle (or the planned unbounded-`Parse` re-entry).
+- **Group-ful `Unparse`/`Spanned` are depth-limited** — the one residual `#[recurse]` limitation now that
+  `Parse` is unbounded. `Parse` (always) and a **group-free** cycle's `Unparse`/`Spanned` are unbounded:
+  group-free `Unparse`/`Spanned` derive directly on the natural type (via `#[ignore_bounds]` + the injected
+  leaf-bound `#[predicate_*]` union — `recurse_unparse_spanned.rs`: single-type depth-5000, multi-type
+  depth-2000), and `Parse` re-enters the top-level parser at the engine terminator via a type-erased fn
+  pointer (`core::parse::vtable`; `recurse_problems_test.rs` depth-8, `recurse_unparse_spanned.rs`
+  depth-200, `rustsub` depth-60 group-ful w/ backtracking). Only a **group-ful** cycle's `Unparse`/`Spanned`
+  stay engine-bounded (the self-recursive `#[group]` field's `for<'a> Fill<Substruct>: Unparse` HRTB forms
+  a trait-solver cycle neither `#[ignore_bounds]` nor the value-level re-entry can break), so a tree deeper
+  than the fixed engine depth panics at the terminator (`recurse_group_ful.rs`, `rustsub`). Lifting it would
+  need a way to break the group HRTB cycle. (Caveat of the unbounded `Parse`: a **left-recursive** cycle
+  grammar now recurses forever — the OS-call-stack ceiling of any recursive-descent parser — instead of
+  being silently truncated by the old depth cap.)
 - **Two visited types sharing a last segment** (`visitor!(a::Foo, b::Foo)`): all generated names key
   off the last segment, so they collide. Now a clear build error (`visitor_diagnostics.rs`); genuine
   coexistence would need full-path-disambiguated names (the alias is one keyword — won't fix).
@@ -176,22 +192,27 @@ metadata ping-pong only supplies each type's structure. Code: `macro/ast.rs` + `
    removed (engine-routed) derive, the field helper attrs (`#[group]`/`#[ignore_bounds]`/…) are stripped
    from the natural type (they live on the engine). `make_natural_item`.
 2. **Engine types** (`pub(crate)`) — the fixed-depth `__XxxRec<…, __Rec = __XxxDefault<…>>` family
-   (a back-edge to a root becomes the depth param `__Rec`, one per root) + terminators `__XxxTerm` +
-   `__XxxDefault` depth chains, deriving the engine-routed traits (`Parse` always; `Unparse`/`Spanned`
-   only when group-ful). Each depth level is a *distinct* finite type, which bottoms out **both** Parse
-   E0275 cycles (the per-field `field_ty: Parse` where-cycle **and** the `stream.dup(…)` `Dup<…>`
-   stream-monomorphization cycle) and lets group-ful `Unparse`/`Spanned` derive normally. Emitted only
-   when `scc_needs_engine`. `make_engine_item`.
+   (a back-edge to a root becomes the depth param `__Rec`, one per root) + **inhabited** terminators
+   `__XxxTerm` (newtypes wrapping `Box<Root<…>>`, carrying the root's param bounds) + `__XxxDefault` depth
+   chains, deriving the engine-routed traits (`Parse` always; `Unparse`/`Spanned` only when group-ful).
+   Each depth level is a *distinct* finite type, which bottoms out **both** Parse E0275 cycles (the
+   per-field `field_ty: Parse` where-cycle **and** the `stream.dup(…)` `Dup<…>` stream-monomorphization
+   cycle) and lets group-ful `Unparse`/`Spanned` derive normally. The terminator's `Parse` **re-enters**
+   the top-level parser at runtime through a type-erased `&mut dyn ParseStream` fn pointer
+   (`emit_terminator_and_reentry` + a per-root `__reentry_X` helper), so `Parse` is **unbounded** despite
+   the fixed type depth; its `Unparse` (only reached by a group-ful engine, and even then `__from_nat`
+   panics first) is a belt-and-braces `panic!`. Emitted only when `scc_needs_engine`. `make_engine_item`.
 3. **Conversion + impls** — per cycle type: a private depth-generic `__ToNat_X` (engine→natural; always,
-   for `Parse`) and, when the cycle **engine-delegates** `Unparse`/`Spanned` (group-ful), `__FromNat_X`
-   (natural→engine) trait/impl (a back-edge collapses to `__Rec`, a cross-edge bounds the sibling node,
-   containers map element-wise; terminator arm is `unreachable!`/`panic!`). The **delegated** impls are
-   emitted by one algorithm (`emit_delegated_impl`, per-trait shape from the `RecTrait` model): `Parse`
-   parses the engine then `.__to_nat()`s; group-ful `Unparse`/`Spanned` `.__from_nat()` (cloning leaves)
-   then call the engine's impl. For a **group-free** cycle there is *no* `__FromNat`/delegated
-   `Unparse`/`Spanned` — those are derived **directly** on the natural type (step 1), so they are
-   **unbounded** (any depth); only the group-ful delegated path deep-copies per call and is depth-limited
-   like `Parse`. `gen_natural_extras`, `conv_body`/`conv_expr` + `from_conv_body`/`from_conv_expr`.
+   for `Parse`; the terminator's `__to_nat` just unwraps its `Box`) and, when the cycle **engine-delegates**
+   `Unparse`/`Spanned` (group-ful), `__FromNat_X` (natural→engine) trait/impl (a back-edge collapses to
+   `__Rec`, a cross-edge bounds the sibling node, containers map element-wise; `__FromNat`'s terminator arm
+   `panic!`s — the group-ful depth floor). **`Parse`** (`emit_delegated_parse`) **registers** each root's
+   `__reentry_X` (the top-level parse monomorphized at the erased stream, keyed in `core::parse::vtable`)
+   into the registry, then parses the engine and `.__to_nat()`s; group-ful **`Unparse`/`Spanned`**
+   (`emit_delegated_impl`, per-trait shape from the `RecTrait` model — now just these two) `.__from_nat()`
+   (cloning leaves) then call the engine's impl. For a **group-free** cycle there is *no* `__FromNat`/
+   delegated `Unparse`/`Spanned` — those are derived **directly** on the natural type (step 1), so they are
+   **unbounded** (any depth). `gen_natural_extras`, `conv_body`/`conv_expr` + `from_conv_body`/`from_conv_expr`.
 
 The natural enum owns the name (no `pub type` alias); user inherent `impl`s land on the natural type
 verbatim. A **pure by-value cycle** (no heap indirection on any edge) is
@@ -206,11 +227,11 @@ visitor metadata. A
 `visitor!(<cycle types>)` builds a **non-depth-generic** acyclic visitor (`generate_module`/`gen_side`):
 `visit_xxx(&mut self, &Expr<S>)`, dispatch to listed cross-edges via `this.visit_<head>`, drill an
 unlisted cross-edge inline, descend containers/tuples — closures and `visit_mut` included. The engine,
-conversions, and terminators are **fully internal** (`pub(crate)`, in no metadata) — used to back the
-delegated `Parse` impl (and group-ful `Unparse`/`Spanned`), which the defining crate emits (so a
-downstream cross-crate visitor over the natural type has no orphan issue and parses via the upstream
-`Expr<S>: Parse`). A group-free cycle's direct `Unparse`/`Spanned` impls also live on the natural type in
-the defining crate.
+conversions, terminators, and the `__reentry_X` helpers are **fully internal** (`pub(crate)`, in no
+metadata; the runtime re-entry registry is `core::parse::vtable`) — used to back the delegated `Parse`
+impl (and group-ful `Unparse`/`Spanned`), which the defining crate emits (so a downstream cross-crate
+visitor over the natural type has no orphan issue and parses via the upstream `Expr<S>: Parse`). A
+group-free cycle's direct `Unparse`/`Spanned` impls also live on the natural type in the defining crate.
 
 # TODOs
 
