@@ -6,16 +6,16 @@
 //! limitations). The *supported* container/tuple traversals live in `visitor_recurse_containers.rs`;
 //! support for lifetime / type / const generic params on cycle types lives in `recurse_generics.rs`.
 //!
-//! Each `tests/ui/recurse_*.rs` file carries a header explaining the case. With one exception
-//! (`limit = 0`, still a raw panic) these are deliberate `abort!`s with actionable messages.
+//! Each `tests/ui/recurse_*.rs` file carries a header explaining the case; these are deliberate
+//! `abort!`s / compile errors with actionable messages.
 
 #[test]
 fn recurse_audit_compile_fail() {
     let t = trybuild::TestCases::new();
 
-    // 1. `#[recurse(limit = 0)]` underflows `recursion_depth - 1` → macro panic.
-    //    (Left as a panic on purpose; the smallest sound limit is 1.)
-    t.compile_fail("tests/ui/recurse_limit_zero.rs");
+    // 1. `#[recurse]` takes no arguments — the former `limit = N` was removed. Passing any argument is a
+    //    clean compile error (not a proc-macro panic).
+    t.compile_fail("tests/ui/recurse_takes_no_args.rs");
 
     // (2. nested containers in a `#[recurse]` cycle are now traversed — see
     //  `visitor_nested_containers.rs`.)

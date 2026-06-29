@@ -30,8 +30,10 @@ fn random() -> u64 {
 ///   (`Expr: Parse ⇐ … ⇐ Expr: Parse`, E0275); with the bound dropped the recursion is discharged
 ///   coinductively via the sibling type's own impl. (Caveat for `Parse` specifically: a
 ///   *generic* field type with no other impl in scope, e.g. a bare `T`, will then fail to parse — the
-///   bound was the only thing satisfying it.) Note `#[recurse]` does **not** use this — it delegates
-///   `Parse`/`Unparse`/`Spanned` to its internal depth-limited engine instead.
+///   bound was the only thing satisfying it.) Note `#[recurse]` delegates `Parse` to its internal
+///   fixed-depth engine rather than using this (the engine also bottoms out a second `Parse`-only E0275,
+///   the `stream.dup(…)` stream-monomorphization cycle); it *does* use `#[ignore_bounds]` for a
+///   **group-free** cycle's direct `Unparse`/`Spanned`.
 /// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
 #[proc_macro_error]
 #[proc_macro_derive(Parse, attributes(group, syan, joint, alone, ignore_bounds,))]
@@ -60,11 +62,14 @@ pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
 ///   The intended use is a **naturally-recursive child**, where the per-field bound would form an
 ///   infinite `where`-clause cycle (E0275); with it dropped, the recursive `.unparse()` resolves
 ///   coinductively against the sibling type's own (leaf-only-bounded) impl. This makes a hand-written
-///   natural recursive `Unparse` compile (arbitrary depth — `Unparse` has no backtracking). Note
-///   `#[recurse]` does **not** use this — it delegates `Unparse` to its internal engine instead.
+///   natural recursive `Unparse` compile (arbitrary depth — `Unparse` has no backtracking). This is
+///   exactly how `#[recurse]` derives `Unparse` directly on a **group-free** cycle's natural type
+///   (pairing it with an injected `#[predicate_unparse(<leaf union>)]`); a **group-ful** cycle can't use
+///   it (the `#[group]` `Fill: Unparse` HRTB cycle survives `#[ignore_bounds]`) so it delegates `Unparse`
+///   to the engine instead.
 /// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
 #[proc_macro_error]
-#[proc_macro_derive(Unparse, attributes(group, syan, joint, alone, ignore_bounds,))]
+#[proc_macro_derive(Unparse, attributes(group, syan, joint, alone, ignore_bounds, predicate_unparse,))]
 pub fn unparse(input: TokenStream1) -> TokenStream1 {
     let input: DeriveInput = parse_macro_input!(input);
     let syan = input.attrs.get_syan();
@@ -73,6 +78,7 @@ pub fn unparse(input: TokenStream1) -> TokenStream1 {
         &input.ident,
         &input.generics,
         &input.data,
+        &input.attrs,
         random(),
         &syan,
         &trait_path,
@@ -98,10 +104,12 @@ pub fn ast_derive(input: TokenStream1) -> TokenStream1 {
 ///   so the field cannot be folded without it.) The intended use is a **naturally-recursive child**,
 ///   whose per-field bound would otherwise form an infinite `where`-clause cycle (E0275); dropping it
 ///   lets a hand-written natural recursive `Spanned` compile (the resulting span reflects the non-ignored
-///   leaves). Note `#[recurse]` does **not** use this — it delegates `Spanned` to its internal engine.
+///   leaves). This is how `#[recurse]` derives `Spanned` directly on a **group-free** cycle's natural
+///   type (with an injected `#[predicate_spanned(<leaf union>)]`); a **group-ful** cycle delegates
+///   `Spanned` to its internal engine instead.
 /// - `#[default]` — also excludes a field from the span fold.
 #[proc_macro_error]
-#[proc_macro_derive(Spanned, attributes(group, syan, joint, alone, ignore_bounds,))]
+#[proc_macro_derive(Spanned, attributes(group, syan, joint, alone, ignore_bounds, predicate_spanned,))]
 pub fn spanned(input: TokenStream1) -> TokenStream1 {
     let input: DeriveInput = parse_macro_input!(input);
     let syan = input.attrs.get_syan();
@@ -117,11 +125,27 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 }
 
 /// Turn a module of mutually-recursive AST types (a *cycle*) into **natural recursive public types**
-/// plus an internal depth-limited **engine** used only to satisfy `Parse`; `limit = N` sets the engine
-/// depth. The user's cycle types stay genuine recursive enums/structs (one type at all depths — the
-/// public API); `Parse` is *delegated* (parse the engine, convert back to the natural type), while
-/// `#[derive(Ast)]`/`Debug`/… land on the natural type directly. A `syan::visit::visitor!(<cycle
-/// types>)` over them is an **ordinary acyclic visitor** (closures included).
+/// plus an internal fixed-depth **engine** used to satisfy `Parse`. Takes **no arguments** (the former
+/// `limit = N` was removed — the engine depth is a fixed internal constant). The user's cycle types stay
+/// genuine recursive enums/structs (one type at all depths — the public API); `#[derive(Ast)]`/`Debug`/…
+/// land on the natural type directly. A `syan::visit::visitor!(<cycle types>)` over them is an **ordinary
+/// acyclic visitor** (closures included).
+///
+/// # Which traits go through the engine
+///
+/// - **`Parse`** is *always* delegated through the engine (parse the engine, convert back to the natural
+///   type). Deriving `Parse` directly on a natural recursive type can't work — the per-field
+///   `field_ty: Parse` where-bounds form an infinite cycle (E0275), and backtracking `stream.dup(…)`
+///   wraps the stream in a fresh `Dup<…>` per descent level (infinite stream-type monomorphization). The
+///   fixed-depth engine bottoms both out, so `Parse` is **depth-limited** (a tree deeper than the engine
+///   depth is silently truncated).
+/// - **`Unparse`/`Spanned`** are derived **directly on the natural type** for a **group-free** cycle
+///   (`#[ignore_bounds]` on recursive children drops the per-field where-cycle, and an injected
+///   `#[predicate_unparse/spanned(<cycle leaf union>)]` supplies the leaf bounds a member's body needs to
+///   unparse its siblings). These are **unbounded** — any tree depth works. For a **group-ful** cycle
+///   (a self-recursive `#[group]` field, whose `for<'a> Fill<Substruct>: Unparse` HRTB forms a
+///   trait-solver cycle `#[ignore_bounds]` can't break) `Unparse`/`Spanned` stay **engine-delegated**,
+///   hence depth-limited like `Parse`.
 ///
 /// # The recursion root (engine-internal)
 ///
@@ -157,9 +181,9 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// `visitor!(<cycle types>)` builds an ordinary acyclic visitor over the natural types — closures,
 /// tuples-of-closures, `visit_mut`, and inheritance (`visitor!(base => New)`) all work, and it may span
 /// acyclic/outer types in one `Visit` trait. `#[subast]` on each cycle type lists its cross-edge
-/// children. `Parse`/`Unparse`/`Spanned` are **all** delegated through the internal depth-limited engine
-/// (one uniform path for every cycle), so the natural type's `Unparse`/`Spanned` are depth-limited like
-/// `Parse` — a tree deeper than `limit` panics at the terminator (see CLAUDE.md).
+/// children. `Parse` is delegated through the internal fixed-depth engine; `Unparse`/`Spanned` are direct
+/// (unbounded) for a group-free cycle and engine-delegated (depth-limited) for a group-ful one (see
+/// "Which traits go through the engine" above and CLAUDE.md).
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {

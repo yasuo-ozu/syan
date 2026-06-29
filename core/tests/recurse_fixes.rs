@@ -1,8 +1,10 @@
 //! Regression tests for two `#[recurse]` audit fixes:
-//!  - #6: `#[recurse(limit = 1)]` on a *generic* cycle type used to fail E0091 (the depth-default
-//!    alias bottomed out at the bare non-generic terminator, leaving the param unused). The
-//!    terminator is now generic over the root's params (carrying a `PhantomData`) when the cycle is
-//!    generic, so the alias binds them. The non-generic path is unchanged.
+//!  - #6: a *generic* cycle type used to fail E0091 (the depth-default alias bottomed out at the bare
+//!    non-generic terminator, leaving the param unused). The terminator is now generic over the root's
+//!    params (carrying a `PhantomData`) when the cycle is generic, so the alias binds them. The
+//!    non-generic path is unchanged. (Originally surfaced at `limit = 1`, where the terminator is the
+//!    depth-default directly; `#[recurse]` no longer takes a `limit`, so this just pins the generic
+//!    terminator compiles at the fixed engine depth.)
 //!  - #7: a foreign field whose LAST path segment equals a cycle type name (`super::other::Stmt`)
 //!    used to be misdispatched as a cycle reference (E0308). Cycle membership now keys on the FIRST
 //!    path segment (via `Peeled::head_lead`), so it is correctly treated as a leaf.
@@ -14,8 +16,8 @@
 
 use syan::parse::recurse;
 
-// ── #6: generic cycle at limit = 1 (the previously-failing case) ─────────────────────────────────
-#[recurse(limit = 1)]
+// ── #6: generic cycle (the previously-failing case, originally at limit = 1) ──────────────────────
+#[recurse]
 mod generic_limit1 {
     use syan::nested::group::GroupBrace;
     use syan::parse::{Parse, Unparse};
@@ -32,8 +34,8 @@ mod generic_limit1 {
     }
 }
 
-// Non-generic cycle at limit = 1: the terminator stays the unit struct; must still compile.
-#[recurse(limit = 1)]
+// Non-generic cycle: the terminator stays the unit struct; must still compile.
+#[recurse]
 mod nongeneric_limit1 {
     use syan::parse::{Parse, Unparse};
     use syan::source::proc_macro2::literal::Integer;

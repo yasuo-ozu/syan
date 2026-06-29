@@ -63,18 +63,19 @@ impl Unparse<proc_macro2::TokenTree> for Ident {
     }
 }
 
-/// The recursive `Stmt`/`Expr` cycle. `#[recurse]` turns it into natural recursive types whose
-/// `Parse`/`Unparse` are delegated through a depth-limited engine.
+/// The recursive `Stmt`/`Expr` cycle. `#[recurse]` turns it into natural recursive types. This cycle is
+/// **group-ful** (the recursive children sit in `#[group]` fields), so its `Parse` *and* `Unparse` are
+/// delegated through the internal depth-limited engine.
 //
-// The engine's depth-limited `Parse` truncates nesting past `limit`, so the limit caps how deeply
-// blocks/parens may nest in a round-trippable snippet. A *flat* program (many sibling statements) stays
-// shallow regardless of statement count, so `limit` need not be huge. (Too large would overflow rustc's
-// trait-solver recursion limit on the depth-`limit` engine type.)
+// The engine's depth-limited `Parse`/`Unparse` truncate/panic on nesting past the fixed engine depth
+// (`#[recurse]` no longer takes a `limit` — see `DEFAULT_RECURSION_DEPTH` in `macro/recurse.rs`), so that
+// depth caps how deeply blocks/parens may nest in a round-trippable snippet. A *flat* program (many
+// sibling statements) stays shallow regardless of statement count.
 //
 // The grammar types use `#[macro_derive]` (from `type-macro-derive-tricks`) rather than `#[derive]`
 // because their fields contain `Token![…]` *type-position macros*, which rustc forbids under a plain
 // `#[derive]`. `#[recurse]` recognizes `#[macro_derive]` and routes the engine derives through it too.
-#[syan::parse::recurse(limit = 12)]
+#[syan::parse::recurse]
 pub mod ast {
     use super::Ident;
     use syan::nested::group::{GroupBrace, GroupParen};

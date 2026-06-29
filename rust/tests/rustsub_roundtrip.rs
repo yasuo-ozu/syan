@@ -1,8 +1,5 @@
 //! Parse a non-trivial snippet of the `rustsub` Rust subset, unparse it, and check the `to_string()`
 //! round-trips; plus a `visitor!` that walks the parsed tree.
-// The depth-`limit` engine builds a `limit`-deep nested type; instantiating its `Parse` needs a raised
-// trait-solver recursion limit.
-#![recursion_limit = "256"]
 use syan::parse::{Parse, Unparse};
 use syan_rust::rustsub::ast::{self, Expr};
 use syan_rust::rustsub::visit;

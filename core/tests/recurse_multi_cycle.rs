@@ -15,7 +15,7 @@ struct Counter(usize);
 // ── two independent cycles, plain #[recurse] ─────────────────────────────────────
 // Expr and Type are disjoint self-referential cycles. Each must regenerate against its OWN depth
 // default; if they collapsed into one __Rec this would mistype.
-#[recurse(limit = 3)]
+#[recurse]
 mod plain {
     use core::marker::PhantomData;
     use syan::visit::Ast;

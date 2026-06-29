@@ -145,6 +145,28 @@ fn append_user_where_predicates(
     }
 }
 
+/// Collect the types listed in every `#[<name>(Ty0, Ty1, …)]` item attribute (`predicate_unparse` /
+/// `predicate_spanned`). The caller turns each `Ty` into a trait bound (`Ty: Unparse<atom>` /
+/// `Ty: Spanned<Span = span>`) and adds it to the impl. `#[recurse]` uses this to inject the cross-cycle
+/// *union* of leaf bounds onto a member's natural `Unparse`/`Spanned` impl, so the body's calls into
+/// sibling cycle types resolve — the per-field bounds for the recursive children are suppressed by
+/// `#[ignore_bounds]`, which is what avoids the E0275 where-cycle.
+fn predicate_tys(attrs: &[Attribute], name: &str) -> Vec<Type> {
+    let mut out = Vec::new();
+    for a in attrs {
+        if a.path().is_ident(name) {
+            if let Meta::List(ml) = &a.meta {
+                if let Ok(tys) =
+                    ml.parse_args_with(Punctuated::<Type, Token![,]>::parse_terminated)
+                {
+                    out.extend(tys);
+                }
+            }
+        }
+    }
+    out
+}
+
 impl FindAttribute for Field {
     fn find_attribute<I: ?Sized>(&self, name: &I) -> Option<&Attribute>
     where
@@ -467,6 +489,7 @@ pub(crate) trait Adt {
         syan: &Path,
         generics: &Generics,
         ident: &Ident,
+        attrs: &[Attribute],
         nonce: u64,
         trait_path: &Path,
     ) -> TokenStream {
@@ -577,6 +600,7 @@ pub(crate) trait Adt {
                     syan,
                     &substruct.generics,
                     &substruct.ident,
+                    &[],
                     nonce,
                     &trait_path_owned,
                 )
@@ -584,6 +608,10 @@ pub(crate) trait Adt {
             .collect();
         let substructs_for_emit: Vec<ItemStruct> =
             substructs.iter().map(strip_derive_helper_attrs).collect();
+        // `#[predicate_unparse(Ty, …)]` → `Ty: Unparse<__SyanMacro_Atom>` (the cross-cycle leaf union).
+        for ty in predicate_tys(attrs, "predicate_unparse") {
+            where_predicates.push(parse_quote!(#ty: #trait_fullpath));
+        }
         // Thread the user's where-clause predicates into the generated impl (merged with the
         // synthesized bounds); otherwise the Self type fails WF with "required by a bound in <T>".
         append_user_where_predicates(&mut where_predicates, generics);
@@ -610,6 +638,7 @@ pub(crate) trait Adt {
         syan: &Path,
         generics: &Generics,
         ident: &Ident,
+        attrs: &[Attribute],
         trait_path: &Path,
     ) -> TokenStream {
         let trait_fullpath: Path = trait_path.clone();
@@ -695,6 +724,10 @@ pub(crate) trait Adt {
             ret
         });
 
+        // `#[predicate_spanned(Ty, …)]` → `Ty: Spanned<Span = __Syan_Span>` (the cross-cycle leaf union).
+        for ty in predicate_tys(attrs, "predicate_spanned") {
+            where_predicates.push(parse_quote!(#ty: #syan::span::Spanned<Span = #tp_span>));
+        }
         // Thread the user's where-clause predicates into the generated impl (merged with the
         // synthesized bounds); otherwise the Self type fails WF with "required by a bound in <T>".
         append_user_where_predicates(&mut where_predicates, generics);
@@ -875,20 +908,22 @@ pub fn parse(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn unparse(
     ident: &Ident,
     generics: &Generics,
     input: &Data,
+    attrs: &[Attribute],
     nonce: u64,
     syan: &Path,
     trait_path: &Path,
 ) -> TokenStream {
     match &input {
         Data::Struct(data_struct) => {
-            data_struct.extract_unparse(syan, generics, ident, nonce, trait_path)
+            data_struct.extract_unparse(syan, generics, ident, attrs, nonce, trait_path)
         }
         Data::Enum(data_enum) => {
-            data_enum.extract_unparse(syan, generics, ident, nonce, trait_path)
+            data_enum.extract_unparse(syan, generics, ident, attrs, nonce, trait_path)
         }
         _ => abort!(ident, "Bad data"),
     }
@@ -898,10 +933,10 @@ pub fn spanned(input: &DeriveInput, trait_path: Path) -> TokenStream {
     let syan = input.attrs.get_syan();
     match &input.data {
         Data::Struct(data_struct) => {
-            data_struct.extract_spanned(&syan, &input.generics, &input.ident, &trait_path)
+            data_struct.extract_spanned(&syan, &input.generics, &input.ident, &input.attrs, &trait_path)
         }
         Data::Enum(data_enum) => {
-            data_enum.extract_spanned(&syan, &input.generics, &input.ident, &trait_path)
+            data_enum.extract_spanned(&syan, &input.generics, &input.ident, &input.attrs, &trait_path)
         }
         _ => abort!(input, "Bad data"),
     }

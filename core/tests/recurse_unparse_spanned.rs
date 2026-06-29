@@ -1,11 +1,12 @@
 //! `#[derive(Unparse)]` / `#[derive(Spanned)]` on a `#[recurse]` cycle that carries **type parameters**.
-//! Answer to "does it still work?": **yes** — and now via ONE uniform mechanism. `#[recurse]` routes
-//! `Parse`/`Unparse`/`Spanned` to the depth-limited engine and re-supplies them on the natural public
-//! type by **delegation** (`emit_delegated_impl`): `Parse` parses the engine then `__ToNat`-converts;
-//! `Unparse`/`Spanned` `__FromNat`-convert the natural value to the engine then call the engine's impl.
-//! This holds for every cycle — single/multi-type, group-free/group-ful — so the code path is the same.
-//! Consequence: delegated `Unparse`/`Spanned` are **depth-limited** like `Parse` (a tree deeper than
-//! `limit` panics at the terminator). See CLAUDE.md.
+//! `Unparse`/`Spanned` are derived **directly on the natural type** (not delegated through the engine):
+//! `#[ignore_bounds]` on recursive-child fields drops the per-field bound (no E0275 where-cycle), and an
+//! injected `#[predicate_unparse/spanned(<cycle leaf union>)]` supplies the bounds a member's body needs
+//! to call its siblings'. So they are **unbounded** (any depth) — only `Parse` still goes through the
+//! fixed-depth engine. This holds for every **group-free** cycle, single or multi-type (a multi-type
+//! cycle works because the injected predicate is the *union* of all members' leaf-field bounds, so each
+//! member can unparse its siblings). A **group-ful** cycle keeps `Unparse`/`Spanned` engine-delegated
+//! (bounded) — see `recurse_group_ful.rs`. All cycles in this file are group-free. See CLAUDE.md.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -20,7 +21,7 @@ mod pu {
     use syan::source::proc_macro2::literal::Integer;
 
     // A list `1 2 3` → Cons(1, Cons(2, Cons(3, Nil))). Group-free, self-recursive, all-`Integer` leaves
-    // (so the round-trip unparses cleanly). `Unparse` is delegated through the engine like `Parse`.
+    // (so the round-trip unparses cleanly). `Unparse` is derived DIRECTLY on the natural type (unbounded).
     #[derive(Parse, Unparse)]
     pub enum Expr<S> {
         Cons {
@@ -33,8 +34,8 @@ mod pu {
 
 #[test]
 fn unparse_roundtrip_with_type_param() {
-    // `1 2 3` parses (through the engine) into the NATURAL `Expr<S>`, then the delegated `Unparse`
-    // (`__FromNat` → engine) emits it back. Within the depth limit.
+    // `1 2 3` parses (through the engine) into the NATURAL `Expr<S>`, then the DIRECT natural `Unparse`
+    // emits it back.
     let toks = quote! { 1 2 3 };
     // `S` is phantom here (used only in `Nil`), so annotate it; the atom is `TokenTree` (from `Integer`).
     let e: pu::Expr<()> = Parse::parse(toks).unwrap();
@@ -44,13 +45,13 @@ fn unparse_roundtrip_with_type_param() {
 }
 
 #[test]
-fn unparse_constructed_within_limit() {
+fn unparse_unbounded_depth() {
     use pu::Expr;
     use syan::source::proc_macro2::literal::Integer;
-    // Build a within-limit tree by hand and unparse it (no parse) — exercises the delegated `Unparse`.
-    // The delegated path is depth-limited (default limit 4), so build a depth-3 list.
+    // `Unparse` is now DIRECT on the natural type (not delegated through the depth-limited engine), so it
+    // is **unbounded**: a depth-5000 list — far past any engine `limit` — unparses fine.
     let mut e: Expr<()> = Expr::Nil(PhantomData);
-    for _ in 0..3 {
+    for _ in 0..5000 {
         e = Expr::Cons {
             head: Integer { value: "1".into(), suffix: None },
             tail: Box::new(e),
@@ -58,27 +59,7 @@ fn unparse_constructed_within_limit() {
     }
     let mut out = Vec::<proc_macro2::TokenTree>::new();
     e.unparse(&mut (&mut out)).unwrap();
-    assert_eq!(out.len(), 3, "three `1`s — depth 3, within the engine limit");
-}
-
-#[test]
-#[should_panic(expected = "recursion")]
-fn unparse_past_limit_panics() {
-    use pu::Expr;
-    use syan::source::proc_macro2::literal::Integer;
-    // The delegated `Unparse` is depth-limited (it converts the natural value to the depth-default engine
-    // value): a tree deeper than `limit` reaches the terminator's `__from_nat`/`Unparse` and panics. This
-    // is the documented trade-off of the uniform delegated path (vs. the old direct path's arbitrary
-    // depth). Default limit is 4, so a depth-11 list overflows.
-    let mut e: Expr<()> = Expr::Nil(PhantomData);
-    for _ in 0..11 {
-        e = Expr::Cons {
-            head: Integer { value: "1".into(), suffix: None },
-            tail: Box::new(e),
-        };
-    }
-    let mut out = Vec::<proc_macro2::TokenTree>::new();
-    let _ = e.unparse(&mut (&mut out)); // panics at the depth-limit terminator
+    assert_eq!(out.len(), 5000, "five thousand `1`s — depth far past the old limit");
 }
 
 // ── Spanned over a self-recursive recurse type with a type param `S: Span` ─────────────────────────
@@ -87,8 +68,8 @@ mod sp {
     use syan::span::{Spanned, WithSpan};
     use syan::visit::Ast;
 
-    // All non-recursive leaves are `WithSpan<_, S>` (Spanned, `Span = S`). `Spanned` is delegated through
-    // the engine (`__FromNat` → engine's `Spanned`), uniformly with every other cycle.
+    // All non-recursive leaves are `WithSpan<_, S>` (Spanned, `Span = S`). `Spanned` is derived DIRECTLY
+    // on the natural type (group-free → unbounded), like `Unparse`.
     #[derive(Ast, Spanned)]
     #[subast()]
     pub enum Expr<S: syan::span::Span> {
@@ -104,9 +85,9 @@ mod sp {
 fn spanned_with_type_param() {
     use sp::Expr;
     use syan::span::{Spanned, WithSpan};
-    // `()` is a `Span`. `.span()` delegates through the engine and folds the `WithSpan` leaf spans. The
-    // point is that the delegated `Spanned` impl compiles and `.span()` is callable on a type with a
-    // parameter (within the depth limit — this is a depth-3 tree).
+    // `()` is a `Span`. `.span()` folds the `WithSpan` leaf spans directly on the natural type. The
+    // point is that the direct `Spanned` impl compiles and `.span()` is callable on a type with a
+    // parameter (this is a depth-3 tree; being direct it is unbounded).
     let tree: Expr<()> = Expr::Node {
         head: WithSpan { slot: 0, span: () },
         child: Box::new(Expr::Node {
@@ -117,11 +98,11 @@ fn spanned_with_type_param() {
     let _s: () = tree.span();
 }
 
-// ── MULTI-TYPE cycle: Unparse via natural→engine `from_nat` delegation ─────────────────────────────
-// Direct natural `Unparse` can't work here (the members' leaf bounds differ — `Stmt` has no `Integer`),
-// so `#[recurse]` routes `Unparse` to the engine and emits a delegated `impl Unparse for Expr/Stmt`
-// that converts the (borrowed) natural value to the depth-default engine value (cloning leaves) and
-// calls the engine's `Unparse`. Depth-limited (panics past `limit`).
+// ── MULTI-TYPE cycle: DIRECT natural Unparse via the leaf-bound UNION ───────────────────────────────
+// The members' leaf bounds differ (`Expr` has an `Integer` leaf, `Stmt` does not), so each member alone
+// couldn't unparse the other. `#[recurse]` injects the *union* of all members' leaf-field bounds as
+// `#[predicate_unparse(…)]` on every member, so `Stmt`'s impl also carries `Integer: Unparse` and can
+// build/unparse `Expr`. Both impls are therefore DIRECT on the natural type — unbounded (no engine).
 #[recurse]
 mod mt {
     use core::marker::PhantomData;
@@ -142,12 +123,11 @@ mod mt {
 }
 
 #[test]
-fn multi_type_unparse_via_delegation() {
+fn multi_type_unparse_direct_unbounded() {
     use core::marker::PhantomData;
     use mt::{Expr, Stmt};
     use syan::source::proc_macro2::literal::Integer;
-    // Expr → Stmt → Expr(Lit 7); within the depth limit. Delegated `Unparse` converts to the engine and
-    // emits the single `7` literal.
+    // Expr → Stmt → Expr(Lit 7). Direct natural `Unparse` (no engine) emits the single `7` literal.
     let tree: Expr<()> = Expr::Wrap(Box::new(Stmt::Wrap(Box::new(Expr::Lit(
         Integer { value: "7".into(), suffix: None },
         PhantomData,
@@ -155,10 +135,20 @@ fn multi_type_unparse_via_delegation() {
     let mut out = Vec::<proc_macro2::TokenTree>::new();
     tree.unparse(&mut (&mut out)).unwrap();
     assert_eq!(out.len(), 1, "the `7` literal (Stmt::Wrap/Nil emit nothing)");
-    let _n: Stmt<()> = Stmt::Nil(PhantomData); // Stmt is also `Unparse` (delegated)
+    let _n: Stmt<()> = Stmt::Nil(PhantomData); // Stmt is also `Unparse` (direct)
+
+    // Being DIRECT (not engine-delegated), it is unbounded: a depth-2000 alternating tree unparses —
+    // far past any engine depth. This is what the leaf-bound *union* buys for a multi-type cycle.
+    let mut e: Expr<()> = Expr::Lit(Integer { value: "1".into(), suffix: None }, PhantomData);
+    for _ in 0..2000 {
+        e = Expr::Wrap(Box::new(Stmt::Wrap(Box::new(e))));
+    }
+    let mut deep = Vec::<proc_macro2::TokenTree>::new();
+    e.unparse(&mut (&mut deep)).unwrap();
+    assert_eq!(deep.len(), 1, "deep multi-type tree round-trips (direct → unbounded)");
 }
 
-// ── MULTI-TYPE cycle: Spanned via delegation (`S: Span`; threaded through the conversion impls) ─────
+// ── MULTI-TYPE cycle: DIRECT Spanned via the leaf-bound union (`S: Span`) ───────────────────────────
 #[recurse]
 mod mts {
     use syan::span::{Span, Spanned, WithSpan};
@@ -180,10 +170,10 @@ mod mts {
 }
 
 #[test]
-fn multi_type_spanned_via_delegation() {
+fn multi_type_spanned_direct_unbounded() {
     use mts::{Expr, Stmt};
     use syan::span::{Spanned, WithSpan};
-    // Depth-3 tree, within the limit; delegated `Spanned` converts to the engine and folds the spans.
+    // Depth-3 tree; direct natural `Spanned` (no engine, unbounded) folds the spans.
     let tree: Expr<()> = Expr::Wrap(Box::new(Stmt::Wrap(Box::new(Expr::Leaf(WithSpan {
         slot: 0,
         span: (),

@@ -24,9 +24,12 @@ fn compile_fail_problems() {
 // conversion, and delegated impls — positive regression test in `recurse_where_clause.rs` (both a param
 // bound `where S: Clone` and the self-referential `where Expr<S>: Marker` shape).
 
-// ── fix 10: #[recurse(limit = N)] ────────────────────────────────────────────
+// ── fix 10: the `Parse` engine bottoms out at a fixed internal depth ──────────
+// `#[recurse]` no longer takes a `limit = N` argument; the `Parse` engine uses a fixed internal depth
+// (`DEFAULT_RECURSION_DEPTH = 4`). This test pins that the engine still bottoms out — `Parse` succeeds
+// within the fixed depth and silently drops content past it (the limit is lenient, not a hard error).
 
-#[recurse(limit = 2)]
+#[recurse]
 mod shallow {
     use syan::nested::group::GroupBrace;
     use syan::parse::{Parse, Unparse};
@@ -45,33 +48,28 @@ mod shallow {
 }
 
 #[test]
-fn limit_controls_max_depth() {
+fn fixed_engine_depth_limits_parse() {
     use shallow::Expr;
-
-    // limit=2 → Expr<S> = __ExprRec<S, __ExprRec<S, ExprTerm>>
 
     // depth 1: bare literal — Lit variant always succeeds
     let e: Expr<_> = Parse::parse(quote! { 42 }).unwrap();
     assert!(matches!(e, Expr::Lit(_)));
 
-    // depth 2: block containing a literal — within limit, inner has 1 element
+    // depth 2: block containing a literal — well within the fixed depth, inner has 1 element
     let e: Expr<_> = Parse::parse(quote! { { 42 } }).unwrap();
     match e {
         Expr::Block { inner, .. } => assert_eq!(inner.len(), 1),
         _ => panic!("expected block"),
     }
 
-    // depth 3: Vec<ExprTerm> stops on the first failure and leaves the literal
-    // unconsumed inside the group; the parser does not error — it silently drops
-    // the innermost content.  This demonstrates that the depth limit is lenient
-    // rather than a hard parse error.
-    let e: Expr<_> = Parse::parse(quote! { { { 1 } } }).unwrap();
+    // Past the fixed depth the innermost `Vec<…Term>` stops on the first failure and leaves the literal
+    // unconsumed inside the group; the parser does not error — it silently drops the innermost content,
+    // demonstrating the depth limit is lenient rather than a hard parse error.
+    let e: Expr<_> = Parse::parse(quote! { { { { { { 1 } } } } } }).unwrap();
     match e {
         Expr::Block { inner, .. } => {
-            // The outer block has one child (the inner block was parsed).
+            // The outer block has one child (the inner blocks were parsed, down to the fixed depth).
             assert_eq!(inner.len(), 1);
-            // inner[0] has type __ExprRec<S, ExprTerm>, not Expr<S>; we cannot
-            // inspect its inner.len() without naming the private internal type.
         }
         _ => panic!("expected block"),
     }

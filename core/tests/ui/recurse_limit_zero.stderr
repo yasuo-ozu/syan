@@ -1,7 +1,0 @@
-error: custom attribute panicked
-  --> tests/ui/recurse_limit_zero.rs:10:1
-   |
-10 | #[recurse(limit = 0)]
-   | ^^^^^^^^^^^^^^^^^^^^^
-   |
-   = help: message: attempt to subtract with overflow
