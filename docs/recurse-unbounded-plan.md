@@ -1,16 +1,24 @@
 # Plan: remove the depth `limit` of `#[recurse]` via a fn-pointer re-entry vtable
 
-> **STATUS: IMPLEMENTED for `Parse`.** The unbounded `Parse` re-entry shipped — `core::parse::vtable`
-> (the registry, keyed on `type_name` of a `(terminator, atom, stream-error)` `ReKey` marker, value
-> copied-out `usize`), the inhabited terminator + erased re-entry (`emit_terminator_and_reentry`), and the
-> registering delegated `Parse` (`emit_delegated_parse`) in `macro/recurse.rs`. The `Error`-erasure
-> sub-problem (§3) was resolved by erasing to the stream's **own** `Error` (always a valid coercion),
-> threaded via an inner `__run` fn that names `__St::Error` — no `Infallible` pin needed. The hot-path
-> `Mutex` lock (§8.4) is kept (negligible at compile time). Tests: `recurse_problems_test::parse_is_unbounded`
-> (depth 8), `recurse_unparse_spanned::parse_unbounded_depth` (depth 200), `rustsub_roundtrip::parse_deep_parens_is_unbounded`
-> (depth 60, group-ful + backtracking). **Remaining (deferred):** group-ful `Unparse`/`Spanned` are still
-> engine-depth-bounded (the `Fill` HRTB cycle — §7); a left-recursive cycle grammar now loops forever
-> (the OS-stack ceiling of any recursive-descent parser) instead of being silently truncated.
+> **STATUS: FULLY IMPLEMENTED — `Parse`, `Unparse`, and `Spanned` are all unbounded.** Shipped via
+> `core::parse::vtable` (the registry, keyed on `type_name` of a `(root, atom, error)` `ReKey` marker,
+> value copied-out `usize`; plus `DynSink` and the `SpanReentry` marker) + `macro/recurse.rs`:
+> - **`Parse`** — inhabited terminator `__XxxTerm(Box<Root>)` + erased `&mut dyn ParseStream` re-entry
+>   (`emit_terminator_and_reentry`) + registering delegated `Parse` (`emit_delegated_parse`). The
+>   `Error`-erasure sub-problem (§3) was resolved by erasing to the stream's **own** `Error` (always a
+>   valid coercion), via an inner `__run` fn that names `__St::Error` — no `Infallible` pin.
+> - **Group-ful `Unparse`/`Spanned`** (§7, the deferred case) — done with a **depth-1 BORROW engine**: a
+>   borrow terminator `__XxxTermRef<'a>(&'a Root)` re-enters the top-level impl, so only leaves are cloned
+>   and there is **no `Root: Clone` requirement** (the user-chosen design over the simpler owned-clone
+>   variant). `__FromNat` is lifetime-parameterized (`<'__n>`); `Unparse` erases `&mut dyn Emitter` via
+>   `DynSink` (the `Emitter` trait was already object-safe — no library change);
+>   `emit_borrow_terminator_and_reentry` + `emit_delegated_unparse`/`_spanned`.
+>
+> The hot-path `Mutex` lock (§8.4) is kept (negligible at compile time). Tests:
+> `recurse_problems_test::parse_is_unbounded` (8), `recurse_unparse_spanned::parse_unbounded_depth` (200),
+> `recurse_group_ful` (depth-60 round-trip, depth-2000 span), `rustsub_roundtrip::deep_parens_round_trip_is_unbounded`
+> (depth-60 multi-type group-ful + backtracking). **Only caveat:** a left-recursive cycle grammar now loops
+> forever (the OS-stack ceiling of any recursive-descent parser) instead of being silently truncated.
 
 ## Goal
 

@@ -45,18 +45,18 @@ fn round_trips_each_construct() {
 }
 
 #[test]
-fn parse_deep_parens_is_unbounded() {
-    // `rustsub` is **group-ful**, so its `Parse` is delegated through the fixed-depth engine — but the
-    // engine's terminator re-enters the top-level parser at runtime, making `Parse` UNBOUNDED. Parsing a
-    // 60-deep `( ( … 1 … ) )` (far past the fixed engine depth) succeeds, and exercises backtracking
-    // through the re-entry boundaries (the `Expr` enum tries `Block`/`Paren`/`Lit`/`Var` via `dup` at each
-    // level). (`Unparse` stays engine-bounded for a group-ful cycle, so this is a parse-depth check.)
+fn deep_parens_round_trip_is_unbounded() {
+    // `rustsub` is **group-ful**, yet both `Parse` AND `Unparse` are now UNBOUNDED: `Parse`'s engine
+    // terminator re-enters the top-level parser at runtime, and `Unparse` delegates through a depth-1
+    // *borrow* engine whose terminator re-enters the top-level `Unparse`. A 60-deep `( ( … 1 … ) )` (far
+    // past the fixed engine depth) round-trips in full — and the parse exercises backtracking through the
+    // re-entry boundaries (the `Expr` enum tries `Block`/`Paren`/`Lit`/`Var` via `dup` at each level).
     const N: usize = 60;
-    let mut inner = quote! { 1 };
+    let mut src = quote! { 1 };
     for _ in 0..N {
-        inner = quote! { ( #inner ) };
+        src = quote! { ( #src ) };
     }
-    let e: Expr<Sp> = Parse::parse(inner).expect("deep nested parens parse");
+    let e: Expr<Sp> = Parse::parse(src.clone()).expect("deep nested parens parse");
     // Count the `Paren` nesting on the natural type (uniform at every depth).
     fn paren_depth(e: &Expr<Sp>) -> usize {
         match e {
@@ -65,6 +65,14 @@ fn parse_deep_parens_is_unbounded() {
         }
     }
     assert_eq!(paren_depth(&e), N, "all {N} paren levels parsed (re-entry past the engine depth)");
+    // Unparse the deep tree (group-ful, past the old depth limit) and confirm it round-trips.
+    let mut out = Vec::<proc_macro2::TokenTree>::new();
+    e.unparse(&mut (&mut out)).unwrap();
+    assert_eq!(
+        out.into_iter().collect::<proc_macro2::TokenStream>().to_string(),
+        src.to_string(),
+        "deep group-ful tree round-trips (Unparse past the old depth limit)",
+    );
 }
 
 #[derive(Default)]

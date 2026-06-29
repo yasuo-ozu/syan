@@ -693,6 +693,18 @@ fn reentry_name(root: &str, nonce: u64) -> Ident {
 fn reentry_fn_alias(root: &str, nonce: u64) -> Ident {
     Ident::new(&format!("__ReFn_{root}_{nonce}"), Span::call_site())
 }
+/// Per-root **borrow** terminator (for unbounded group-ful `Unparse`/`Spanned`): `__<root>TermRef_<nonce>`.
+fn term_ref_name(root: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__{root}TermRef_{nonce}"), Span::call_site())
+}
+/// Per-root erased re-entry **unparse** fn: `__reentry_unparse_<root>_<nonce>`.
+fn reentry_unparse_name(root: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__reentry_unparse_{root}_{nonce}"), Span::call_site())
+}
+/// Per-root erased re-entry **span** fn: `__reentry_span_<root>_<nonce>`.
+fn reentry_span_name(root: &str, nonce: u64) -> Ident {
+    Ident::new(&format!("__reentry_span_{root}_{nonce}"), Span::call_site())
+}
 
 /// The `Generics` of a (public) cycle item by name.
 fn item_generics(items: &[Item], name: &str) -> Generics {
@@ -842,6 +854,261 @@ fn emit_terminator_and_reentry(
     }
 }
 
+/// Emit, for ONE recursion root, the **borrow terminator** backing **unbounded group-ful
+/// `Unparse`/`Spanned`**: `__XxxTermRef<'a, …>(&'a Root<…>)` (borrows the natural remainder — no clone, no
+/// `Root: Clone`), its `__FromNat` (just wraps the borrow), and its `Unparse`/`Spanned`, which — instead of
+/// panicking at the depth floor — **re-enter the top-level natural `Unparse`/`Spanned` at runtime** through
+/// a type-erased fn pointer (`core::parse::vtable`). `Unparse` erases the sink to `&mut dyn Emitter` (a
+/// `DynSink` re-wraps it for the generic `unparse<E>`); `Spanned` needs no erasure. NO static
+/// `Root: Unparse/Spanned` bound here (that would re-form the group where-cycle the engine breaks).
+fn emit_borrow_terminator_and_reentry(
+    items: &[Item],
+    root_name: &str,
+    nonce: u64,
+    needs_unparse: bool,
+    needs_spanned: bool,
+) -> TokenStream {
+    let term_ref = term_ref_name(root_name, nonce);
+    let ftn = from_nat_name(root_name, nonce);
+    let root_id = Ident::new(root_name, Span::call_site());
+    let g = item_generics(items, root_name);
+    let (gen_bf, gen_use) = generic_tokens(&g);
+    let root_decl = param_decls(&g);
+    let rwp = where_preds(&g);
+    let span_param = g.params.iter().find_map(|p| match p {
+        GenericParam::Type(t) => Some(t.ident.clone()),
+        _ => None,
+    });
+
+    // The borrow terminator + its (borrow) `__FromNat` (always, when the cycle delegates U/S). The struct
+    // names `Root<…>`, so it carries the root's param bounds (`root_decl`, e.g. `S: Span`) + where-clause.
+    let mut out = quote! {
+        pub struct #term_ref<'__n, #(#root_decl),*>(&'__n #root_id<#(#gen_use),*>)
+        #(if !rwp.is_empty()) { where #(#rwp),* } ;
+
+        impl<'__n, #(#root_decl),*> #ftn<'__n, #(#gen_use),*> for #term_ref<'__n, #(#gen_use),*>
+        #(if !rwp.is_empty()) { where #(#rwp),* }
+        {
+            fn __from_nat(__nat: &'__n #root_id<#(#gen_use),*>) -> Self { #term_ref(__nat) }
+        }
+    };
+
+    if needs_unparse {
+        let re_un = reentry_unparse_name(root_name, nonce);
+        out.extend(quote! {
+            // The erased re-entry: the top-level natural unparse, monomorphized at the erased emitter.
+            #[allow(non_snake_case)]
+            fn #re_un<#(#root_decl,)* __Atom, __E>(
+                __e: &#root_id<#(#gen_use),*>,
+                __sink: &mut (dyn ::syan::parse::unparse::Emitter<__Atom, Error = __E> + '_),
+            ) -> ::core::result::Result<(), __E>
+            where
+                #root_id<#(#gen_use),*>: ::syan::parse::Unparse<__Atom>,
+                #(#rwp,)*
+            {
+                <#root_id<#(#gen_use),*> as ::syan::parse::Unparse<__Atom>>::unparse(
+                    __e,
+                    &mut ::syan::parse::vtable::DynSink(__sink),
+                )
+            }
+
+            // Borrow terminator `Unparse`: re-enter at runtime via the registry (no static `Root: Unparse`).
+            impl<'__n, #(#root_decl,)* __Atom> ::syan::parse::Unparse<__Atom> for #term_ref<'__n, #(#gen_use),*>
+            #(if !rwp.is_empty()) { where #(#rwp),* }
+            {
+                fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                    &self,
+                    __sink: &mut __E,
+                ) -> ::core::result::Result<(), __E::Error> {
+                    let __raw = ::syan::parse::vtable::lookup::<
+                        ::syan::parse::vtable::ReKey<#root_id<#(#gen_use),*>, __Atom, __E::Error>,
+                    >();
+                    type __ReUnFn<#(#gen_bf,)* __Atom, __E> = fn(
+                        &#root_id<#(#gen_use),*>,
+                        &mut (dyn ::syan::parse::unparse::Emitter<__Atom, Error = __E> + '_),
+                    ) -> ::core::result::Result<(), __E>;
+                    // SAFETY: the (root, atom, error) key always stores exactly this concrete fn type.
+                    let __f: __ReUnFn<#(#gen_use,)* __Atom, __E::Error> =
+                        unsafe { ::core::mem::transmute::<usize, __ReUnFn<#(#gen_use,)* __Atom, __E::Error>>(__raw) };
+                    let __dyns: &mut (dyn ::syan::parse::unparse::Emitter<__Atom, Error = __E::Error> + '_) = __sink;
+                    __f(self.0, __dyns)
+                }
+            }
+        });
+    }
+
+    if needs_spanned {
+        if let Some(sp) = &span_param {
+            let re_sp = reentry_span_name(root_name, nonce);
+            out.extend(quote! {
+                #[allow(non_snake_case)]
+                fn #re_sp<#(#root_decl),*>(__e: &#root_id<#(#gen_use),*>) -> #sp
+                where
+                    #root_id<#(#gen_use),*>: ::syan::span::Spanned<Span = #sp>,
+                    #(#rwp,)*
+                {
+                    <#root_id<#(#gen_use),*> as ::syan::span::Spanned>::span(__e)
+                }
+
+                impl<'__n, #(#root_decl),*> ::syan::span::Spanned for #term_ref<'__n, #(#gen_use),*>
+                where #sp: ::syan::span::Span, #(#rwp,)*
+                {
+                    type Span = #sp;
+                    fn span(&self) -> Self::Span {
+                        let __raw = ::syan::parse::vtable::lookup::<
+                            ::syan::parse::vtable::ReKey<#root_id<#(#gen_use),*>, ::syan::parse::vtable::SpanReentry, #sp>,
+                        >();
+                        type __ReSpFn<#(#gen_bf,)* __Sp> = fn(&#root_id<#(#gen_use),*>) -> __Sp;
+                        // SAFETY: the (root, SpanReentry, span) key always stores exactly this fn type.
+                        let __f: __ReSpFn<#(#gen_use,)* #sp> =
+                            unsafe { ::core::mem::transmute::<usize, __ReSpFn<#(#gen_use,)* #sp>>(__raw) };
+                        __f(self.0)
+                    }
+                }
+            });
+        }
+    }
+    out
+}
+
+/// Emit the delegated `impl Unparse for X` — the **unbounded** group-ful variant. Registers each root's
+/// erased re-entry unparse fn into `core::parse::vtable`, builds the DEPTH-1 **borrow** engine
+/// (`__XRec<…, __XxxTermRef<'_, …>>` — leaves cloned, recursive children borrowed), then unparses it. The
+/// borrow engine's terminator re-enters at runtime, giving unbounded depth with no `Root: Clone`.
+fn emit_delegated_unparse(
+    tg: &DelegTarget,
+    roots: &[RootReentry],
+    root_use: &[TokenStream],
+    root_targs: &TokenStream,
+    self_name: &str,
+    nonce: u64,
+) -> TokenStream {
+    let DelegTarget { id, xdecl, xuse, where_preds, .. } = *tg;
+    let engine = engine_name(self_name, nonce);
+    let ftn = from_nat_name(self_name, nonce);
+    // The borrow engine instantiation: `__XRec<xuse, __<root>TermRef<'_, root_use> …>` (one per root). `'_b`
+    // forms the HRTB bound; `'_` is inferred (to the `&self` borrow) in the body.
+    let tr_args = |lt: TokenStream| -> Vec<TokenStream> {
+        roots
+            .iter()
+            .map(|r| {
+                let tr = term_ref_name(&r.name, nonce);
+                quote!( #tr<#lt, #(#root_use),*> )
+            })
+            .collect()
+    };
+    let tr_b = tr_args(quote!('__b));
+    let tr_anon = tr_args(quote!('_));
+    // `Root: Unparse<__Atom>` for every OTHER root (so the `reentry_unparse::<…> as usize` cast type-checks);
+    // the self root's bound is assumed inside its own impl body.
+    let from_bounds: Vec<TokenStream> = roots
+        .iter()
+        .filter(|r| r.name != self_name)
+        .map(|r| {
+            let rid = &r.root_id;
+            quote!( #rid #root_targs: ::syan::parse::Unparse<__Atom> )
+        })
+        .collect();
+    let registrations: Vec<TokenStream> = roots
+        .iter()
+        .map(|r| {
+            let RootReentry { root_id, name, .. } = r;
+            let re_un = reentry_unparse_name(name, nonce);
+            quote! {
+                ::syan::parse::vtable::register::<
+                    ::syan::parse::vtable::ReKey<#root_id #root_targs, __Atom, __E::Error>,
+                >(#re_un::<#(#root_use,)* __Atom, __E::Error> as usize);
+            }
+        })
+        .collect();
+    quote! {
+        impl<#(#xdecl,)* __Atom> ::syan::parse::Unparse<__Atom> for #id<#(#xuse),*>
+        where
+            for<'__b> #engine<#(#xuse,)* #(#tr_b),*>:
+                ::syan::parse::Unparse<__Atom> + #ftn<'__b, #(#xuse),*>,
+            #(#from_bounds,)*
+            #(#where_preds,)*
+        {
+            fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                &self,
+                __sink: &mut __E,
+            ) -> ::core::result::Result<(), __E::Error> {
+                #(#registrations)*
+                let __e: #engine<#(#xuse,)* #(#tr_anon),*> =
+                    <#engine<#(#xuse,)* #(#tr_anon),*> as #ftn<'_, #(#xuse),*>>::__from_nat(self);
+                <#engine<#(#xuse,)* #(#tr_anon),*> as ::syan::parse::Unparse<__Atom>>::unparse(&__e, __sink)
+            }
+        }
+    }
+}
+
+/// Emit the delegated `impl Spanned for X` — the **unbounded** group-ful variant (analogue of
+/// `emit_delegated_unparse`, no emitter to erase). Registers each root's erased re-entry span fn, builds
+/// the depth-1 borrow engine, and folds its span.
+fn emit_delegated_spanned(
+    tg: &DelegTarget,
+    roots: &[RootReentry],
+    root_use: &[TokenStream],
+    root_targs: &TokenStream,
+    self_name: &str,
+    nonce: u64,
+) -> TokenStream {
+    let DelegTarget { id, xdecl, xuse, span_param, where_preds, .. } = *tg;
+    let sp = span_param.expect("Spanned delegation requires the cycle's span type param");
+    let engine = engine_name(self_name, nonce);
+    let ftn = from_nat_name(self_name, nonce);
+    let tr_args = |lt: TokenStream| -> Vec<TokenStream> {
+        roots
+            .iter()
+            .map(|r| {
+                let tr = term_ref_name(&r.name, nonce);
+                quote!( #tr<#lt, #(#root_use),*> )
+            })
+            .collect()
+    };
+    let tr_b = tr_args(quote!('__b));
+    let tr_anon = tr_args(quote!('_));
+    // `Root: Spanned<Span=#sp>` for every OTHER root (the self root's is assumed in its own impl body).
+    let span_bounds: Vec<TokenStream> = roots
+        .iter()
+        .filter(|r| r.name != self_name)
+        .map(|r| {
+            let rid = &r.root_id;
+            quote!( #rid #root_targs: ::syan::span::Spanned<Span = #sp> )
+        })
+        .collect();
+    let registrations: Vec<TokenStream> = roots
+        .iter()
+        .map(|r| {
+            let RootReentry { root_id, name, .. } = r;
+            let re_sp = reentry_span_name(name, nonce);
+            quote! {
+                ::syan::parse::vtable::register::<
+                    ::syan::parse::vtable::ReKey<#root_id #root_targs, ::syan::parse::vtable::SpanReentry, #sp>,
+                >(#re_sp::<#(#root_use),*> as usize);
+            }
+        })
+        .collect();
+    quote! {
+        impl<#(#xdecl),*> ::syan::span::Spanned for #id<#(#xuse),*>
+        where
+            for<'__b> #engine<#(#xuse,)* #(#tr_b),*>:
+                ::syan::span::Spanned<Span = #sp> + #ftn<'__b, #(#xuse),*>,
+            #(#span_bounds,)*
+            #sp: ::syan::span::Span,
+            #(#where_preds,)*
+        {
+            type Span = #sp;
+            fn span(&self) -> Self::Span {
+                #(#registrations)*
+                let __e: #engine<#(#xuse,)* #(#tr_anon),*> =
+                    <#engine<#(#xuse,)* #(#tr_anon),*> as #ftn<'_, #(#xuse),*>>::__from_nat(self);
+                <#engine<#(#xuse,)* #(#tr_anon),*> as ::syan::span::Spanned>::span(&__e)
+            }
+        }
+    }
+}
+
 /// The (whole) types of a cycle type's *leaf* fields — those `conv_expr` doesn't convert. Each must be
 /// `Clone` for the natural→engine `__FromNat` (which clones leaves into the engine). Leaf-ness is
 /// direction-independent, so this probes with `ConvDir::ToNat`.
@@ -862,116 +1129,19 @@ fn leaf_field_types(item: &Item, child_heads: &HashSet<String>) -> Vec<Type> {
     out
 }
 
-/// A "mock model" of the three traits `#[recurse]` re-implements on the natural type by **delegating**
-/// to the depth-limited engine. Each natural type's `Parse`/`Unparse`/`Spanned` impl forwards to the
-/// engine's own (direct, derived) impl through one of the two conversion bridges; this enum captures just
-/// enough of each trait's *shape* that ONE emitter (`emit_delegated_impl`) produces all three, instead of
-/// three near-identical hand-written `impl` blocks.
-///
-/// The two differ only in the **direction** of the natural↔engine conversion, which follows from whether
-/// the trait *produces* or *consumes* the value:
-///   * `Parse` produces `Self` → build the engine value, then `__ToNat` it to the natural type.
-///   * `Unparse`/`Spanned` consume `&self` → `__FromNat` the natural value to the engine, then call the
-///     engine's method.
-// `Parse` is emitted by the dedicated `emit_delegated_parse` (it must register the re-entry parser), so
-// this shared emitter now models only the two `&self`-consuming, natural→engine (`__FromNat`) delegations.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RecTrait {
-    Unparse,
-    Spanned,
-}
-
-/// The per-trait pieces of a delegating impl — the "filled-in" model for one cycle type. Spliced into the
-/// single shared skeleton in `emit_delegated_impl`.
-struct DelegSpec {
-    /// Extra impl generic params beyond the type's own, placed after the `#(#xdecl,)*` trailing comma
-    /// (`__Atom` for `Parse`/`Unparse`; empty for `Spanned`).
-    impl_extra: TokenStream,
-    /// The trait reference on the natural type (`Parse<__Atom>` / `Unparse<__Atom>` / `Spanned`).
-    trait_ref: TokenStream,
-    /// Extra where-predicates not involving the engine (`__Atom: Spanned + Clone` for `Parse`).
-    extra_where: TokenStream,
-    /// The engine-side trait bound (`Parse<__Atom, Error = …>` / `Unparse<__Atom>` / `Spanned<Span = S>`).
-    engine_trait_bound: TokenStream,
-    /// Associated-type items (`type Error = …;` / `type Span = S;` / none).
-    assoc_items: TokenStream,
-    /// The method definition, including the delegation body.
-    method: TokenStream,
-}
-
 /// The per-cycle-type context a delegated impl is built against — the natural type, its generics
-/// (`xdecl` bound-preserving / `xuse` bare), the engine instantiated at the public depth defaults, the
-/// two conversion-trait idents, the cycle's span type param (only `Spanned` needs it), and the cycle
-/// type's own `where`-clause. Built once per type in `gen_natural_extras` and shared by the (up to three)
-/// `emit_delegated_impl` calls.
+/// (`xdecl` bound-preserving / `xuse` bare), the engine instantiated at the Parse depth-default, the
+/// engine→natural conversion-trait ident (`__ToNat`, for `Parse`), the cycle's span type param (only
+/// `Spanned` needs it), and the cycle type's own `where`-clause. Built once per type in
+/// `gen_natural_extras` and shared by `emit_delegated_parse`/`_unparse`/`_spanned`.
 struct DelegTarget<'a> {
     id: &'a Ident,
     xdecl: &'a [TokenStream],
     xuse: &'a [TokenStream],
     engine_default: &'a TokenStream,
     to_nat: &'a Ident,
-    from_nat: &'a Ident,
     span_param: Option<&'a Ident>,
     where_preds: &'a [TokenStream],
-}
-
-/// Emit the delegating `impl <Trait> for <natural type>` for one cycle type — the unified algorithm for
-/// all three of `Parse`/`Unparse`/`Spanned`. The engine supplies the *direct* (derived) impl; this is its
-/// *delegating* counterpart.
-fn emit_delegated_impl(t: RecTrait, tg: &DelegTarget) -> TokenStream {
-    let DelegTarget { id, xdecl, xuse, engine_default, to_nat, from_nat, span_param, where_preds } = *tg;
-    // The conversion-trait bound the delegation goes through: `__FromNat` (natural→engine).
-    let _ = to_nat;
-    let conv_bound = match t {
-        RecTrait::Unparse | RecTrait::Spanned => quote!( #from_nat<#(#xuse),*> ),
-    };
-    let spec = match t {
-        RecTrait::Unparse => DelegSpec {
-            impl_extra: quote!(__Atom),
-            trait_ref: quote!( ::syan::parse::Unparse<__Atom> ),
-            extra_where: quote!(),
-            engine_trait_bound: quote!( ::syan::parse::Unparse<__Atom> ),
-            assoc_items: quote!(),
-            method: quote! {
-                fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
-                    &self,
-                    __sink: &mut __E,
-                ) -> ::core::result::Result<(), __E::Error> {
-                    let __e: #engine_default = #from_nat::__from_nat(self);
-                    <#engine_default as ::syan::parse::Unparse<__Atom>>::unparse(&__e, __sink)
-                }
-            },
-        },
-        RecTrait::Spanned => {
-            let sp = span_param.expect("Spanned delegation requires the cycle's span type param");
-            DelegSpec {
-                impl_extra: quote!(),
-                trait_ref: quote!( ::syan::span::Spanned ),
-                extra_where: quote!(),
-                engine_trait_bound: quote!( ::syan::span::Spanned<Span = #sp> ),
-                assoc_items: quote!( type Span = #sp; ),
-                method: quote! {
-                    fn span(&self) -> Self::Span {
-                        let __e: #engine_default = #from_nat::__from_nat(self);
-                        <#engine_default as ::syan::span::Spanned>::span(&__e)
-                    }
-                },
-            }
-        }
-    };
-    let DelegSpec { impl_extra, trait_ref, extra_where, engine_trait_bound, assoc_items, method } = spec;
-    // The shared skeleton: same for all three — only the model's pieces above vary.
-    quote! {
-        impl<#(#xdecl,)* #impl_extra> #trait_ref for #id<#(#xuse),*>
-        where
-            #extra_where
-            #engine_default: #engine_trait_bound + #conv_bound,
-            #(#where_preds,)*
-        {
-            #assoc_items
-            #method
-        }
-    }
 }
 
 /// Per-root data the delegated `Parse` needs to register its re-entry parser: the terminator type, the
@@ -1123,13 +1293,14 @@ fn gen_natural_extras(
     let delegate_unparse: Vec<&String> = scc.iter().filter(|n| deleg.unparse.contains(*n)).collect();
     let delegate_spanned: Vec<&String> = scc.iter().filter(|n| deleg.spanned.contains(*n)).collect();
     let needs_from_nat = !delegate_unparse.is_empty() || !delegate_spanned.is_empty();
-    // `R: __FromNat_<root>` per root — the natural→engine bridge's analogue of `root_bounds`.
+    // `R: __FromNat_<root><'__n>` per root — the natural→engine bridge's analogue of `root_bounds`. The
+    // `'__n` is the borrow of the natural tree the (borrow) engine holds (see `__FromNat` below).
     let from_root_bounds: Vec<TokenStream> = roots_sorted
         .iter()
         .map(|r| {
             let dp = &rec_for_root[r];
             let tn = from_trait_name(r);
-            quote!( #dp: #tn<#(#root_use),*> )
+            quote!( #dp: #tn<'__n, #(#root_use),*> )
         })
         .collect();
 
@@ -1238,7 +1409,6 @@ fn gen_natural_extras(
             xuse: &xuse,
             engine_default: &engine_default,
             to_nat: &tn,
-            from_nat: &ftn,
             span_param,
             where_preds: &where_preds,
         };
@@ -1255,31 +1425,34 @@ fn gen_natural_extras(
         // (borrowed) natural value to the depth-default engine value and call the engine's own impl — all
         // via the same `emit_delegated_impl` algorithm (natural→engine via `__FromNat`).
         if needs_from_nat {
-            // natural → engine (`__from_nat(__nat: &Natural)`): src = natural, tgt = engine.
+            // natural → **borrow** engine (`__from_nat(__nat: &'__n Natural)`): src = natural, tgt = engine.
+            // Leaves are cloned; recursive children recurse through `__from_nat`, bottoming at the BORROW
+            // terminator `__XxxTermRef<'__n>` which just holds `&'__n child` (no clone) — so the only copies
+            // are leaves (already required), O(n), and there is NO `Root: Clone` requirement.
             let from_body =
                 conv_body(item, id, engine, quote!(__nat), &child_heads, ConvDir::FromNat { nonce });
             out.extend(quote! {
                 #[doc(hidden)]
-                trait #ftn<#(#xdecl),*>
+                trait #ftn<'__n, #(#xdecl),*>
                 #(if !where_preds.is_empty()) { where #(#where_preds),* }
                 {
-                    fn __from_nat(__nat: &#id<#(#xuse),*>) -> Self;
+                    fn __from_nat(__nat: &'__n #id<#(#xuse),*>) -> Self;
                 }
-                impl<#(#xdecl,)* #(#rec_params),*> #ftn<#(#xuse),*>
+                impl<'__n, #(#xdecl,)* #(#rec_params),*> #ftn<'__n, #(#xuse),*>
                     for #engine<#(#xuse,)* #(#rec_params),*>
                 where
                     #(#from_root_bounds,)*
                     #(#from_leaf_clones,)*
                     #(#where_preds,)*
                 {
-                    fn __from_nat(__nat: &#id<#(#xuse),*>) -> Self { #from_body }
+                    fn __from_nat(__nat: &'__n #id<#(#xuse),*>) -> Self { #from_body }
                 }
             });
             if deleg.unparse.contains(&xs) {
-                out.extend(emit_delegated_impl(RecTrait::Unparse, &target));
+                out.extend(emit_delegated_unparse(&target, &roots, &root_use, &root_targs, &xs, nonce));
             }
             if deleg.spanned.contains(&xs) && span_param.is_some() {
-                out.extend(emit_delegated_impl(RecTrait::Spanned, &target));
+                out.extend(emit_delegated_spanned(&target, &roots, &root_use, &root_targs, &xs, nonce));
             }
         }
     }
@@ -1307,42 +1480,18 @@ fn gen_natural_extras(
                 }
             }
         });
-        // Terminator side of the natural→engine bridge: a natural tree deeper than the engine's depth
-        // limit reaches the terminator here and cannot be represented — so delegated `Unparse`/`Spanned`
-        // panic on a tree deeper than `limit` (within the limit they succeed).
+        // Borrow terminator (for unbounded group-ful `Unparse`/`Spanned`): `__XxxTermRef<'a>(&'a Root)`
+        // borrows the natural remainder and re-enters the top-level impl at runtime (no clone, no
+        // `Root: Clone`). Replaces the old depth-floor `__from_nat` `panic!` / `span()` `unreachable!`.
+        let _ = &term; // owned terminator still used above (Parse `__to_nat`); not here.
         if needs_from_nat {
-            let ftn = from_trait_name(r);
-            out.extend(quote! {
-                impl<#(#root_decl),*> #ftn<#(#root_use),*> for #term #term_args
-                #(if !rwp.is_empty()) { where #(#rwp),* }
-                {
-                    fn __from_nat(_: &#root_id<#(#root_use),*>) -> Self {
-                        ::core::panic!(
-                            "#[recurse]: cannot Unparse/Spanned a natural tree deeper than the \
-                             recursion limit (delegated through the depth-limited engine)"
-                        )
-                    }
-                }
-            });
-        }
-        // When delegating `Spanned`, the engine's `Spanned` chain bottoms at the terminator, so it too
-        // must be `Spanned`. By the recurse convention the cycle's span type is its first type param;
-        // the terminator is never constructed (its `Parse` errors), so `span()` is unreachable.
-        if !delegate_spanned.is_empty() {
-            if let Some(sp) = root_generics.params.iter().find_map(|p| match p {
-                GenericParam::Type(t) => Some(&t.ident),
-                _ => None,
-            }) {
-                out.extend(quote! {
-                    impl<#(#root_decl),*> ::syan::span::Spanned for #term #term_args
-                    where #sp: ::syan::span::Span, #(#rwp,)* {
-                        type Span = #sp;
-                        fn span(&self) -> Self::Span {
-                            ::core::unreachable!("#[recurse]: depth-limit terminator has no span")
-                        }
-                    }
-                });
-            }
+            out.extend(emit_borrow_terminator_and_reentry(
+                items,
+                r,
+                nonce,
+                !delegate_unparse.is_empty(),
+                !delegate_spanned.is_empty(),
+            ));
         }
     }
     out
