@@ -11,9 +11,7 @@ use syn::punctuated::Punctuated;
 use syn::*;
 use template_quote::quote;
 
-// ---------------------------------------------------------------------------
 // `#[visitor([base =>] T, U, ...)]` attribute: kicks off the metadata ping-pong.
-// ---------------------------------------------------------------------------
 
 struct VisitorArgs {
     base: Option<Path>,
@@ -126,9 +124,7 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Subast records carried through the ping-pong.
-// ---------------------------------------------------------------------------
 
 /// One `<path> as <matchkey>` entry from a type's `#[subast]`, as carried in the metadata. `key` is
 /// the ident a (container-peeled) field head is matched against; `path` is the resolvable path used
@@ -180,10 +176,8 @@ struct DoneType {
     subast: Vec<SubEntry>,
 }
 
-// ---------------------------------------------------------------------------
-// `__visitor_build`: receives accumulated state + the just-resolved definition,
-// fetches the next type or generates the module.
-// ---------------------------------------------------------------------------
+// `__visitor_build`: receives accumulated state + the just-resolved definition, fetches the next type
+// or generates the module.
 
 struct BuildInput {
     base: Option<Path>,
@@ -702,9 +696,7 @@ fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Module generation
-// ---------------------------------------------------------------------------
+// Module generation.
 
 /// Mint a generated helper param ident whose name avoids every name in `reserved` (the visited
 /// types' generic params), appending `_` until free. Rust rejects two generic params with the same
