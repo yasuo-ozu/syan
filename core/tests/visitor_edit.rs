@@ -1,9 +1,8 @@
-//! Structural-edit coverage for the container-view model (Design B): a node held Vec-like / Option-like
-//! by its parent gets a `visit_<t>_seq` / `visit_<t>_opt` method whose argument is a `SeqView` / `OptView`
-//! of the owning collection, edited **in place** (no clone). A node only ever in a *fixed* slot gets no
-//! such method (just the in-place `visit_<t>_mut`). Box-wrapped elements (`Vec<Box<T>>`) are
-//! box-transparent. Covers `Vec`/`Option`, `edit_each`/`push`/`set`/`take`, a `#[recurse]` cycle, and a
-//! regression that a plain `visit_*_mut`-only visitor still mutates every element.
+//! Structural-edit coverage for the container-view model: a field marked `#[seq]` / `#[opt]` gets a
+//! `visit_<t>_seq` / `visit_<t>_opt` method taking a `SeqView` / `OptView` of the owning collection,
+//! edited in place (no clone); an unmarked field gets no such method (just the in-place `visit_<t>_mut`).
+//! Covers `Vec`/`Option`, `edit_each`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
+//! and a regression that a plain `visit_*_mut`-only visitor still mutates every element.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;

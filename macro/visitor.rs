@@ -1036,11 +1036,8 @@ impl<'a> Lower<'a> {
             Head::Tuple(_) => None,
         };
 
-        // ── view path (`visit_mut` only): a field explicitly marked `#[seq]` / `#[opt]` whose peeled head
-        // is a visited type dispatches to `visit_<head>_seq` / `_opt`, passing the field `&mut` directly
-        // (Design B — the field type itself `impl SeqView<head>`/`OptView<head>`, box-transparently).
-        // Records the usage so `gen_side` emits the matching method. An unmarked field — even a `Vec` /
-        // `Option` — falls through to the ordinary (non-structural) descent below. ──
+        // A `#[seq]`/`#[opt]`-marked field whose peeled head is a visited type dispatches to its
+        // container-edit view (`visit_mut` only); an unmarked field falls through to the ordinary descent.
         if self.mutable {
             if let Some(kind) = view {
                 if let Some((head, _)) = &resolved {
@@ -1479,10 +1476,8 @@ fn gen_side(
                 {
                     #{&s.method}(self, i)
                 }
-                // The opt-in container-edit hooks (mut side only, emitted only where this type is held
-                // Vec-like / Option-like). Default: descend each held node in place via the per-node
-                // `visit_*_mut` (the `visit_*_mut` interface is unchanged). Override to restructure the
-                // parent's collection / `Option` through the view. The descent passes the field directly.
+                // Opt-in container-edit hooks (mut side; emitted only where the type is held that way).
+                // Default: descend each held node via `visit_*_mut`. Override to restructure the parent.
                 #(if s.has_seq) {
                     #[doc = #{&s.seq_doc}]
                     fn #{&s.seq_method}< #(for mp in &s.method_params) { #mp, } #p_vw: ::syan::visit::SeqView< #{&s.ty} > >(

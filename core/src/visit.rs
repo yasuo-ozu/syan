@@ -68,22 +68,17 @@ pub trait Repeater<const INDEX: usize> {
 /// place. The required core (`len`/`get`/`get_mut`/`insert`/`remove`) is object-safe; the ergonomic
 /// helpers are `Self: Sized` provided methods.
 pub trait SeqView<T> {
-    /// Number of elements.
     fn len(&self) -> usize;
-    /// Shared access to element `i` (`None` if out of range).
     fn get(&self, i: usize) -> Option<&T>;
-    /// Mutable access to element `i` — edit a node in place, no clone (`None` if out of range).
+    /// Edit an element in place — no clone.
     fn get_mut(&mut self, i: usize) -> Option<&mut T>;
-    /// Insert `value` before index `i` (`i == len` appends).
+    /// Insert before index `i` (`i == len` appends).
     fn insert(&mut self, i: usize, value: T);
-    /// Remove and return element `i`, shifting the rest down.
     fn remove(&mut self, i: usize) -> T;
 
-    /// Whether the collection is empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    /// Append `value` to the end.
     fn push(&mut self, value: T)
     where
         Self: Sized,
@@ -103,7 +98,7 @@ pub trait SeqView<T> {
             }
         }
     }
-    /// Keep only the elements for which `f` returns `true` (visiting each in place first).
+    /// Visit each element in place, then drop those for which `f` returns `false`.
     fn retain_mut(&mut self, mut f: impl FnMut(&mut T) -> bool)
     where
         Self: Sized,
@@ -121,9 +116,8 @@ pub trait SeqView<T> {
             }
         }
     }
-    /// Walk the collection handing each element a [`SeqCursor`] — a positioned handle that can edit the
-    /// node in place and structurally `remove` / `replace` / `insert_before` / `insert_after` it, with the
-    /// index bookkeeping handled here. (Elements inserted *after* the current one are not re-visited.)
+    /// Walk the collection handing each element a [`SeqCursor`] for structural edits, advancing the index
+    /// correctly across removals/insertions. Elements inserted *after* the current one are not re-visited.
     fn edit_each(&mut self, mut f: impl FnMut(&mut SeqCursor<'_, T>))
     where
         Self: Sized,
@@ -147,29 +141,26 @@ pub struct SeqCursor<'a, T> {
 }
 
 impl<'a, T> SeqCursor<'a, T> {
-    /// Shared access to the current node.
     pub fn get(&self) -> &T {
         self.seq.get(self.idx).expect("cursor in bounds")
     }
-    /// Mutable access to the current node — edit in place, no clone.
+    /// Edit the current node in place — no clone.
     pub fn get_mut(&mut self) -> &mut T {
         self.seq.get_mut(self.idx).expect("cursor in bounds")
     }
-    /// Replace the current node with `value`.
     pub fn replace(&mut self, value: T) {
         *self.seq.get_mut(self.idx).expect("cursor in bounds") = value;
     }
-    /// Remove the current node (the next element shifts into this position and is visited next).
+    /// Remove the current node; the next element shifts into this position and is visited next.
     pub fn remove(&mut self) {
         self.seq.remove(self.idx);
         self.step = 0;
     }
-    /// Insert `value` immediately before the current node.
     pub fn insert_before(&mut self, value: T) {
         self.seq.insert(self.idx, value);
         self.idx += 1;
     }
-    /// Insert `value` immediately after the current node (it is not re-visited).
+    /// Insert after the current node; the inserted node is not re-visited.
     pub fn insert_after(&mut self, value: T) {
         self.seq.insert(self.idx + 1, value);
         self.step += 1;
@@ -179,22 +170,17 @@ impl<'a, T> SeqCursor<'a, T> {
 /// A mutable, **Option-like** view (≤1 element) of an AST `Option` field (and `Option<Box<T>>`,
 /// box-transparent). A generated `visit_<t>_opt(&mut self, &mut impl OptView<T>)` receives one.
 pub trait OptView<T> {
-    /// Whether a node is present.
     fn is_some(&self) -> bool;
-    /// Shared access to the node, if present.
     fn get(&self) -> Option<&T>;
-    /// Mutable access to the node, if present — edit in place, no clone.
+    /// Edit the node in place — no clone.
     fn get_mut(&mut self) -> Option<&mut T>;
-    /// Set (fill or replace) the node.
+    /// Fill or replace the node (works on an empty slot).
     fn set(&mut self, value: T);
-    /// Remove and return the node, leaving the slot empty.
     fn take(&mut self) -> Option<T>;
 
-    /// Whether the slot is empty.
     fn is_none(&self) -> bool {
         !self.is_some()
     }
-    /// Empty the slot.
     fn clear(&mut self) {
         let _ = self.take();
     }
@@ -218,7 +204,7 @@ impl<T> SeqView<T> for Vec<T> {
     }
 }
 
-// Box-transparent: the view element is the inner `T`, the `Box` is managed here.
+// Box-transparent: the view element is the inner `T` (the `Box` is hidden).
 impl<T> SeqView<T> for Vec<Box<T>> {
     fn len(&self) -> usize {
         <[Box<T>]>::len(self)
@@ -237,9 +223,8 @@ impl<T> SeqView<T> for Vec<Box<T>> {
     }
 }
 
-// A `Box` is transparent for views: it forwards to the boxed view, so a `Box`-around-a-container field
-// (e.g. `#[seq] Box<Vec<T>>` / `#[opt] Box<Option<T>>`) views the inner collection/Option. Only where the
-// boxed type is itself a view (so a bare `Box<Leaf>` whose `Leaf` is not a view is *not* a view).
+// A `Box` forwards to the boxed view (only where the boxed type is itself a view) — so a
+// `Box`-around-a-container field (`#[seq] Box<Vec<T>>` / `#[opt] Box<Option<T>>`) views the inner one.
 impl<E, T: SeqView<E> + ?Sized> SeqView<E> for Box<T> {
     fn len(&self) -> usize {
         <T as SeqView<E>>::len(&**self)
