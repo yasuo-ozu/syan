@@ -186,40 +186,74 @@ pub trait OptView<T> {
     }
 }
 
-impl<T> SeqView<T> for Vec<T> {
-    fn len(&self) -> usize {
-        <[T]>::len(self)
+/// How a stored element wraps the viewed node `T`: identity, `Box<T>`, or `Attempt<T>` (a transparent
+/// `Deref` newtype). One `SeqView`/`OptView` impl per container is generic over the wrapper, so the
+/// `Box`/`Attempt` element forms are covered box-transparently without separate impls.
+#[doc(hidden)]
+pub trait Wrap<T> {
+    fn as_node(&self) -> &T;
+    fn as_node_mut(&mut self) -> &mut T;
+    fn wrap(node: T) -> Self;
+    fn into_node(self) -> T;
+}
+impl<T> Wrap<T> for T {
+    fn as_node(&self) -> &T {
+        self
     }
-    fn get(&self, i: usize) -> Option<&T> {
-        <[T]>::get(self, i)
+    fn as_node_mut(&mut self) -> &mut T {
+        self
     }
-    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        <[T]>::get_mut(self, i)
+    fn wrap(node: T) -> T {
+        node
     }
-    fn insert(&mut self, i: usize, value: T) {
-        Vec::insert(self, i, value);
+    fn into_node(self) -> T {
+        self
     }
-    fn remove(&mut self, i: usize) -> T {
-        Vec::remove(self, i)
+}
+impl<T> Wrap<T> for Box<T> {
+    fn as_node(&self) -> &T {
+        self
+    }
+    fn as_node_mut(&mut self) -> &mut T {
+        self
+    }
+    fn wrap(node: T) -> Box<T> {
+        Box::new(node)
+    }
+    fn into_node(self) -> T {
+        *self
+    }
+}
+impl<T> Wrap<T> for crate::nested::Attempt<T> {
+    fn as_node(&self) -> &T {
+        &self.0
+    }
+    fn as_node_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+    fn wrap(node: T) -> Self {
+        crate::nested::Attempt(node)
+    }
+    fn into_node(self) -> T {
+        self.0
     }
 }
 
-// Box-transparent: the view element is the inner `T` (the `Box` is hidden).
-impl<T> SeqView<T> for Vec<Box<T>> {
+impl<T, W: Wrap<T>> SeqView<T> for Vec<W> {
     fn len(&self) -> usize {
-        <[Box<T>]>::len(self)
+        <[W]>::len(self)
     }
     fn get(&self, i: usize) -> Option<&T> {
-        <[Box<T>]>::get(self, i).map(|b| &**b)
+        <[W]>::get(self, i).map(W::as_node)
     }
     fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        <[Box<T>]>::get_mut(self, i).map(|b| &mut **b)
+        <[W]>::get_mut(self, i).map(W::as_node_mut)
     }
     fn insert(&mut self, i: usize, value: T) {
-        Vec::insert(self, i, Box::new(value));
+        Vec::insert(self, i, W::wrap(value));
     }
     fn remove(&mut self, i: usize) -> T {
-        *Vec::remove(self, i)
+        Vec::remove(self, i).into_node()
     }
 }
 
@@ -261,185 +295,57 @@ impl<E, T: OptView<E> + ?Sized> OptView<E> for Box<T> {
     }
 }
 
-impl<T> SeqView<T> for std::collections::VecDeque<T> {
+impl<T, W: Wrap<T>> SeqView<T> for std::collections::VecDeque<W> {
     fn len(&self) -> usize {
         std::collections::VecDeque::len(self)
     }
     fn get(&self, i: usize) -> Option<&T> {
-        std::collections::VecDeque::get(self, i)
+        std::collections::VecDeque::get(self, i).map(W::as_node)
     }
     fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        std::collections::VecDeque::get_mut(self, i)
+        std::collections::VecDeque::get_mut(self, i).map(W::as_node_mut)
     }
     fn insert(&mut self, i: usize, value: T) {
-        std::collections::VecDeque::insert(self, i, value);
+        std::collections::VecDeque::insert(self, i, W::wrap(value));
     }
     fn remove(&mut self, i: usize) -> T {
-        std::collections::VecDeque::remove(self, i).expect("index in bounds")
+        std::collections::VecDeque::remove(self, i).expect("index in bounds").into_node()
     }
 }
 
-impl<T> SeqView<T> for std::collections::VecDeque<Box<T>> {
-    fn len(&self) -> usize {
-        std::collections::VecDeque::len(self)
-    }
-    fn get(&self, i: usize) -> Option<&T> {
-        std::collections::VecDeque::get(self, i).map(|b| &**b)
-    }
-    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        std::collections::VecDeque::get_mut(self, i).map(|b| &mut **b)
-    }
-    fn insert(&mut self, i: usize, value: T) {
-        std::collections::VecDeque::insert(self, i, Box::new(value));
-    }
-    fn remove(&mut self, i: usize) -> T {
-        *std::collections::VecDeque::remove(self, i).expect("index in bounds")
-    }
-}
-
-// `Attempt<T>` is a transparent `Deref` newtype (a parse-backtracking wrapper), peeled like `Box` by the
-// visitor — so the views see through it too.
-impl<T> SeqView<T> for Vec<crate::nested::Attempt<T>> {
-    fn len(&self) -> usize {
-        <[crate::nested::Attempt<T>]>::len(self)
-    }
-    fn get(&self, i: usize) -> Option<&T> {
-        <[crate::nested::Attempt<T>]>::get(self, i).map(|a| &**a)
-    }
-    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        <[crate::nested::Attempt<T>]>::get_mut(self, i).map(|a| &mut **a)
-    }
-    fn insert(&mut self, i: usize, value: T) {
-        Vec::insert(self, i, crate::nested::Attempt(value));
-    }
-    fn remove(&mut self, i: usize) -> T {
-        Vec::remove(self, i).0
-    }
-}
-
-impl<T> SeqView<T> for std::collections::VecDeque<crate::nested::Attempt<T>> {
-    fn len(&self) -> usize {
-        std::collections::VecDeque::len(self)
-    }
-    fn get(&self, i: usize) -> Option<&T> {
-        std::collections::VecDeque::get(self, i).map(|a| &**a)
-    }
-    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        std::collections::VecDeque::get_mut(self, i).map(|a| &mut **a)
-    }
-    fn insert(&mut self, i: usize, value: T) {
-        std::collections::VecDeque::insert(self, i, crate::nested::Attempt(value));
-    }
-    fn remove(&mut self, i: usize) -> T {
-        std::collections::VecDeque::remove(self, i).expect("index in bounds").0
-    }
-}
-
-// `Punctuated` insert/push synthesize the separator via `Punct::default()`, hence `P: Default`.
-impl<T, P: Default> SeqView<T> for crate::nested::Punctuated<T, P> {
+// `insert`/`push` synthesize the separator via `Punct::default()`, hence `P: Default`.
+impl<T, W: Wrap<T>, P: Default> SeqView<T> for crate::nested::Punctuated<W, P> {
     fn len(&self) -> usize {
         crate::nested::Punctuated::len(self)
     }
     fn get(&self, i: usize) -> Option<&T> {
-        crate::nested::Punctuated::iter(self).nth(i)
+        crate::nested::Punctuated::iter(self).nth(i).map(W::as_node)
     }
     fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        crate::nested::Punctuated::get_mut(self, i)
+        crate::nested::Punctuated::get_mut(self, i).map(W::as_node_mut)
     }
     fn insert(&mut self, i: usize, value: T) {
-        crate::nested::Punctuated::insert(self, i, value);
+        crate::nested::Punctuated::insert(self, i, W::wrap(value));
     }
     fn remove(&mut self, i: usize) -> T {
-        crate::nested::Punctuated::remove(self, i).expect("index in bounds")
+        crate::nested::Punctuated::remove(self, i).expect("index in bounds").into_node()
     }
 }
 
-impl<T, P: Default> SeqView<T> for crate::nested::Punctuated<Box<T>, P> {
-    fn len(&self) -> usize {
-        crate::nested::Punctuated::len(self)
-    }
-    fn get(&self, i: usize) -> Option<&T> {
-        crate::nested::Punctuated::iter(self).nth(i).map(|b| &**b)
-    }
-    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        crate::nested::Punctuated::get_mut(self, i).map(|b| &mut **b)
-    }
-    fn insert(&mut self, i: usize, value: T) {
-        crate::nested::Punctuated::insert(self, i, Box::new(value));
-    }
-    fn remove(&mut self, i: usize) -> T {
-        *crate::nested::Punctuated::remove(self, i).expect("index in bounds")
-    }
-}
-
-impl<T, P: Default> SeqView<T> for crate::nested::Punctuated<crate::nested::Attempt<T>, P> {
-    fn len(&self) -> usize {
-        crate::nested::Punctuated::len(self)
-    }
-    fn get(&self, i: usize) -> Option<&T> {
-        crate::nested::Punctuated::iter(self).nth(i).map(|a| &**a)
-    }
-    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
-        crate::nested::Punctuated::get_mut(self, i).map(|a| &mut **a)
-    }
-    fn insert(&mut self, i: usize, value: T) {
-        crate::nested::Punctuated::insert(self, i, crate::nested::Attempt(value));
-    }
-    fn remove(&mut self, i: usize) -> T {
-        crate::nested::Punctuated::remove(self, i).expect("index in bounds").0
-    }
-}
-
-impl<T> OptView<T> for Option<T> {
+impl<T, W: Wrap<T>> OptView<T> for Option<W> {
     fn is_some(&self) -> bool {
         Option::is_some(self)
     }
     fn get(&self) -> Option<&T> {
-        self.as_ref()
+        self.as_ref().map(W::as_node)
     }
     fn get_mut(&mut self) -> Option<&mut T> {
-        self.as_mut()
+        self.as_mut().map(W::as_node_mut)
     }
     fn set(&mut self, value: T) {
-        *self = Some(value);
+        *self = Some(W::wrap(value));
     }
     fn take(&mut self) -> Option<T> {
-        Option::take(self)
-    }
-}
-
-impl<T> OptView<T> for Option<Box<T>> {
-    fn is_some(&self) -> bool {
-        Option::is_some(self)
-    }
-    fn get(&self) -> Option<&T> {
-        self.as_deref()
-    }
-    fn get_mut(&mut self) -> Option<&mut T> {
-        self.as_deref_mut()
-    }
-    fn set(&mut self, value: T) {
-        *self = Some(Box::new(value));
-    }
-    fn take(&mut self) -> Option<T> {
-        Option::take(self).map(|b| *b)
-    }
-}
-
-impl<T> OptView<T> for Option<crate::nested::Attempt<T>> {
-    fn is_some(&self) -> bool {
-        Option::is_some(self)
-    }
-    fn get(&self) -> Option<&T> {
-        self.as_ref().map(|a| &**a)
-    }
-    fn get_mut(&mut self) -> Option<&mut T> {
-        self.as_mut().map(|a| &mut **a)
-    }
-    fn set(&mut self, value: T) {
-        *self = Some(crate::nested::Attempt(value));
-    }
-    fn take(&mut self) -> Option<T> {
-        Option::take(self).map(|a| a.0)
+        Option::take(self).map(W::into_node)
     }
 }

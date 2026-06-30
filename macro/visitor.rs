@@ -793,10 +793,8 @@ fn tuple_impls(
         .collect()
 }
 
-/// The `#[seq]` / `#[opt]` view marker on a field (preserved into the `#[derive(Ast)]` metadata), or
-/// `None` if unmarked. A marked field is dispatched through its `SeqView` / `OptView` container-edit view
-/// (`visit_mut` side); an unmarked field — even a `Vec` / `Option` — is an ordinary (non-structural)
-/// descent.
+/// The `#[seq]`/`#[opt]` marker on a field (`None` if unmarked), preserved into the `#[derive(Ast)]`
+/// metadata so the visitor can dispatch the field through its `SeqView`/`OptView` view.
 fn field_view(attrs: &[Attribute]) -> Option<Container> {
     let seq = attrs.iter().any(|a| a.path().is_ident("seq"));
     let opt = attrs.iter().any(|a| a.path().is_ident("opt"));
@@ -821,8 +819,8 @@ struct Lower<'a> {
     /// Fetched types keyed by `norm_path`, for resolving an intermediate's def when drilling.
     done_by_path: &'a HashMap<String, &'a DoneType>,
     mutable: bool,
-    /// (mut walk only) heads reached in a single Vec-like / Option-like slot — drives which
-    /// `visit_<t>_seq` / `visit_<t>_opt` container-edit methods `gen_side` emits. See `docs/visitor-edit-plan.md`.
+    /// (mut walk) heads reached in a `#[seq]`/`#[opt]` field — drive which `visit_<t>_seq`/`_opt`
+    /// methods `gen_side` emits.
     seq_used: &'a RefCell<HashSet<String>>,
     opt_used: &'a RefCell<HashSet<String>>,
 }
@@ -836,10 +834,9 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Emit the container-view edit dispatch (`visit_mut` only) for a directly-followed method `head`
-    /// held in a single Vec-like / Option-like `kind` layer: `this.visit_<head>_seq(&mut field)` /
-    /// `_opt(..)`. `binding` is the `&mut <field>` (the field type itself `impl SeqView<head>` /
-    /// `OptView<head>`, box-transparently). Records the `(head, kind)` usage so `gen_side` emits it.
+    /// Emit `this.visit_<head>_seq(binding)` / `_opt(binding)` for a `#[seq]`/`#[opt]` field, recording
+    /// the `(head, kind)` usage so `gen_side` emits the method. `binding` is the `&mut <field>`, whose
+    /// type `impl`s `SeqView<head>`/`OptView<head>` (box-transparently), so it is passed as-is.
     fn view_dispatch(&self, head: &Ident, binding: &TokenStream, kind: &Container) -> TokenStream {
         let snake = to_snake(head);
         match kind {
