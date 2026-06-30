@@ -13,6 +13,10 @@ fn visitor_diagnostics() {
     // `visitor!()` over a cycle that follows an unlisted intermediate forming a cycle of unlisted
     // intermediates (list one of them to break it).
     t.compile_fail("tests/ui/visitor_recurse_unlisted_coroot.rs");
+    // The container-edit views (`visit_*_seq`/`visit_*_opt`) are generated ONLY for a field marked
+    // `#[seq]`/`#[opt]` (no auto-detection); overriding them for an unmarked field is a "not a member of
+    // trait" error.
+    t.compile_fail("tests/ui/visitor_edit_unmarked_no_view.rs");
     // (A `where`-bounded generic param not shared by all visited types is now SUPPORTED — the bounded
     //  param becomes a per-method generic, trait keyed on the shared subset; see
     //  `visitor_union_where_unshared_param.rs`.)

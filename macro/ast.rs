@@ -159,9 +159,16 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
     entries
 }
 
-/// Produce a cleaned copy of the input definition (all attributes stripped) so it can be embedded
-/// verbatim inside the metadata `macro_rules!` and re-parsed as a `syn::Item` by `__visitor_build`.
+/// Produce a cleaned copy of the input definition (attributes stripped, except the field-level
+/// `#[seq]`/`#[opt]` view markers which are preserved so `__visitor_build` sees them) so it can be
+/// embedded verbatim inside the metadata `macro_rules!` and re-parsed as a `syn::Item`.
 pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
+    // Keep only the `#[seq]`/`#[opt]` field markers (the visitor reads them to dispatch a field through
+    // its `SeqView`/`OptView` edit method); drop everything else.
+    fn clean_field_attrs(f: &mut Field) {
+        f.attrs.retain(|a| a.path().is_ident("seq") || a.path().is_ident("opt"));
+        f.vis = Visibility::Inherited;
+    }
     let mut di = input.clone();
     di.attrs.clear();
     di.vis = Visibility::Public(Default::default());
@@ -170,21 +177,18 @@ pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
             for v in &mut e.variants {
                 v.attrs.clear();
                 for f in &mut v.fields {
-                    f.attrs.clear();
-                    f.vis = Visibility::Inherited;
+                    clean_field_attrs(f);
                 }
             }
         }
         Data::Struct(s) => {
             for f in &mut s.fields {
-                f.attrs.clear();
-                f.vis = Visibility::Inherited;
+                clean_field_attrs(f);
             }
         }
         Data::Union(u) => {
             for f in &mut u.fields.named {
-                f.attrs.clear();
-                f.vis = Visibility::Inherited;
+                clean_field_attrs(f);
             }
         }
     }
@@ -392,6 +396,10 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
         quote! {
             #(for (n, ty) in leak_tys.iter().enumerate()) {
                 #[automatically_derived]
+                // This associated type mirrors a user field type verbatim, so a deliberate AST shape can
+                // trip clippy's type-shape lints (`Box<Vec<_>>`, `Vec<Box<_>>`, deep nesting); silence them
+                // on the generated mirror so they never surface in a consumer's lint output.
+                #[allow(clippy::box_collection, clippy::vec_box, clippy::type_complexity)]
                 impl #g_def #syan::visit::Repeater< #{Literal::usize_unsuffixed(n)} >
                     for #ident #g_use #where_clause
                 {

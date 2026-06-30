@@ -1,9 +1,10 @@
 use crate::util::{
     angle, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
-    method_ident_m, mt, param_name, param_use, peel, to_snake, Head,
+    method_ident_m, mt, param_name, param_use, peel, to_snake, Container, Head,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
@@ -792,6 +793,24 @@ fn tuple_impls(
         .collect()
 }
 
+/// The `#[seq]` / `#[opt]` view marker on a field (preserved into the `#[derive(Ast)]` metadata), or
+/// `None` if unmarked. A marked field is dispatched through its `SeqView` / `OptView` container-edit view
+/// (`visit_mut` side); an unmarked field — even a `Vec` / `Option` — is an ordinary (non-structural)
+/// descent.
+fn field_view(attrs: &[Attribute]) -> Option<Container> {
+    let seq = attrs.iter().any(|a| a.path().is_ident("seq"));
+    let opt = attrs.iter().any(|a| a.path().is_ident("opt"));
+    match (seq, opt) {
+        (true, true) => {
+            let bad = attrs.iter().find(|a| a.path().is_ident("opt")).unwrap();
+            abort!(bad, "a field cannot be both `#[seq]` and `#[opt]`");
+        }
+        (true, false) => Some(Container::Seq),
+        (false, true) => Some(Container::Opt),
+        (false, false) => None,
+    }
+}
+
 /// Lowers a visited type's `visit_*` body: a field followed via a *visited/inherited* head becomes a
 /// `this.visit_<head>(..)` method call; a field followed via an *unlisted intermediate* is drilled
 /// through inline (its def destructured, recursing into its `#[subast]` fields); any other field is
@@ -802,6 +821,10 @@ struct Lower<'a> {
     /// Fetched types keyed by `norm_path`, for resolving an intermediate's def when drilling.
     done_by_path: &'a HashMap<String, &'a DoneType>,
     mutable: bool,
+    /// (mut walk only) heads reached in a single Vec-like / Option-like slot — drives which
+    /// `visit_<t>_seq` / `visit_<t>_opt` container-edit methods `gen_side` emits. See `docs/visitor-edit-plan.md`.
+    seq_used: &'a RefCell<HashSet<String>>,
+    opt_used: &'a RefCell<HashSet<String>>,
 }
 
 impl<'a> Lower<'a> {
@@ -810,6 +833,26 @@ impl<'a> Lower<'a> {
             quote!(&mut)
         } else {
             quote!(&)
+        }
+    }
+
+    /// Emit the container-view edit dispatch (`visit_mut` only) for a directly-followed method `head`
+    /// held in a single Vec-like / Option-like `kind` layer: `this.visit_<head>_seq(&mut field)` /
+    /// `_opt(..)`. `binding` is the `&mut <field>` (the field type itself `impl SeqView<head>` /
+    /// `OptView<head>`, box-transparently). Records the `(head, kind)` usage so `gen_side` emits it.
+    fn view_dispatch(&self, head: &Ident, binding: &TokenStream, kind: &Container) -> TokenStream {
+        let snake = to_snake(head);
+        match kind {
+            Container::Seq => {
+                self.seq_used.borrow_mut().insert(head.to_string());
+                let m = Ident::new(&format!("visit_{snake}_seq"), Span::call_site());
+                quote!( this.#m(#binding); )
+            }
+            Container::Opt => {
+                self.opt_used.borrow_mut().insert(head.to_string());
+                let m = Ident::new(&format!("visit_{snake}_opt"), Span::call_site());
+                quote!( this.#m(#binding); )
+            }
         }
     }
 
@@ -919,8 +962,9 @@ impl<'a> Lower<'a> {
                 for (idx, f) in named.named.iter().enumerate() {
                     let name = f.ident.clone().unwrap();
                     let bind = quote!(#name);
-                    if let Some(stmt) =
-                        self.lower_field(&f.ty, &bind, idx, subast, self_ident, path, depth, stack)
+                    let view = field_view(&f.attrs);
+                    if let Some(stmt) = self
+                        .lower_field(&f.ty, &bind, view, idx, subast, self_ident, path, depth, stack)
                     {
                         binds.push(quote!(#name));
                         stmts.push(stmt);
@@ -935,8 +979,9 @@ impl<'a> Lower<'a> {
                 for (idx, f) in unnamed.unnamed.iter().enumerate() {
                     let bind_id = Ident::new(&format!("__f{depth}_{idx}"), Span::call_site());
                     let bind = quote!(#bind_id);
-                    if let Some(stmt) =
-                        self.lower_field(&f.ty, &bind, idx, subast, self_ident, path, depth, stack)
+                    let view = field_view(&f.attrs);
+                    if let Some(stmt) = self
+                        .lower_field(&f.ty, &bind, view, idx, subast, self_ident, path, depth, stack)
                     {
                         pats.push(quote!(#bind_id));
                         stmts.push(stmt);
@@ -951,13 +996,15 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Lower one field. `binding` is the destructured field (a `&Field`/`&mut Field`). Returns the
-    /// visit statement(s), or `None` for a leaf / finite dead-end (the caller binds `_`).
+    /// Lower one field. `binding` is the destructured field (a `&Field`/`&mut Field`). `view` is the
+    /// field's `#[seq]`/`#[opt]` marker (the visitor dispatches such a field through its container-edit
+    /// view). Returns the visit statement(s), or `None` for a leaf / finite dead-end (binds `_`).
     #[allow(clippy::too_many_arguments)]
     fn lower_field(
         &self,
         ty: &Type,
         binding: &TokenStream,
+        view: Option<Container>,
         idx: usize,
         subast: &[SubEntry],
         self_ident: Option<&Ident>,
@@ -976,33 +1023,46 @@ impl<'a> Lower<'a> {
         // (handles nested containers like `Vec<Option<T>>`, and now `Vec<(A, B)>`). An empty body
         // (a leaf head, or a finite drill reaching nothing) ⇒ the whole field is a leaf.
         let acc = innermost_acc(&p.conts, binding);
+        // The effective head type (real ident + path) when this is a followed `Head::Path`: self
+        // (implicit) or a `#[subast]` entry (an aliased `Real as Aliased` dispatches to `visit_real`).
+        let resolved: Option<(Ident, Path)> = match &p.head {
+            Head::Path { head: phead, .. } if Some(phead) == self_ident => {
+                Some((phead.clone(), path.clone()))
+            }
+            Head::Path { head: phead, .. } => subast
+                .iter()
+                .find(|e| &e.key == phead)
+                .map(|e| (last_ident(&e.path).clone(), e.path.clone())),
+            Head::Tuple(_) => None,
+        };
+
+        // ── view path (`visit_mut` only): a field explicitly marked `#[seq]` / `#[opt]` whose peeled head
+        // is a visited type dispatches to `visit_<head>_seq` / `_opt`, passing the field `&mut` directly
+        // (Design B — the field type itself `impl SeqView<head>`/`OptView<head>`, box-transparently).
+        // Records the usage so `gen_side` emits the matching method. An unmarked field — even a `Vec` /
+        // `Option` — falls through to the ordinary (non-structural) descent below. ──
+        if self.mutable {
+            if let Some(kind) = view {
+                if let Some((head, _)) = &resolved {
+                    if self.method_set.contains(&head.to_string()) {
+                        return Some(self.view_dispatch(head, binding, &kind));
+                    }
+                }
+            }
+        }
+
         let body = match &p.head {
             // A tuple at the innermost position: destructure and lower each element (an element may
             // itself be a followed type, a container of one, or a nested tuple).
             Head::Tuple(elems) => {
                 self.lower_tuple(elems, &acc, p.head_box, idx, subast, self_ident, path, depth, stack)
             }
-            // Followed iff the head is self (implicit) or listed in this type's `#[subast]`. The
-            // *effective* head — the real type name + path — comes from the matched entry (so an
-            // aliased entry `Real as Aliased` dispatches to `visit_real`, not `visit_aliased`).
-            Head::Path { head: phead, .. } => {
-                let resolved: Option<(Ident, Path)> = if Some(phead) == self_ident {
-                    Some((phead.clone(), path.clone()))
-                } else {
-                    // else: an entry's *real* type/path (aliased entries dispatch to the real type);
-                    // no match ⇒ leaf.
-                    subast
-                        .iter()
-                        .find(|e| &e.key == phead)
-                        .map(|e| (last_ident(&e.path).clone(), e.path.clone()))
-                };
-                match resolved {
-                    Some((head, drill_path)) => {
-                        self.visit_value(&acc, &head, &drill_path, p.head_box, depth, stack)
-                    }
-                    None => quote!(),
+            Head::Path { .. } => match &resolved {
+                Some((head, drill_path)) => {
+                    self.visit_value(&acc, head, drill_path, p.head_box, depth, stack)
                 }
-            }
+                None => quote!(),
+            },
         };
         (!body.is_empty()).then(|| fold_containers(&p.conts, binding, body, self.mutable))
     }
@@ -1027,9 +1087,18 @@ impl<'a> Lower<'a> {
         let mut stmts = Vec::new();
         for (i, elem) in elems.iter().enumerate() {
             let ebind = Ident::new(&format!("__t{depth}_{idx}_{i}"), Span::call_site());
-            if let Some(stmt) =
-                self.lower_field(elem, &quote!(#ebind), idx, subast, self_ident, path, depth + 1, stack)
-            {
+            // A tuple element is a bare type with no field attrs, so it can carry no `#[seq]`/`#[opt]`.
+            if let Some(stmt) = self.lower_field(
+                elem,
+                &quote!(#ebind),
+                None,
+                idx,
+                subast,
+                self_ident,
+                path,
+                depth + 1,
+                stack,
+            ) {
                 pats.push(quote!(#ebind));
                 stmts.push(stmt);
             } else {
@@ -1044,6 +1113,7 @@ impl<'a> Lower<'a> {
         quote!( { let ( #(#pats,)* ) = #amp #stars #acc; #(#stmts)* } )
     }
 }
+
 
 /// The deduped union of every target's generic params (first declaration wins), followed by the
 /// base's params (for inheritance — the new trait must declare them to name `base::Visit<base params>`
@@ -1165,6 +1235,10 @@ fn gen_side(
     // `for<T>` generic, so the closure machinery (`&mut V` blanket / `Driver`/`Hook`/`Chain`/
     // `IntoVisitor`) is omitted and the inherent `.visit()` takes `&mut impl Visit` directly.
     struct_only: bool,
+    // (mut side) which visited types are held Vec-like / Option-like by some AST → get a
+    // `visit_<t>_seq` / `visit_<t>_opt` container-edit method. Ignored on the immutable side.
+    seq_used: &HashSet<String>,
+    opt_used: &HashSet<String>,
 ) -> TokenStream {
     let suffix = if mutable { "Mut" } else { "" };
     let id = |s: &str| Ident::new(s, Span::call_site());
@@ -1191,6 +1265,10 @@ fn gen_side(
     let p_f = fresh_ident("__F", &reserved);
     let p_a = fresh_ident("__A", &reserved);
     let p_b = fresh_ident("__B", &reserved);
+    // Per-method generics for the container-edit views (`visit_*_seq`/`_opt` take `&mut impl SeqView<T>`
+    // / `OptView<T>` — the field type itself, no wrapper).
+    let p_vw = fresh_ident("__VW", &reserved);
+    let p_ow = fresh_ident("__OW", &reserved);
 
     struct S {
         ty: TokenStream,
@@ -1199,7 +1277,16 @@ fn gen_side(
         /// Generated doc for the trait method (`fn visit_<name>`) and the free fn (`visit_<name>`).
         tdoc: String,
         fdoc: String,
+        /// Docs for the `visit_mut`-side container-edit methods (`visit_<name>_seq`/`_opt`).
+        seq_doc: String,
+        opt_doc: String,
         method: Ident,
+        /// Container-edit methods (`visit_<name>_seq`/`_opt`); emitted only when `has_seq`/`has_opt`.
+        seq_method: Ident,
+        opt_method: Ident,
+        /// Whether some AST holds this type Vec-like / Option-like (drives emission of `seq`/`opt`).
+        has_seq: bool,
+        has_opt: bool,
         /// This type's non-shared params (heterogeneous mode), as the trait method's generics —
         /// lifetimes-first; empty in union mode.
         method_params: Vec<GenericParam>,
@@ -1265,12 +1352,31 @@ fn gen_side(
                  here; call it from an override to keep descending.",
                 mut_sfx = mt(mutable),
             );
+            let seq_doc = format!(
+                "Edit the `{name}` nodes held in a `Vec`-like slot of their parent — given a \
+                 [`SeqView`](::syan::visit::SeqView) over the collection (edit in place via `get_mut`, \
+                 or `push`/`insert`/`remove`/`retain_mut`/`edit_each`). The default visits each element \
+                 in place via `{mname}`; override to restructure the collection.",
+            );
+            let opt_doc = format!(
+                "Edit the `{name}` node held in an `Option`-like slot of their parent — given an \
+                 [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`). The default visits the \
+                 present node via `{mname}`.",
+            );
+            let has_seq = mutable && seq_used.contains(&name);
+            let has_opt = mutable && opt_used.contains(&name);
             S {
                 ty,
                 name,
                 tdoc,
                 fdoc,
+                seq_doc,
+                opt_doc,
                 method: method_ident_m(&ident, mutable),
+                seq_method: Ident::new(&format!("visit_{}_seq", to_snake(&ident)), Span::call_site()),
+                opt_method: Ident::new(&format!("visit_{}_opt", to_snake(&ident)), Span::call_site()),
+                has_seq,
+                has_opt,
                 method_params,
                 free_params,
                 trait_where,
@@ -1368,8 +1474,32 @@ fn gen_side(
                 // In heterogeneous (struct-only) mode the method carries this type's non-shared params
                 // as generics, and `where Self: Sized` (the method-generic dispatch needs a sized Self).
                 #[doc = #{&s.tdoc}]
-                fn #{&s.method}< #(for mp in &s.method_params) { #mp, } >(&mut self, i: #amp #{&s.ty}) #{&s.trait_where} {
+                fn #{&s.method}< #(for mp in &s.method_params) { #mp, } >(&mut self, i: #amp #{&s.ty})
+                    #{&s.trait_where}
+                {
                     #{&s.method}(self, i)
+                }
+                // The opt-in container-edit hooks (mut side only, emitted only where this type is held
+                // Vec-like / Option-like). Default: descend each held node in place via the per-node
+                // `visit_*_mut` (the `visit_*_mut` interface is unchanged). Override to restructure the
+                // parent's collection / `Option` through the view. The descent passes the field directly.
+                #(if s.has_seq) {
+                    #[doc = #{&s.seq_doc}]
+                    fn #{&s.seq_method}< #(for mp in &s.method_params) { #mp, } #p_vw: ::syan::visit::SeqView< #{&s.ty} > >(
+                        &mut self,
+                        v: &mut #p_vw,
+                    ) #{&s.trait_where} {
+                        #{&s.seq_method}(self, v)
+                    }
+                }
+                #(if s.has_opt) {
+                    #[doc = #{&s.opt_doc}]
+                    fn #{&s.opt_method}< #(for mp in &s.method_params) { #mp, } #p_ow: ::syan::visit::OptView< #{&s.ty} > >(
+                        &mut self,
+                        v: &mut #p_ow,
+                    ) #{&s.trait_where} {
+                        #{&s.opt_method}(self, v)
+                    }
                 }
             }
         }
@@ -1379,6 +1509,16 @@ fn gen_side(
                 #(for s in &sides) {
                     fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                         <#p_v as #visit_tr #g_use>::#{&s.method}(self, i)
+                    }
+                    #(if s.has_seq) {
+                        fn #{&s.seq_method}< #p_vw: ::syan::visit::SeqView< #{&s.ty} > >(&mut self, v: &mut #p_vw) {
+                            <#p_v as #visit_tr #g_use>::#{&s.seq_method}(self, v)
+                        }
+                    }
+                    #(if s.has_opt) {
+                        fn #{&s.opt_method}< #p_ow: ::syan::visit::OptView< #{&s.ty} > >(&mut self, v: &mut #p_ow) {
+                            <#p_v as #visit_tr #g_use>::#{&s.opt_method}(self, v)
+                        }
                     }
                 }
             }
@@ -1394,6 +1534,28 @@ fn gen_side(
                 i: #amp #{&s.ty},
             ) #{&s.free_where} {
                 #{&s.body}
+            }
+            // Default container-edit descent: visit each held node in place via the per-node `visit_*_mut`
+            // (so a `visit_*_mut` override / closure hook still runs for every element).
+            #(if s.has_seq) {
+                #[doc = #{&s.seq_doc}]
+                pub fn #{&s.seq_method}< #(for gp in &s.free_params) { #gp, } #p_vw: ::syan::visit::SeqView< #{&s.ty} >, #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >(
+                    this: &mut #p_v,
+                    v: &mut #p_vw,
+                ) #{&s.free_where} {
+                    ::syan::visit::SeqView::for_each_mut(v, |__syan_e| this.#{&s.method}(__syan_e));
+                }
+            }
+            #(if s.has_opt) {
+                #[doc = #{&s.opt_doc}]
+                pub fn #{&s.opt_method}< #(for gp in &s.free_params) { #gp, } #p_ow: ::syan::visit::OptView< #{&s.ty} >, #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >(
+                    this: &mut #p_v,
+                    v: &mut #p_ow,
+                ) #{&s.free_where} {
+                    if let ::core::option::Option::Some(__syan_e) = ::syan::visit::OptView::get_mut(v) {
+                        this.#{&s.method}(__syan_e);
+                    }
+                }
             }
         }
 
@@ -1745,15 +1907,23 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     let g_def = angle(&g_params);
     let g_use = angle(&g_args);
 
+    // Container-edit usage, populated by the mut walk below; consumed by `gen_side(true, ..)` to decide
+    // which `visit_<t>_seq` / `visit_<t>_opt` to emit. Shared by both `Lower`s (only the mut one records).
+    let seq_used: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    let opt_used: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     let lower = Lower {
         method_set: &method_set,
         done_by_path: &done_by_path,
         mutable: false,
+        seq_used: &seq_used,
+        opt_used: &opt_used,
     };
     let lower_mut = Lower {
         method_set: &method_set,
         done_by_path: &done_by_path,
         mutable: true,
+        seq_used: &seq_used,
+        opt_used: &opt_used,
     };
 
     let vtypes: Vec<VType> = targets
@@ -1815,13 +1985,17 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .filter(|p| seen_pred.insert(quote!(#p).to_string()))
         .collect();
 
+    // The mut walk has finished recording container-edit usage; take the populated sets.
+    let seq_used = seq_used.into_inner();
+    let opt_used = opt_used.into_inner();
+
     let shared = gen_side(
         false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
-        &union_where, struct_only,
+        &union_where, struct_only, &seq_used, &opt_used,
     );
     let mutable = gen_side(
         true, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
-        &union_where, struct_only,
+        &union_where, struct_only, &seq_used, &opt_used,
     );
 
     // Every visitor module exports its full visited-type set (idents), its generic-param union

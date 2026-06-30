@@ -67,6 +67,20 @@ impl<Item, Punct> Punctuated<Item, Punct> {
         self.inner.0.as_mut().map(|(first, _)| first.as_mut())
     }
 
+    /// Mutable access to the item at `index` (0 = the first item), or `None` if out of bounds.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut Item> {
+        match &mut self.inner.0 {
+            None => None,
+            Some((first, vec)) => {
+                if index == 0 {
+                    Some(first.as_mut())
+                } else {
+                    vec.get_mut(index - 1).map(|(_, item)| item)
+                }
+            }
+        }
+    }
+
     pub fn last_mut(&mut self) -> Option<&mut Item> {
         match &mut self.inner.0 {
             None => None,

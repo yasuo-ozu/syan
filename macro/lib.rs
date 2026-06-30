@@ -87,7 +87,7 @@ pub fn unparse(input: TokenStream1) -> TokenStream1 {
 }
 
 #[proc_macro_error]
-#[proc_macro_derive(Ast, attributes(syan, subast))]
+#[proc_macro_derive(Ast, attributes(syan, subast, seq, opt))]
 pub fn ast_derive(input: TokenStream1) -> TokenStream1 {
     let input: DeriveInput = parse_macro_input!(input);
     let syan = input.attrs.get_syan();

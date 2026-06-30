@@ -34,6 +34,39 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   pass (`Hook` + `Driver` + `Chain`).
 - **`visit_mut`**: full in-place mirror. Reduce/append by overriding the *parent*'s `visit_*_mut`
   (it owns the `&mut Vec`/`&mut Option`) — `visitor_reduce.rs`.
+- **Structural edits (container views — `visit_*_seq` / `visit_*_opt`)**: a field **explicitly marked
+  `#[seq]` or `#[opt]`** (a `#[derive(Ast)]` helper attr, preserved into the metadata by
+  `cleaned_definition`) makes its peeled-head visited type get a **new, additive** mut-trait method that
+  receives a *view of the owning collection/Option* and edits it **in place, no clone** —
+  `visit_<t>_seq(&mut self, &mut impl SeqView<T>)` / `visit_<t>_opt(&mut self, &mut impl OptView<T>)`.
+  There is **no auto-detection from the container type**: an *unmarked* `Vec`/`Option` field is an
+  ordinary (non-structural) descent and yields *no* view method (`ui/visitor_edit_unmarked_no_view.rs` —
+  overriding it is "not a member of trait"). `SeqView<T>`/`OptView<T>` are **public traits in
+  `core::visit` implemented directly on the containers** (`Vec`/`VecDeque`/`Punctuated` + the
+  `Box`/`Attempt`-wrapped element forms, box-transparently — element type is a **type param** so
+  `Vec<Box<T>>: SeqView<T>` coexists with `SeqView<Box<T>>`), **plus `Box<T>` as a transparent forwarder**
+  `impl<E, T: SeqView<E>> SeqView<E> for Box<T>` (and the `OptView` mirror) — so a `Box`-around-a-container
+  field (`#[seq] Box<Vec<T>>` / `#[opt] Box<Option<T>>`) views the inner collection/Option; a bare
+  `Box<Leaf>` whose `Leaf` is not itself a view is *not* a view. The descent passes the field `&mut`
+  directly (no wrapper) — Design B in
+  `docs/visitor-edit-plan.md`. `SeqView`: `len`/`get`/`get_mut`/`insert`/`remove` core +
+  `push`/`for_each_mut`/`retain_mut`/`edit_each` (a `SeqCursor` with `remove`/`replace`/`insert_before`/
+  `insert_after`); `OptView`: `is_some`/`get`/`get_mut`/`set`/`take`. **`visit_*_mut` interface unchanged**
+  (`visit_<t>_mut(&mut self, &mut T) -> ()`); the view defaults descend each held node in place via
+  `visit_<t>_mut`, so a `visit_*_mut`-only visitor (and closures via `Driver`) are unaffected. A marked
+  field anywhere (listed *or* drilled) drives emission — usage collected by the mut `Lower` walk into
+  `seq_used`/`opt_used` via `field_view`/`view_dispatch` (`macro/visitor.rs`). Closures/`Hook`/`Chain` are
+  non-editing (deferred). Tests: `visitor_reduce.rs` (`#[seq]`/`#[opt]` on Vec+Option, parent-override
+  style still works), `visitor_edit.rs` (unmarked fixed-slot in-place + plain-`visit_*_mut` regression,
+  marked Vec+Option views with `push`/`set`/`take`, `#[seq] Vec<Box>` + `#[opt] Option<Box>` inside a
+  `#[recurse]` cycle, a **multi-type cycle** cross-edge `#[seq] Vec<Box<Stmt>>`, and a marked Vec/Option
+  inside a **drilled** unlisted intermediate); `visitor_edit_containers.rs` (`#[seq]` `VecDeque` +
+  `Punctuated` views, and an **unmarked** Vec/Option still traversed by a closure);
+  `rust/tests/cross_crate_edit.rs` (downstream `VisitMut` edits an upstream marked `Vec`/`Option` via core
+  `SeqView`/`OptView`); `visitor_edit_containers.rs::boxed_container` (`Box<Vec>`/`Box<Option>` forwarding);
+  `ui/visitor_edit_unmarked_no_view.rs`. `SeqView`/`OptView` cover `Vec`/`VecDeque`/`Punctuated<…,P:
+  Default>`/`Option` + box-transparent `Box`/`Attempt` element forms + the forwarding `Box<inner-view>`
+  (element type is a type param, so the wrapped forms coexist coherently).
 - **Inheritance `visitor!(base => New)`**: base exports a `__syan_visited` macro (visited idents +
   param union `@bg` + ancestor chain `@an`); New extends it via supertrait at the base's own arity.
   Wider new union and multi-level `base => mid => New` chains work — `visitor_inherit_arity.rs`,

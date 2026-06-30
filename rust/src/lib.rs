@@ -33,6 +33,33 @@ pub mod visit {
     syan::visit::visitor!(crate::ast::Expr, crate::ast::Stmt);
 }
 
+/// A sample AST with `Vec`/`Option` child slots + an in-crate visitor, so a downstream crate can drive
+/// the container-edit views (`visit_*_seq`/`_opt`) across the crate boundary — the views themselves live
+/// in `syan::visit` (`SeqView`/`OptView`), so a downstream `VisitMut` impl edits an upstream collection
+/// with no orphan issue. See `tests/cross_crate_edit.rs`.
+pub mod seqast {
+    use core::marker::PhantomData;
+    use syan::visit::Ast;
+
+    #[derive(Debug, Ast)]
+    pub struct Item<S>(pub i64, pub PhantomData<S>);
+
+    #[derive(Debug, Ast)]
+    #[subast(crate::seqast::Item)]
+    pub struct List<S> {
+        #[seq]
+        pub items: Vec<Item<S>>,
+        #[opt]
+        pub last: Option<Item<S>>,
+    }
+}
+
+/// The visitor over [`seqast`], generated in this crate (so its inherent `.visit_mut` is callable on the
+/// upstream `List` downstream).
+pub mod seqvisit {
+    syan::visit::visitor!(crate::seqast::List, crate::seqast::Item);
+}
+
 /// A `#[recurse]` cycle defined upstream with **no in-crate visitor** — a downstream crate builds the
 /// (depth-generic) visitor with `visitor!(syan_rust::recursed::Expr, …)`. Exercises the cross-crate
 /// `@recurse` metadata: the `$crate`-rooted `@node`/`@terms` paths resolve back to this crate.

@@ -226,7 +226,7 @@ mod imp {
 /// (typically [`Joint`] types containing character encodings). It enables runtime
 /// instantiation and formatting of compile-time symbol types.
 ///
-/// [`Joint`]: crate::nested::Joint
+/// [`Joint`]: struct@crate::nested::Joint
 ///
 /// # Variants
 ///
@@ -245,7 +245,7 @@ mod imp {
 /// This type is typically not used directly. Instead, use the [`Symbol!`] macro
 /// which generates `_Symbol<Joint<...>>` types automatically.
 ///
-/// [`Symbol!`]: crate::symbol::Symbol
+/// [`Symbol!`]: macro@crate::symbol::Symbol
 ///
 /// # Examples
 ///
@@ -262,7 +262,7 @@ mod imp {
 /// # Traits
 ///
 /// - [`Default`] - Always returns the `Symbol` variant
-/// - [`Display`] - Delegates to `T::default().fmt()` when `T: Default + Display`  
+/// - [`Display`](core::fmt::Display) - Delegates to `T::default().fmt()` when `T: Default + Display`
 /// - [`Debug`] - Delegates to `T::default().fmt()` when `T: Default + Debug`
 ///
 /// # Implementation Details
