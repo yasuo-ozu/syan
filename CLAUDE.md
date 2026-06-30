@@ -31,7 +31,8 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `Box<(A,B)>`) — is destructured + each element lowered (`peel`'s `Head::{Path,Tuple}`;
   `visitor_container_of_tuple.rs`, recurse: `visitor_recurse_container_of_tuple.rs`).
 - **Inputs**: struct visitors (`&mut`), single closures, and **tuples of closures** (2..=8) in **one**
-  pass (`Hook` + `Driver` + `Chain`).
+  pass (`Hook` + `Driver`; a tuple of hooks is itself a `Hook`, so it is the chaining combinator — no
+  newtype).
 - **`visit_mut`**: full in-place mirror. Reduce/append by overriding the *parent*'s `visit_*_mut`
   (it owns the `&mut Vec`/`&mut Option`) — `visitor_reduce.rs`.
 - **Structural edits (container views — `visit_*_seq` / `visit_*_opt`)**: a field **explicitly marked
@@ -55,7 +56,7 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   (`visit_<t>_mut(&mut self, &mut T) -> ()`); the view defaults descend each held node in place via
   `visit_<t>_mut`, so a `visit_*_mut`-only visitor (and closures via `Driver`) are unaffected. A marked
   field anywhere (listed *or* drilled) drives emission — usage collected by the mut `Lower` walk into
-  `seq_used`/`opt_used` via `field_view`/`view_dispatch` (`macro/visitor.rs`). Closures/`Hook`/`Chain` are
+  `seq_used`/`opt_used` via `field_view`/`view_dispatch` (`macro/visitor.rs`). Closures/`Hook` are
   non-editing (deferred). Tests: `visitor_reduce.rs` (`#[seq]`/`#[opt]` on Vec+Option, parent-override
   style still works), `visitor_edit.rs` (unmarked fixed-slot in-place + plain-`visit_*_mut` regression,
   marked Vec+Option views with `push`/`set`/`take`, `#[seq] Vec<Box>` + `#[opt] Option<Box>` inside a

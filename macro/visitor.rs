@@ -729,14 +729,15 @@ fn fresh_prefix(base: &str, reserved: &HashSet<String>, max: usize) -> String {
     prefix
 }
 
-/// Right-nested `Chain(self.0.into_hook(), Chain(self.1.into_hook(), ...))` over tuple members.
-fn build_chain(members: &[Index], chain: &Ident, into_hook: &Ident) -> TokenStream {
+/// Right-nested `(self.0.into_hook(), (self.1.into_hook(), ...))` over tuple members — a tuple of hooks
+/// is a hook (see `gen_side`), so this composes them with no combinator type.
+fn build_chain(members: &[Index], into_hook: &Ident) -> TokenStream {
     let m = &members[0];
     if members.len() == 1 {
         quote!(self.#m.#into_hook())
     } else {
-        let rest = build_chain(&members[1..], chain, into_hook);
-        quote!(#chain(self.#m.#into_hook(), #rest))
+        let rest = build_chain(&members[1..], into_hook);
+        quote!( (self.#m.#into_hook(), #rest) )
     }
 }
 
@@ -758,7 +759,6 @@ fn tuple_impls(
     let into_hook_fn = Ident::new(&format!("into_hook{}", mt(mutable)), Span::call_site());
     let visit_tr = Ident::new(&format!("Visit{suffix}"), Span::call_site());
     let driver = Ident::new(&format!("Driver{suffix}"), Span::call_site());
-    let chain_id = Ident::new(&format!("Chain{suffix}"), Span::call_site());
     // Helper param prefixes that avoid the visited types' own generic param names (so a visited type
     // may declare a param literally named `__F0`/`__T0`/…).
     let reserved: HashSet<String> = g_params.iter().map(param_name).collect();
@@ -778,7 +778,7 @@ fn tuple_impls(
                 .zip(&ts)
                 .map(|(f, t)| quote!(#f: #into_hook_tr< #(#g_args,)* #t >))
                 .collect();
-            let chain = build_chain(&members, &chain_id, &into_hook_fn);
+            let chain = build_chain(&members, &into_hook_fn);
             quote! {
                 impl< #(#g_params,)* #(#fs,)* #(#ts,)* >
                     #into_vis_tr< #(#g_args,)* ( #(#ts,)* ) > for ( #(#fs,)* )
@@ -1241,7 +1241,6 @@ fn gen_side(
     let into_hook_tr = id(&format!("IntoHook{suffix}"));
     let hook_tr = id(&format!("Hook{suffix}"));
     let driver = id(&format!("Driver{suffix}"));
-    let chain = id(&format!("Chain{suffix}"));
     let into_vis_fn = id(&format!("into_visitor{}", mt(mutable)));
     let into_hook_fn = id(&format!("into_hook{}", mt(mutable)));
     let visit_method = id(&format!("visit{}", mt(mutable)));
@@ -1605,10 +1604,10 @@ fn gen_side(
             }
         }
 
-        // --- multiple closures: Chain combinator + tuple impls ---------------------------
-        pub struct #chain<#p_a, #p_b>(pub #p_a, pub #p_b);
+        // --- multiple closures: a 2-tuple of hooks is itself a hook (calls both), so it is the
+        // tuple-of-closures combinator directly — no `Chain` newtype. `build_chain` nests them right.
         impl< #(#g_params,)* #p_a: #hook_tr #g_use, #p_b: #hook_tr #g_use >
-            #hook_tr #g_use for #chain<#p_a, #p_b> #uw
+            #hook_tr #g_use for ( #p_a, #p_b ) #uw
         {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) {

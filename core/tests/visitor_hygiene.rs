@@ -1,6 +1,6 @@
 //! Generated helper params are mixed-site-hygienic, so a visited type may declare generic params
 //! literally named `__V`/`__T`/`__H`/`__F`/`__A`/`__B` without colliding with the generated
-//! `Visit`/`Driver`/`Hook`/`Chain`/tuple machinery.
+//! `Visit`/`Driver`/`Hook`/tuple machinery.
 #![allow(non_camel_case_types)]
 
 use core::marker::PhantomData;
@@ -84,7 +84,7 @@ fn fields_named_this_and_i_are_traversed() {
 
 #[test]
 fn tuple_and_struct_visitors_with_helper_named_params() {
-    // Tuple-of-closures path (Chain + tuple impls) and the &mut-struct path both compile and run.
+    // Tuple-of-closures path (tuple-of-hooks + tuple impls) and the &mut-struct path both compile/run.
     struct Counter(usize);
     impl<__V, __T, __H, __F, __A, __B> visit::Visit<__V, __T, __H, __F, __A, __B> for Counter {
         fn visit_node(&mut self, i: &Node<__V, __T, __H, __F, __A, __B>) {
