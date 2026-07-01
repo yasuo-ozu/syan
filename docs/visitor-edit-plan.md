@@ -302,13 +302,24 @@ Files to change: `core/src/visit.rs` (swap `Edit`/`SeqEdit`/… for the views), 
 
 ## Phasing
 
-1. **MVP (decided scope):** `SeqView`/`OptView` with `get_mut`/`for_each_mut`/`push`/`insert`/`remove`/
-   `retain_mut`/`set`/`take` **and** `SeqCursor::edit_each` (the index-managed structural per-element walk);
-   struct visitors; single-layer `Vec`/`VecDeque`/`Option` incl. box-transparent; the usage pre-pass;
-   drop v1.
-2. **`Punctuated` inserts** (`Sep: Default`) and **nested-container** views (edit at the innermost layer
-   inside an outer iter).
-3. **Editing closures** (`FnMut(&mut SeqView<T>)` hooks + `Chain` policy), if wanted.
+1. **MVP (shipped):** `SeqView`/`OptView` with `get_mut`/`for_each_mut`/`push`/`insert`/`remove`/
+   `retain_mut`/`set`/`take` **and** `SeqCursor::edit_each`; struct visitors; single-layer
+   `Vec`/`VecDeque`/`Option` incl. box-transparent; the usage pre-pass.
+2. **`Punctuated` inserts** (`Sep: Default`) — shipped; **nested-container** views — shipped (`#[seq]`/
+   `#[opt]` names the innermost container; outer layers are iterated; a marker/innermost mismatch errors —
+   `visitor_edit.rs::nested`, `ui/visitor_edit_marker_mismatch.rs`).
+3. **Editing closures — assessed, deferred (low value / high cost).** A *plain* editing closure
+   (`visit_mut(|v: &mut dyn SeqView<T>| …)`) is **infeasible**: adding
+   `impl<F: FnMut(&mut dyn SeqView<T>)> IntoHookMut<…, T> for F` alongside the existing
+   `impl<F: FnMut(&mut T)> IntoHookMut<…, T> for F` is an **E0119 conflict** (both blanket over bare `F`,
+   same trailing marker `T`, and the two `FnMut` bounds aren't provably disjoint) — confirmed empirically.
+   It is feasible only via an **explicit wrapper type** (`SeqEdit(f)` / `OptEdit(f)`, a distinct `Self` that
+   sidesteps the overlap) **plus** a parallel copy of the Hook/Driver machinery that routes the wrapped
+   closure through `visit_<t>_seq`/`_opt` (today `Driver`/`Hook` only descend via `visit_<t>_mut`), and
+   matching tuple combinators. That is a ~150-line additive feature whose only benefit is sugar over the
+   already-working struct-`VisitMut` path (`impl VisitMut { fn visit_t_seq(..) {..} }`), so it is **left
+   unbuilt**. `SeqView`/`OptView` are already object-safe (`SeqCursor` stores `&mut dyn SeqView<T>`), so the
+   wrapper route would compile — the blocker is purely value/cost, not feasibility.
 
 ## Tests
 
