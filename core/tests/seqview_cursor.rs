@@ -62,3 +62,32 @@ fn plain_remove_visits_shifted_element() {
     assert_eq!(v, vec![2], "odds removed");
     assert_eq!(visited, vec![1, 2, 3], "every element visited exactly once");
 }
+
+// Documents the current contract: a `SeqCursor` read (`get`/`get_mut`/`replace`) after removing the
+// current node is a logic error and aborts (rather than returning `Option`) — a deliberate ergonomic
+// tradeoff, not a graceful path. (Audit finding, low severity.)
+#[test]
+#[should_panic(expected = "cursor in bounds")]
+fn reading_cursor_after_removing_panics() {
+    let mut v = vec![1];
+    v.edit_each(|c| {
+        c.remove(); // the only element is gone; the cursor now points past the end
+        let _ = c.get(); // reading it aborts
+    });
+}
+
+// The `Wrap`-based blanket makes `Vec<T>: SeqView<T>` for every `T`, so importing `SeqView` puts
+// `push`/`retain_mut` in scope on concrete `Vec`s. This pins that the *inherent* std methods still win
+// name resolution — no silent trait fallback and no ambiguity — while the trait remains reachable via
+// UFCS / a `dyn` coercion. (Audit finding, low severity: benign name-shadow / API-surface leak.)
+#[test]
+fn seqview_in_scope_does_not_shadow_inherent_vec_methods() {
+    use syan::visit::SeqView;
+    let mut v: Vec<i32> = vec![1, 2, 3];
+    v.push(4); // inherent Vec::push (SeqView::push exists but inherent wins)
+    v.retain_mut(|x| *x % 2 == 0); // inherent Vec::retain_mut
+    assert_eq!(v, vec![2, 4], "inherent methods applied, no silent trait fallback");
+    // The trait is still implemented on the concrete Vec (the blanket) and reachable explicitly:
+    assert_eq!(SeqView::len(&v), 2);
+    let _view: &dyn SeqView<i32> = &v;
+}
