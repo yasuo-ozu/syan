@@ -1475,7 +1475,9 @@ fn gen_side(
         })
         .collect();
 
-    quote! {
+    // Assembled from named token-blocks below (all share this fn's locals / `sides`) for readability;
+    // the final `quote!` splices them verbatim, so the emitted tokens are identical to one big block.
+    let trait_def = quote! {
         #[doc = #trait_doc]
         pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #base_g_use } #uw {
             #(for s in &sides) {
@@ -1509,7 +1511,9 @@ fn gen_side(
                 }
             }
         }
+    };
 
+    let blanket_ref_impl = quote! {
         #(if !struct_only) {
             impl< #(#g_params,)* #p_v: #visit_tr #g_use > #visit_tr #g_use for &mut #p_v #uw {
                 #(for s in &sides) {
@@ -1529,7 +1533,9 @@ fn gen_side(
                 }
             }
         }
+    };
 
+    let free_fns = quote! {
         #(for s in &sides) {
             // No `?Sized` under struct-only: the body may dispatch through `Self`'s method-generic
             // `visit_*` (which requires `Self: Sized`). `free_params` = trait params ∪ this type's
@@ -1564,7 +1570,9 @@ fn gen_side(
                 }
             }
         }
+    };
 
+    let closure_machinery = quote! {
         #(if !struct_only) {
         pub trait #into_vis_tr< #(#g_params,)* #p_t > #uw {
             fn #into_vis_fn(self) -> impl #visit_tr #g_use;
@@ -1633,7 +1641,13 @@ fn gen_side(
         }
         #(for imp in &tup) { #imp }
         } // end #(if !struct_only) — closure/Driver machinery off for a recurse base
+    };
 
+    quote! {
+        #trait_def
+        #blanket_ref_impl
+        #free_fns
+        #closure_machinery
         // Inherent entry points (no trait import needed at the call site).
         #(for imp in &inherent) { #imp }
     }
