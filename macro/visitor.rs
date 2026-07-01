@@ -2009,6 +2009,20 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     let seq_used = seq_used.into_inner();
     let opt_used = opt_used.into_inner();
 
+    // A `#[seq]`/`#[opt]` field can only view a type this visitor *targets* (its own `visit_*_seq`/`_opt`
+    // is emitted only for `visited` types). A marker pointing at an **inherited** base type would make the
+    // descent call a `visit_<t>_seq` that lives nowhere — a cryptic E0599 in generated code. Fail clean.
+    if let Some(t) = seq_used.iter().chain(opt_used.iter()).find(|t| !visited.contains(*t)) {
+        abort!(
+            Span::call_site(),
+            "a `#[seq]`/`#[opt]` field views the inherited type `{}`; container-edit views are not \
+             generated for inherited types (the `visit_{}` method would have nowhere to live). Drop the \
+             marker — the field is still traversed, calling the inherited per-node visit for each element.",
+            t,
+            to_snake(&Ident::new(t, Span::call_site()))
+        );
+    }
+
     let shared = gen_side(
         false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
         &union_where, struct_only, &seq_used, &opt_used,

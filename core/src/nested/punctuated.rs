@@ -67,6 +67,21 @@ impl<Item, Punct> Punctuated<Item, Punct> {
         self.inner.0.as_mut().map(|(first, _)| first.as_mut())
     }
 
+    /// Shared access to the item at `index` (0 = the first item), or `None` if out of bounds. O(1) —
+    /// unlike `iter().nth(index)`, which walks from the head.
+    pub fn get(&self, index: usize) -> Option<&Item> {
+        match &self.inner.0 {
+            None => None,
+            Some((first, vec)) => {
+                if index == 0 {
+                    Some(first.as_ref())
+                } else {
+                    vec.get(index - 1).map(|(_, item)| item)
+                }
+            }
+        }
+    }
+
     /// Mutable access to the item at `index` (0 = the first item), or `None` if out of bounds.
     pub fn get_mut(&mut self, index: usize) -> Option<&mut Item> {
         match &mut self.inner.0 {

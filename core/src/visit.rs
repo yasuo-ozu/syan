@@ -124,20 +124,25 @@ pub trait SeqView<T> {
     {
         let mut i = 0;
         while i < self.len() {
-            let mut cur = SeqCursor { seq: self, idx: i, step: 1 };
+            let mut cur = SeqCursor { seq: self, idx: i, tail: 0, removed: false };
             f(&mut cur);
-            i = cur.idx + cur.step;
+            // Advance past the current node and any nodes inserted after it; if it was removed, revisit
+            // its (now shifted-in) position. Robust to combining ops within one call.
+            i = if cur.removed { cur.idx } else { cur.idx + 1 + cur.tail };
         }
     }
 }
 
 /// A positioned handle over one element of a [`SeqView`], handed out by [`SeqView::edit_each`]. Edits the
-/// current node in place (`get_mut`) or structurally; the parent walk advances correctly afterwards.
-/// Do at most one structural op (`remove`/`replace`/`insert_*`) per element.
+/// current node in place (`get_mut`) or structurally (`remove`/`replace`/`insert_before`/`insert_after`);
+/// the parent walk advances correctly afterwards, including when several ops are combined.
 pub struct SeqCursor<'a, T> {
     seq: &'a mut dyn SeqView<T>,
+    /// The current node's live index (shifts right as `insert_before` runs).
     idx: usize,
-    step: usize,
+    /// Count of nodes inserted immediately after the current one (skipped by the walk).
+    tail: usize,
+    removed: bool,
 }
 
 impl<'a, T> SeqCursor<'a, T> {
@@ -154,16 +159,17 @@ impl<'a, T> SeqCursor<'a, T> {
     /// Remove the current node; the next element shifts into this position and is visited next.
     pub fn remove(&mut self) {
         self.seq.remove(self.idx);
-        self.step = 0;
+        self.removed = true;
     }
     pub fn insert_before(&mut self, value: T) {
         self.seq.insert(self.idx, value);
         self.idx += 1;
     }
-    /// Insert after the current node; the inserted node is not re-visited.
+    /// Insert after the current node (and after any previous `insert_after`, preserving call order); the
+    /// inserted node is not re-visited.
     pub fn insert_after(&mut self, value: T) {
-        self.seq.insert(self.idx + 1, value);
-        self.step += 1;
+        self.seq.insert(self.idx + 1 + self.tail, value);
+        self.tail += 1;
     }
 }
 
@@ -319,7 +325,7 @@ impl<T, W: Wrap<T>, P: Default> SeqView<T> for crate::nested::Punctuated<W, P> {
         crate::nested::Punctuated::len(self)
     }
     fn get(&self, i: usize) -> Option<&T> {
-        crate::nested::Punctuated::iter(self).nth(i).map(W::as_node)
+        crate::nested::Punctuated::get(self, i).map(W::as_node)
     }
     fn get_mut(&mut self, i: usize) -> Option<&mut T> {
         crate::nested::Punctuated::get_mut(self, i).map(W::as_node_mut)
