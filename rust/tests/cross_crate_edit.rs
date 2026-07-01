@@ -11,11 +11,12 @@ use syan_rust::seqvisit;
 struct Editor;
 impl<S> seqvisit::VisitMut<S> for Editor {
     fn visit_item_seq<V: SeqView<Item<S>>>(&mut self, v: &mut V) {
-        v.edit_each(|c| match c.get().0 {
-            0 => c.remove(),
-            2 => c.replace(Item(102, PhantomData)),
-            _ => {}
-        });
+        for i in v.iter_mut() {
+            if i.0 == 2 {
+                *i = Item(102, PhantomData);
+            }
+        }
+        v.retain_mut(|i| i.0 != 0);
         v.push(Item(9, PhantomData));
     }
     fn visit_item_opt<O: OptView<Item<S>>>(&mut self, v: &mut O) {

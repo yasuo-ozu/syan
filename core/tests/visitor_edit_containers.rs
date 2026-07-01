@@ -28,17 +28,18 @@ mod vecdeque {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
-            v.edit_each(|c| match c.get().0 {
-                0 => c.remove(),
-                2 => c.replace(Stmt(102, PhantomData)),
-                _ => {}
-            });
+            for s in v.iter_mut() {
+                if s.0 == 2 {
+                    *s = Stmt(102, PhantomData);
+                }
+            }
+            v.retain_mut(|s| s.0 != 0);
             v.push(Stmt(9, PhantomData));
         }
     }
 
     #[test]
-    fn vecdeque_edit_each_and_push() {
+    fn vecdeque_edits_and_push() {
         let mut h: Holder<()> = Holder {
             items: VecDeque::from(vec![
                 Stmt(0, PhantomData),

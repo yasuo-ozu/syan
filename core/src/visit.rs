@@ -86,18 +86,6 @@ pub trait SeqView<T> {
         let n = self.len();
         self.insert(n, value);
     }
-    /// Edit every element in place (no structural change).
-    fn for_each_mut(&mut self, mut f: impl FnMut(&mut T))
-    where
-        Self: Sized,
-    {
-        let n = self.len();
-        for i in 0..n {
-            if let Some(e) = self.get_mut(i) {
-                f(e);
-            }
-        }
-    }
     /// Visit each element in place, then drop those for which `f` returns `false`.
     fn retain_mut(&mut self, mut f: impl FnMut(&mut T) -> bool)
     where
@@ -116,62 +104,44 @@ pub trait SeqView<T> {
             }
         }
     }
-    /// Walk the collection handing each element a [`SeqCursor`] for structural edits, advancing the index
-    /// correctly across removals/insertions. Elements inserted *after* the current one are not re-visited.
-    fn edit_each(&mut self, mut f: impl FnMut(&mut SeqCursor<'_, T>))
+    /// Iterate the elements by `&mut` for in-place edits (`for x in v.iter_mut() { … }`). For structural
+    /// changes use `push`/`insert`/`remove`/`retain_mut`. Default impl over the by-index `get_mut`.
+    fn iter_mut(&mut self) -> SeqIterMut<'_, T>
     where
         Self: Sized,
     {
-        let mut i = 0;
-        while i < self.len() {
-            let mut cur = SeqCursor { seq: self, idx: i, tail: 0, removed: false };
-            f(&mut cur);
-            // Advance past the current node and any nodes inserted after it; if it was removed, revisit
-            // its (now shifted-in) position. Robust to combining ops within one call.
-            i = if cur.removed { cur.idx } else { cur.idx + 1 + cur.tail };
-        }
+        let len = self.len();
+        SeqIterMut { seq: self, idx: 0, len }
     }
 }
 
-/// A positioned handle over one element of a [`SeqView`], handed out by [`SeqView::edit_each`]. Edits the
-/// current node in place (`get_mut`) or structurally (`remove`/`replace`/`insert_before`/`insert_after`);
-/// the parent walk advances correctly afterwards, including when several ops are combined.
-pub struct SeqCursor<'a, T> {
+/// The `&mut` iterator returned by [`SeqView::iter_mut`] — yields each element once, by index.
+pub struct SeqIterMut<'a, T> {
     seq: &'a mut dyn SeqView<T>,
-    /// The current node's live index (shifts right as `insert_before` runs).
     idx: usize,
-    /// Count of nodes inserted immediately after the current one (skipped by the walk).
-    tail: usize,
-    removed: bool,
+    len: usize,
 }
 
-impl<'a, T> SeqCursor<'a, T> {
-    pub fn get(&self) -> &T {
-        self.seq.get(self.idx).expect("cursor in bounds")
-    }
-    /// Edit the current node in place — no clone.
-    pub fn get_mut(&mut self) -> &mut T {
-        self.seq.get_mut(self.idx).expect("cursor in bounds")
-    }
-    pub fn replace(&mut self, value: T) {
-        *self.seq.get_mut(self.idx).expect("cursor in bounds") = value;
-    }
-    /// Remove the current node; the next element shifts into this position and is visited next.
-    pub fn remove(&mut self) {
-        self.seq.remove(self.idx);
-        self.removed = true;
-    }
-    pub fn insert_before(&mut self, value: T) {
-        self.seq.insert(self.idx, value);
+impl<'a, T> Iterator for SeqIterMut<'a, T> {
+    type Item = &'a mut T;
+    fn next(&mut self) -> Option<&'a mut T> {
+        if self.idx >= self.len {
+            return None;
+        }
+        let i = self.idx;
         self.idx += 1;
+        // SAFETY: each index is yielded exactly once, so the returned `&mut T`s are pairwise disjoint, and
+        // all borrow from `self.seq` (a `&'a mut` collection that outlives them) — so widening the element
+        // borrow to `'a` is sound.
+        self.seq.get_mut(i).map(|r| unsafe { &mut *(r as *mut T) })
     }
-    /// Insert after the current node (and after any previous `insert_after`, preserving call order); the
-    /// inserted node is not re-visited.
-    pub fn insert_after(&mut self, value: T) {
-        self.seq.insert(self.idx + 1 + self.tail, value);
-        self.tail += 1;
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.len - self.idx;
+        (n, Some(n))
     }
 }
+
+impl<'a, T> ExactSizeIterator for SeqIterMut<'a, T> {}
 
 /// A mutable, **Option-like** view (≤1 element) of an AST `Option` field (and `Option<Box<T>>`,
 /// box-transparent). A generated `visit_<t>_opt(&mut self, &mut impl OptView<T>)` receives one.

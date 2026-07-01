@@ -27,11 +27,12 @@ pub mod visit {
 struct Editor;
 impl<S> visit::VisitMut<S> for Editor {
     fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
-        v.edit_each(|c| match c.get().0 {
-            0 => c.remove(),                          // drop zero statements
-            2 => c.replace(Stmt(102, PhantomData)),   // replace this node
-            _ => {}
-        });
+        for s in v.iter_mut() {
+            if s.0 == 2 {
+                *s = Stmt(102, PhantomData); // replace this node in place
+            }
+        }
+        v.retain_mut(|s| s.0 != 0); // drop zero statements
     }
     fn visit_stmt_opt<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
         match v.get().map(|s| s.0) {

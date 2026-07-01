@@ -302,9 +302,11 @@ Files to change: `core/src/visit.rs` (swap `Edit`/`SeqEdit`/… for the views), 
 
 ## Phasing
 
-1. **MVP (shipped):** `SeqView`/`OptView` with `get_mut`/`for_each_mut`/`push`/`insert`/`remove`/
-   `retain_mut`/`set`/`take` **and** `SeqCursor::edit_each`; struct visitors; single-layer
-   `Vec`/`VecDeque`/`Option` incl. box-transparent; the usage pre-pass.
+1. **MVP (shipped):** `SeqView`/`OptView` with `get_mut`/`push`/`insert`/`remove`/`retain_mut`/`set`/`take`
+   + `SeqView::iter_mut` (in-place iteration); struct visitors; single-layer `Vec`/`VecDeque`/`Option`
+   incl. box-transparent; the usage pre-pass. (The interface later dropped `for_each_mut` and the
+   `edit_each`/`SeqCursor` structural-walk in favour of `iter_mut` — in-place edits via `iter_mut`,
+   structural edits via the index methods `push`/`insert`/`remove`/`retain_mut`.)
 2. **`Punctuated` inserts** (`Sep: Default`) — shipped; **nested-container** views — shipped (`#[seq]`/
    `#[opt]` names the innermost container; outer layers are iterated; a marker/innermost mismatch errors —
    `visitor_edit.rs::nested`, `ui/visitor_edit_marker_mismatch.rs`).

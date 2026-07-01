@@ -1383,9 +1383,9 @@ fn gen_side(
             );
             let seq_doc = format!(
                 "Edit the `{name}` nodes held in a `Vec`-like slot of their parent — given a \
-                 [`SeqView`](::syan::visit::SeqView) over the collection (edit in place via `get_mut`, \
-                 or `push`/`insert`/`remove`/`retain_mut`/`edit_each`). The default visits each element \
-                 in place via `{mname}`; override to restructure the collection.",
+                 [`SeqView`](::syan::visit::SeqView) over the collection (edit in place via `iter_mut`/\
+                 `get_mut`, or restructure via `push`/`insert`/`remove`/`retain_mut`). The default visits \
+                 each element in place via `{mname}`; override to restructure the collection.",
             );
             let opt_doc = format!(
                 "Edit the `{name}` node held in an `Option`-like slot of their parent — given an \
@@ -1576,7 +1576,9 @@ fn gen_side(
                     this: &mut #p_v,
                     v: &mut #p_vw,
                 ) #{&s.free_where} {
-                    ::syan::visit::SeqView::for_each_mut(v, |__syan_e| this.#{&s.method}(__syan_e));
+                    for __syan_e in ::syan::visit::SeqView::iter_mut(v) {
+                        this.#{&s.method}(__syan_e);
+                    }
                 }
             }
             #(if s.has_opt) {

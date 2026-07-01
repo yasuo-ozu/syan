@@ -1,7 +1,7 @@
 //! Structural-edit coverage for the container-view model: a field marked `#[seq]` / `#[opt]` gets a
 //! `visit_<t>_seq` / `visit_<t>_opt` method taking a `SeqView` / `OptView` of the owning collection,
 //! edited in place (no clone); an unmarked field gets no such method (just the in-place `visit_<t>_mut`).
-//! Covers `Vec`/`Option`, `edit_each`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
+//! Covers `Vec`/`Option`, `iter_mut`/`retain_mut`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
 //! and a regression that a plain `visit_*_mut`-only visitor still mutates every element.
 #![allow(dead_code)]
 
@@ -84,7 +84,7 @@ mod plain_mut {
     }
 }
 
-// ── Vec + Option views on a plain struct: edit_each / push / set / take ──────────────────────────
+// ── Vec + Option views on a plain struct: iter_mut / retain_mut / push / set / take ──────────────────────────
 mod views {
     use super::*;
     use syan::visit::{Ast, OptView, SeqView};
@@ -109,12 +109,13 @@ mod views {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
-            v.edit_each(|c| match c.get().0 {
-                0 => c.remove(),
-                2 => c.replace(Stmt(102, PhantomData)),
-                _ => {}
-            });
-            v.push(Stmt(7, PhantomData)); // insert into the (possibly now-shorter) collection
+            for s in v.iter_mut() {
+                if s.0 == 2 {
+                    *s = Stmt(102, PhantomData);
+                }
+            }
+            v.retain_mut(|s| s.0 != 0);
+            v.push(Stmt(7, PhantomData)); // insert into the (now-shorter) collection
         }
         fn visit_stmt_opt<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
             match v.get().map(|s| s.0) {
@@ -126,7 +127,7 @@ mod views {
     }
 
     #[test]
-    fn seq_edit_each_and_push() {
+    fn seq_edits_and_push() {
         let mut b: Block<()> = Block {
             stmts: vec![
                 Stmt(0, PhantomData),
@@ -179,11 +180,14 @@ mod rec {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_expr_seq<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
-            v.edit_each(|c| match c.get() {
-                ast::Expr::Lit(0, _) => c.remove(),
-                ast::Expr::Lit(2, _) => c.replace(ast::Expr::Lit(99, PhantomData)),
-                _ => v::visit_expr_mut(self, c.get_mut()), // descend nested `Many`
-            });
+            for e in v.iter_mut() {
+                match e {
+                    ast::Expr::Lit(0, _) => {}                              // dropped by retain below
+                    ast::Expr::Lit(2, _) => *e = ast::Expr::Lit(99, PhantomData),
+                    _ => v::visit_expr_mut(self, e),                        // descend nested `Many`
+                }
+            }
+            v.retain_mut(|e| !matches!(e, ast::Expr::Lit(0, _)));
         }
     }
 
@@ -373,10 +377,12 @@ mod rec_cross {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_stmt_seq<V: SeqView<ast::Stmt<S>>>(&mut self, v: &mut V) {
-            v.edit_each(|c| match c.get() {
-                ast::Stmt::Nop(0, _) => c.remove(),
-                _ => v::visit_stmt_mut(self, c.get_mut()), // descend (Stmt::Expr -> nested Block)
-            });
+            for s in v.iter_mut() {
+                if !matches!(s, ast::Stmt::Nop(0, _)) {
+                    v::visit_stmt_mut(self, s); // descend (Stmt::Expr -> nested Block)
+                }
+            }
+            v.retain_mut(|s| !matches!(s, ast::Stmt::Nop(0, _)));
         }
     }
 

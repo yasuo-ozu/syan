@@ -51,8 +51,8 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `Box<Leaf>` whose `Leaf` is not itself a view is *not* a view. The descent passes the field `&mut`
   directly (no wrapper) — Design B in
   `docs/visitor-edit-plan.md`. `SeqView`: `len`/`get`/`get_mut`/`insert`/`remove` core +
-  `push`/`for_each_mut`/`retain_mut`/`edit_each` (a `SeqCursor` with `remove`/`replace`/`insert_before`/
-  `insert_after`); `OptView`: `is_some`/`get`/`get_mut`/`set`/`take`. **`visit_*_mut` interface unchanged**
+  `push`/`retain_mut`/`iter_mut` (a `SeqIterMut` yielding `&mut T` by index for in-place edits; structural
+  changes go through `push`/`insert`/`remove`/`retain_mut`); `OptView`: `is_some`/`get`/`get_mut`/`set`/`take`. **`visit_*_mut` interface unchanged**
   (`visit_<t>_mut(&mut self, &mut T) -> ()`); the view defaults descend each held node in place via
   `visit_<t>_mut`, so a `visit_*_mut`-only visitor (and closures via `Driver`) are unaffected. A marked
   field anywhere (listed *or* drilled) drives emission — usage collected by the mut `Lower` walk into
