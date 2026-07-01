@@ -104,6 +104,13 @@ pub trait SeqView<T> {
             }
         }
     }
+    /// Iterate the elements by shared ref (`for x in v.iter() { … }`). Default impl over `get`.
+    fn iter(&self) -> SeqIter<'_, T>
+    where
+        Self: Sized,
+    {
+        SeqIter { seq: self, idx: 0, len: self.len() }
+    }
     /// Iterate the elements by `&mut` for in-place edits (`for x in v.iter_mut() { … }`). For structural
     /// changes use `push`/`insert`/`remove`/`retain_mut`. Default impl over the by-index `get_mut`.
     fn iter_mut(&mut self) -> SeqIterMut<'_, T>
@@ -114,6 +121,33 @@ pub trait SeqView<T> {
         SeqIterMut { seq: self, idx: 0, len }
     }
 }
+
+/// The shared iterator returned by [`SeqView::iter`] — yields each element by index.
+pub struct SeqIter<'a, T> {
+    seq: &'a dyn SeqView<T>,
+    idx: usize,
+    len: usize,
+}
+
+impl<'a, T> Iterator for SeqIter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<&'a T> {
+        if self.idx >= self.len {
+            return None;
+        }
+        let i = self.idx;
+        self.idx += 1;
+        // `self.seq` is a `&'a` (Copy) borrow, so `get` returns `&'a T` — no lifetime widening needed
+        // (shared borrows may coexist).
+        self.seq.get(i)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.len - self.idx;
+        (n, Some(n))
+    }
+}
+
+impl<'a, T> ExactSizeIterator for SeqIter<'a, T> {}
 
 /// The `&mut` iterator returned by [`SeqView::iter_mut`] — yields each element once, by index.
 pub struct SeqIterMut<'a, T> {
@@ -159,6 +193,14 @@ pub trait OptView<T> {
     }
     fn clear(&mut self) {
         let _ = self.take();
+    }
+    /// Iterate the node by shared ref — 0 or 1 items.
+    fn iter(&self) -> core::option::IntoIter<&T> {
+        self.get().into_iter()
+    }
+    /// Iterate the node by `&mut` — 0 or 1 items (in-place edit).
+    fn iter_mut(&mut self) -> core::option::IntoIter<&mut T> {
+        self.get_mut().into_iter()
     }
 }
 

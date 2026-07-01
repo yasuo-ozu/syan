@@ -193,7 +193,7 @@ mod rec {
 
     fn lits(e: &ast::Expr<()>) -> Vec<i64> {
         match e {
-            ast::Expr::Many(xs) => xs.iter().flat_map(|x| lits(x)).collect(),
+            ast::Expr::Many(xs) => xs.as_slice().iter().flat_map(|x| lits(x)).collect(),
             ast::Expr::Lit(n, _) => vec![*n],
         }
     }
@@ -389,6 +389,7 @@ mod rec_cross {
     fn nops(e: &ast::Expr<()>) -> Vec<i64> {
         match e {
             ast::Expr::Block(ss) => ss
+                .as_slice() // force slice `.iter()` — `SeqView::iter` (in scope) shadows it on a `Vec`
                 .iter()
                 .flat_map(|s| match &**s {
                     ast::Stmt::Nop(n, _) => vec![*n],

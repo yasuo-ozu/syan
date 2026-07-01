@@ -51,8 +51,13 @@ Code: `core/src/visit.rs` (`Ast`, `Repeater` traits), `macro/ast.rs` (`#[derive(
   `Box<Leaf>` whose `Leaf` is not itself a view is *not* a view. The descent passes the field `&mut`
   directly (no wrapper) — Design B in
   `docs/visitor-edit-plan.md`. `SeqView`: `len`/`get`/`get_mut`/`insert`/`remove` core +
-  `push`/`retain_mut`/`iter_mut` (a `SeqIterMut` yielding `&mut T` by index for in-place edits; structural
-  changes go through `push`/`insert`/`remove`/`retain_mut`); `OptView`: `is_some`/`get`/`get_mut`/`set`/`take`. **`visit_*_mut` interface unchanged**
+  `push`/`retain_mut`/`iter`/`iter_mut` (`SeqIter`/`SeqIterMut` yield `&T`/`&mut T` by index for in-place
+  edits — structural changes go through `push`/`insert`/`remove`/`retain_mut`); `OptView`:
+  `is_some`/`get`/`get_mut`/`set`/`take` + `iter`/`iter_mut` (0-or-1 via `get().into_iter()`). Caveat:
+  `SeqView::iter`/`iter_mut` are on `Vec`/`VecDeque`/`Punctuated` *directly*, so with `SeqView` imported a
+  bare `vec.iter()`/`iter_mut()` resolves to them (shadowing the slice methods, which are `Deref`-reached);
+  use `vec.as_slice().iter()` for the slice one. (`push`/`retain_mut` are inherent on `Vec`, so they win;
+  `OptView::iter`/`iter_mut` don't shadow — `Option::iter` is inherent.) **`visit_*_mut` interface unchanged**
   (`visit_<t>_mut(&mut self, &mut T) -> ()`); the view defaults descend each held node in place via
   `visit_<t>_mut`, so a `visit_*_mut`-only visitor (and closures via `Driver`) are unaffected. A marked
   field anywhere (listed *or* drilled) drives emission — usage collected by the mut `Lower` walk into
