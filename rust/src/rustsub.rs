@@ -111,6 +111,7 @@ pub mod ast {
         Block {
             brace: GroupBrace<(), S>,
             #[group(self.brace)]
+            #[seq] // structural-edit view over the grouped statements (exercises group + seq + recurse)
             stmts: Vec<Stmt<S>>,
         },
         Paren {

@@ -21,6 +21,10 @@ fn visitor_diagnostics() {
     t.compile_fail("tests/ui/visitor_edit_marker_mismatch.rs");
     // A `#[seq]`/`#[opt]` field can't view an inherited (non-targeted) type — clean error, not E0599.
     t.compile_fail("tests/ui/visitor_edit_seq_inherited.rs");
+    // Marker on a non-viewable / container-less / non-visited field → clean abort, not a cryptic trait error.
+    t.compile_fail("tests/ui/visitor_edit_marker_array.rs");
+    t.compile_fail("tests/ui/visitor_edit_marker_noncontainer.rs");
+    t.compile_fail("tests/ui/visitor_edit_marker_unvisited.rs");
     // (A `where`-bounded generic param not shared by all visited types is now SUPPORTED — the bounded
     //  param becomes a per-method generic, trait keyed on the shared subset; see
     //  `visitor_union_where_unshared_param.rs`.)

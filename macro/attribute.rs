@@ -91,6 +91,11 @@ fn is_derive_helper_attr(attr: &Attribute) -> bool {
         || attr.path().is_ident("predicate")
         || attr.path().is_ident("predicate_parse")
         || attr.path().is_ident("predicate_unparse")
+        // `#[derive(Ast)]`'s view markers: strip them off a `#[group]`-cloned substruct (which carries no
+        // `Ast` derive to register them), else `#[group] #[seq] Punctuated<..>` fails with "cannot find
+        // attribute `seq`".
+        || attr.path().is_ident("seq")
+        || attr.path().is_ident("opt")
 }
 
 fn strip_derive_helper_attrs(substruct: &ItemStruct) -> ItemStruct {

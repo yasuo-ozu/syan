@@ -1,0 +1,7 @@
+error: a `#[seq]` field's element type is not a visited type — mark only a field whose element is listed in `visitor!(..)` (or reached via `#[subast]`)
+  --> tests/ui/visitor_edit_marker_unvisited.rs:20:5
+   |
+20 |     syan::visit::visitor!(crate::Wrap, crate::Leaf);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

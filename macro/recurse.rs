@@ -2086,12 +2086,21 @@ fn make_engine_item(item: &Item, ctx: &TransformCtx, engine_paths: &[Path], macr
     } else {
         vec![syn::parse_quote!(#[#derive_name(#(#engine_paths),*)])]
     };
-    // Strip any `#[ignore_bounds]` from the engine's fields: the engine's recursive child is the depth
-    // param `__Rec` (a *finite* chain), so its derives need the FULL `__Rec: Trait` bound — dropping it
-    // would leave the derive body's `__Rec::parse()`/`unparse()` call unsatisfiable. (A user-written
-    // `#[ignore_bounds]` is meant for the natural type, not the engine.)
+    // Strip `#[ignore_bounds]` and the visitor view markers `#[seq]`/`#[opt]` from the engine's fields.
+    // `#[ignore_bounds]`: the engine's recursive child is the depth param `__Rec` (a *finite* chain), so
+    // its derives need the FULL `__Rec: Trait` bound — dropping it would leave the derive body's
+    // `__Rec::parse()`/`unparse()` call unsatisfiable. (A user-written `#[ignore_bounds]` is for the
+    // natural type, not the engine.) `#[seq]`/`#[opt]` are visitor-only markers the natural type's `Ast`
+    // consumes; the engine derives `Parse`/`Unparse`/`Spanned`, which don't declare them, so leaving them
+    // would be a "cannot find attribute" error.
     let strip_ib = |fields: &mut Fields| {
-        let go = |f: &mut Field| f.attrs.retain(|a| !a.path().is_ident("ignore_bounds"));
+        let go = |f: &mut Field| {
+            f.attrs.retain(|a| {
+                !a.path().is_ident("ignore_bounds")
+                    && !a.path().is_ident("seq")
+                    && !a.path().is_ident("opt")
+            })
+        };
         match fields {
             Fields::Named(n) => n.named.iter_mut().for_each(go),
             Fields::Unnamed(u) => u.unnamed.iter_mut().for_each(go),

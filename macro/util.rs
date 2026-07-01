@@ -151,6 +151,10 @@ pub(crate) enum Container {
 pub(crate) struct ContLayer {
     pub kind: Container,
     pub boxes: usize,
+    /// Whether this layer has a `SeqView`/`OptView` impl (Vec/VecDeque/Punctuated/Option — yes; a
+    /// fixed-size array or a slice maps to `Seq` for traversal but is NOT structurally editable). Drives
+    /// the `#[seq]`/`#[opt]` marker validation, which otherwise couldn't tell them apart.
+    pub viewable: bool,
 }
 
 /// What sits at the innermost peeled position (after the container/box layers): the common case is a
@@ -177,9 +181,10 @@ pub(crate) struct Peeled {
     pub shared_ref: bool,
 }
 
-/// Wrap a peeled head in an outer container layer (prepended — `conts` is outer→inner).
-fn container_of(c: Container, mut inner: Peeled) -> Peeled {
-    inner.conts.insert(0, ContLayer { kind: c, boxes: 0 });
+/// Wrap a peeled head in an outer container layer (prepended — `conts` is outer→inner). `viewable` marks
+/// whether the container has a `SeqView`/`OptView` impl (false for arrays/slices).
+fn container_of(c: Container, viewable: bool, mut inner: Peeled) -> Peeled {
+    inner.conts.insert(0, ContLayer { kind: c, boxes: 0, viewable });
     inner
 }
 
@@ -206,8 +211,13 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
         }),
         Type::Group(g) => peel(&g.elem, user_types),
         Type::Paren(p) => peel(&p.elem, user_types),
-        Type::Slice(s) => peel(&s.elem, user_types).map(|inner| container_of(Container::Seq, inner)),
-        Type::Array(a) => peel(&a.elem, user_types).map(|inner| container_of(Container::Seq, inner)),
+        // Slice/array traverse as a `Seq` but have no `SeqView` impl (not structurally editable).
+        Type::Slice(s) => {
+            peel(&s.elem, user_types).map(|inner| container_of(Container::Seq, false, inner))
+        }
+        Type::Array(a) => {
+            peel(&a.elem, user_types).map(|inner| container_of(Container::Seq, false, inner))
+        }
         Type::Path(tp) => {
             let seg = tp.path.segments.last()?;
             let name = seg.ident.to_string();
@@ -229,9 +239,11 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
                     Some(inner)
                 }
                 "Vec" | "VecDeque" | "Punctuated" => {
-                    Some(container_of(Container::Seq, peel(first_ty_arg(seg)?, user_types)?))
+                    Some(container_of(Container::Seq, true, peel(first_ty_arg(seg)?, user_types)?))
                 }
-                "Option" => Some(container_of(Container::Opt, peel(first_ty_arg(seg)?, user_types)?)),
+                "Option" => {
+                    Some(container_of(Container::Opt, true, peel(first_ty_arg(seg)?, user_types)?))
+                }
                 _ => Some(direct(seg.ident.clone())),
             }
         }

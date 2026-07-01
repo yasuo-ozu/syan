@@ -1,6 +1,6 @@
 use crate::util::{
     angle, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
-    method_ident_m, mt, param_name, param_use, peel, to_snake, Container, ContLayer, Head,
+    method_ident_m, mt, param_name, param_use, peel, to_snake, Container, Head,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -1031,32 +1031,53 @@ impl<'a> Lower<'a> {
         // `Option<Vec<T>>`, …) are traversed normally and the innermost element gets the view.
         if self.mutable {
             if let Some(kind) = view {
-                if let Some((head, _)) = &resolved {
-                    if self.method_set.contains(&head.to_string()) {
-                        let outer: &[ContLayer] = match p.conts.split_last() {
-                            Some((inner, outer)) => {
-                                if inner.kind != kind {
-                                    let (marked, found) = match kind {
-                                        Container::Seq => ("seq", "an `Option`"),
-                                        Container::Opt => ("opt", "a sequence"),
-                                    };
-                                    abort!(
-                                        Span::call_site(),
-                                        "`#[{}]` field's innermost container is {} — the marker must \
-                                         name the innermost container",
-                                        marked,
-                                        found
-                                    );
-                                }
-                                outer
-                            }
-                            None => &[],
-                        };
-                        let inner_acc = innermost_acc(outer, binding);
-                        let dispatch = self.view_dispatch(head, &inner_acc, &kind);
-                        return Some(fold_containers(outer, binding, dispatch, self.mutable));
-                    }
+                let marker = match kind {
+                    Container::Seq => "seq",
+                    Container::Opt => "opt",
+                };
+                // The head must be a visited (method-set) type, else the marker routes nowhere and would
+                // silently no-op — abort so the mistake is caught at the field, not via a phantom method.
+                let head = match &resolved {
+                    Some((h, _)) if self.method_set.contains(&h.to_string()) => h,
+                    _ => abort!(
+                        Span::call_site(),
+                        "a `#[{}]` field's element type is not a visited type — mark only a field whose \
+                         element is listed in `visitor!(..)` (or reached via `#[subast]`)",
+                        marker
+                    ),
+                };
+                let (inner, outer) = p.conts.split_last().unwrap_or_else(|| {
+                    abort!(
+                        Span::call_site(),
+                        "a `#[{}]` marker needs a container field (`Vec`/`VecDeque`/`Punctuated`/`Option`); \
+                         this is a direct/`Box` field",
+                        marker
+                    )
+                });
+                if inner.kind != kind {
+                    let found = match kind {
+                        Container::Seq => "an `Option`",
+                        Container::Opt => "a sequence",
+                    };
+                    abort!(
+                        Span::call_site(),
+                        "a `#[{}]` field's innermost container is {} — the marker must name the innermost \
+                         container",
+                        marker,
+                        found
+                    );
                 }
+                if !inner.viewable {
+                    abort!(
+                        Span::call_site(),
+                        "a `#[{}]` field's innermost container has no view impl (an array/slice can't be \
+                         structurally edited — use `Vec`/`VecDeque`/`Punctuated`)",
+                        marker
+                    );
+                }
+                let inner_acc = innermost_acc(outer, binding);
+                let dispatch = self.view_dispatch(head, &inner_acc, &kind);
+                return Some(fold_containers(outer, binding, dispatch, self.mutable));
             }
         }
 

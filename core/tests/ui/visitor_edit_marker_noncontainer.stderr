@@ -1,0 +1,7 @@
+error: a `#[seq]` marker needs a container field (`Vec`/`VecDeque`/`Punctuated`/`Option`); this is a direct/`Box` field
+  --> tests/ui/visitor_edit_marker_noncontainer.rs:19:5
+   |
+19 |     syan::visit::visitor!(crate::Wrap, crate::Leaf);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
