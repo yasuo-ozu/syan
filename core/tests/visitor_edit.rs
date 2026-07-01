@@ -1,7 +1,7 @@
 //! Structural-edit coverage for the container-view model: a field marked `#[seq]` / `#[opt]` gets a
 //! `visit_<t>_seq` / `visit_<t>_opt` method taking a `SeqView` / `OptView` of the owning collection,
 //! edited in place (no clone); an unmarked field gets no such method (just the in-place `visit_<t>_mut`).
-//! Covers `Vec`/`Option`, `iter_mut`/`retain_mut`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
+//! Covers `Vec`/`Option`, `view_iter_mut`/`retain_mut`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
 //! and a regression that a plain `visit_*_mut`-only visitor still mutates every element.
 #![allow(dead_code)]
 
@@ -109,7 +109,7 @@ mod views {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
-            for s in v.iter_mut() {
+            for s in v.view_iter_mut() {
                 if s.0 == 2 {
                     *s = Stmt(102, PhantomData);
                 }
@@ -180,7 +180,7 @@ mod rec {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_expr_seq<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
-            for e in v.iter_mut() {
+            for e in v.view_iter_mut() {
                 match e {
                     ast::Expr::Lit(0, _) => {}                              // dropped by retain below
                     ast::Expr::Lit(2, _) => *e = ast::Expr::Lit(99, PhantomData),
@@ -193,7 +193,7 @@ mod rec {
 
     fn lits(e: &ast::Expr<()>) -> Vec<i64> {
         match e {
-            ast::Expr::Many(xs) => xs.as_slice().iter().flat_map(|x| lits(x)).collect(),
+            ast::Expr::Many(xs) => xs.iter().flat_map(|x| lits(x)).collect(),
             ast::Expr::Lit(n, _) => vec![*n],
         }
     }
@@ -377,7 +377,7 @@ mod rec_cross {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_stmt_seq<V: SeqView<ast::Stmt<S>>>(&mut self, v: &mut V) {
-            for s in v.iter_mut() {
+            for s in v.view_iter_mut() {
                 if !matches!(s, ast::Stmt::Nop(0, _)) {
                     v::visit_stmt_mut(self, s); // descend (Stmt::Expr -> nested Block)
                 }
@@ -389,7 +389,6 @@ mod rec_cross {
     fn nops(e: &ast::Expr<()>) -> Vec<i64> {
         match e {
             ast::Expr::Block(ss) => ss
-                .as_slice() // force slice `.iter()` — `SeqView::iter` (in scope) shadows it on a `Vec`
                 .iter()
                 .flat_map(|s| match &**s {
                     ast::Stmt::Nop(n, _) => vec![*n],

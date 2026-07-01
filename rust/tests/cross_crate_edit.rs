@@ -11,7 +11,7 @@ use syan_rust::seqvisit;
 struct Editor;
 impl<S> seqvisit::VisitMut<S> for Editor {
     fn visit_item_seq<V: SeqView<Item<S>>>(&mut self, v: &mut V) {
-        for i in v.iter_mut() {
+        for i in v.view_iter_mut() {
             if i.0 == 2 {
                 *i = Item(102, PhantomData);
             }

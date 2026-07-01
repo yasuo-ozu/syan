@@ -1383,7 +1383,7 @@ fn gen_side(
             );
             let seq_doc = format!(
                 "Edit the `{name}` nodes held in a `Vec`-like slot of their parent — given a \
-                 [`SeqView`](::syan::visit::SeqView) over the collection (edit in place via `iter_mut`/\
+                 [`SeqView`](::syan::visit::SeqView) over the collection (edit in place via `view_iter_mut`/\
                  `get_mut`, or restructure via `push`/`insert`/`remove`/`retain_mut`). The default visits \
                  each element in place via `{mname}`; override to restructure the collection.",
             );
@@ -1576,7 +1576,7 @@ fn gen_side(
                     this: &mut #p_v,
                     v: &mut #p_vw,
                 ) #{&s.free_where} {
-                    for __syan_e in ::syan::visit::SeqView::iter_mut(v) {
+                    for __syan_e in ::syan::visit::SeqView::view_iter_mut(v) {
                         this.#{&s.method}(__syan_e);
                     }
                 }

@@ -104,16 +104,19 @@ pub trait SeqView<T> {
             }
         }
     }
-    /// Iterate the elements by shared ref (`for x in v.iter() { … }`). Default impl over `get`.
-    fn iter(&self) -> SeqIter<'_, T>
+    /// Iterate the elements by shared ref (`for x in v.view_iter() { … }`). Default impl over `get`.
+    /// Named `view_iter` (not `iter`) so it never shadows the slice `iter` on a concrete `Vec` when
+    /// `SeqView` is in scope.
+    fn view_iter(&self) -> SeqIter<'_, T>
     where
         Self: Sized,
     {
         SeqIter { seq: self, idx: 0, len: self.len() }
     }
-    /// Iterate the elements by `&mut` for in-place edits (`for x in v.iter_mut() { … }`). For structural
-    /// changes use `push`/`insert`/`remove`/`retain_mut`. Default impl over the by-index `get_mut`.
-    fn iter_mut(&mut self) -> SeqIterMut<'_, T>
+    /// Iterate the elements by `&mut` for in-place edits (`for x in v.view_iter_mut() { … }`). For
+    /// structural changes use `push`/`insert`/`remove`/`retain_mut`. Default impl over the by-index
+    /// `get_mut`. Named `view_iter_mut` to avoid shadowing the slice `iter_mut`.
+    fn view_iter_mut(&mut self) -> SeqIterMut<'_, T>
     where
         Self: Sized,
     {
@@ -122,7 +125,7 @@ pub trait SeqView<T> {
     }
 }
 
-/// The shared iterator returned by [`SeqView::iter`] — yields each element by index.
+/// The shared iterator returned by [`SeqView::view_iter`] — yields each element by index.
 pub struct SeqIter<'a, T> {
     seq: &'a dyn SeqView<T>,
     idx: usize,
@@ -149,7 +152,7 @@ impl<'a, T> Iterator for SeqIter<'a, T> {
 
 impl<'a, T> ExactSizeIterator for SeqIter<'a, T> {}
 
-/// The `&mut` iterator returned by [`SeqView::iter_mut`] — yields each element once, by index.
+/// The `&mut` iterator returned by [`SeqView::view_iter_mut`] — yields each element once, by index.
 pub struct SeqIterMut<'a, T> {
     seq: &'a mut dyn SeqView<T>,
     idx: usize,
@@ -194,12 +197,13 @@ pub trait OptView<T> {
     fn clear(&mut self) {
         let _ = self.take();
     }
-    /// Iterate the node by shared ref — 0 or 1 items.
-    fn iter(&self) -> core::option::IntoIter<&T> {
+    /// Iterate the node by shared ref — 0 or 1 items. Named `view_iter` (not `iter`) to mirror
+    /// [`SeqView::view_iter`] and stay non-shadowing.
+    fn view_iter(&self) -> core::option::IntoIter<&T> {
         self.get().into_iter()
     }
-    /// Iterate the node by `&mut` — 0 or 1 items (in-place edit).
-    fn iter_mut(&mut self) -> core::option::IntoIter<&mut T> {
+    /// Iterate the node by `&mut` — 0 or 1 items (in-place edit). Mirrors [`SeqView::view_iter_mut`].
+    fn view_iter_mut(&mut self) -> core::option::IntoIter<&mut T> {
         self.get_mut().into_iter()
     }
 }

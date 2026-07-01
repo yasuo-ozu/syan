@@ -28,7 +28,7 @@ mod vecdeque {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
-            for s in v.iter_mut() {
+            for s in v.view_iter_mut() {
                 if s.0 == 2 {
                     *s = Stmt(102, PhantomData);
                 }
