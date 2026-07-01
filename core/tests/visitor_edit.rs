@@ -407,3 +407,59 @@ mod rec_cross {
         assert_eq!(nops(&e), vec![1, 5], "Nop(0) dropped at both cycle depths");
     }
 }
+
+// ── nested containers: the marker names the INNERMOST container; outer layers are iterated ────────
+mod nested {
+    use super::*;
+    use syan::visit::{Ast, OptView, SeqView};
+
+    #[derive(Debug, Ast)]
+    pub struct Item<S>(pub i64, pub PhantomData<S>);
+
+    #[derive(Debug, Ast)]
+    #[subast(crate::nested::Item)]
+    pub struct Holder<S> {
+        #[opt] // innermost is `Option` -> each inner `Option<Item>` gets an OptView
+        pub grid: Vec<Option<Item<S>>>,
+        #[seq] // innermost is the inner `Vec` -> each inner `Vec<Item>` gets a SeqView
+        pub rows: Vec<Vec<Item<S>>>,
+    }
+
+    pub mod v {
+        syan::visit::visitor!(super::Holder, super::Item);
+    }
+
+    struct Editor;
+    impl<S> v::VisitMut<S> for Editor {
+        fn visit_item_seq<V: SeqView<Item<S>>>(&mut self, v: &mut V) {
+            v.retain_mut(|i| i.0 != 0);
+        }
+        fn visit_item_opt<O: OptView<Item<S>>>(&mut self, v: &mut O) {
+            if matches!(v.get(), Some(i) if i.0 == 0) {
+                v.clear();
+            }
+        }
+    }
+
+    #[test]
+    fn vec_of_option_and_vec_of_vec() {
+        let mut h: Holder<()> = Holder {
+            grid: vec![Some(Item(0, PhantomData)), None, Some(Item(5, PhantomData))],
+            rows: vec![
+                vec![Item(0, PhantomData), Item(1, PhantomData)],
+                vec![Item(0, PhantomData)],
+            ],
+        };
+        h.visit_mut(&mut Editor);
+        assert_eq!(
+            h.grid.iter().map(|o| o.as_ref().map(|i| i.0)).collect::<Vec<_>>(),
+            vec![None, None, Some(5)],
+            "each inner Option edited via visit_item_opt (the 0 cleared)"
+        );
+        assert_eq!(
+            h.rows.iter().map(|r| r.iter().map(|i| i.0).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            vec![vec![1], vec![]],
+            "each inner Vec edited via visit_item_seq (0s dropped)"
+        );
+    }
+}

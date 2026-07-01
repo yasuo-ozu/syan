@@ -17,6 +17,8 @@ fn visitor_diagnostics() {
     // `#[seq]`/`#[opt]` (no auto-detection); overriding them for an unmarked field is a "not a member of
     // trait" error.
     t.compile_fail("tests/ui/visitor_edit_unmarked_no_view.rs");
+    // `#[seq]`/`#[opt]` must name the field's innermost container (a `Vec<Option<T>>` marked `#[seq]`).
+    t.compile_fail("tests/ui/visitor_edit_marker_mismatch.rs");
     // (A `where`-bounded generic param not shared by all visited types is now SUPPORTED — the bounded
     //  param becomes a per-method generic, trait keyed on the shared subset; see
     //  `visitor_union_where_unshared_param.rs`.)

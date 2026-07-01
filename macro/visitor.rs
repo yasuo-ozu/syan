@@ -1,6 +1,6 @@
 use crate::util::{
     angle, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
-    method_ident_m, mt, param_name, param_use, peel, to_snake, Container, Head,
+    method_ident_m, mt, param_name, param_use, peel, to_snake, Container, ContLayer, Head,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -1027,11 +1027,34 @@ impl<'a> Lower<'a> {
 
         // A `#[seq]`/`#[opt]`-marked field whose peeled head is a visited type dispatches to its
         // container-edit view (`visit_mut` only); an unmarked field falls through to the ordinary descent.
+        // The marker names the field's INNERMOST container; any outer layers (`Vec<Option<T>>`,
+        // `Option<Vec<T>>`, …) are traversed normally and the innermost element gets the view.
         if self.mutable {
             if let Some(kind) = view {
                 if let Some((head, _)) = &resolved {
                     if self.method_set.contains(&head.to_string()) {
-                        return Some(self.view_dispatch(head, binding, &kind));
+                        let outer: &[ContLayer] = match p.conts.split_last() {
+                            Some((inner, outer)) => {
+                                if inner.kind != kind {
+                                    let (marked, found) = match kind {
+                                        Container::Seq => ("seq", "an `Option`"),
+                                        Container::Opt => ("opt", "a sequence"),
+                                    };
+                                    abort!(
+                                        Span::call_site(),
+                                        "`#[{}]` field's innermost container is {} — the marker must \
+                                         name the innermost container",
+                                        marked,
+                                        found
+                                    );
+                                }
+                                outer
+                            }
+                            None => &[],
+                        };
+                        let inner_acc = innermost_acc(outer, binding);
+                        let dispatch = self.view_dispatch(head, &inner_acc, &kind);
+                        return Some(fold_containers(outer, binding, dispatch, self.mutable));
                     }
                 }
             }
