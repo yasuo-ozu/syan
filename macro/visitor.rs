@@ -1,6 +1,6 @@
 use crate::util::{
     angle, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
-    method_ident_m, mt, param_name, param_use, peel, to_snake, Container, Head,
+    method_ident_m, mt, param_name, param_use, peel, to_snake, Container, Head, LayerKind,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -845,16 +845,15 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Visit a value `access` (an expression of reference type `&Box^head_box<head>` / `&mut ...`),
-    /// where `head` is the *effective* (real) head type. A method head emits a call (deref-coercion
-    /// handles any `Box`); an intermediate is drilled inline (deref `head_box+1` times to a `&head`
-    /// scrutinee, then destructure). May be empty (a finite drill that reaches no visited type).
+    /// Visit a value `access` (a `&head` / `&mut head` expression — the head is reached directly, any
+    /// `Box`/`Attempt` wrappers having been descended as `View` levels). A method head emits a call; an
+    /// unlisted intermediate is drilled inline (reborrow to a `&head` scrutinee, then destructure). May
+    /// be empty (a finite drill that reaches no visited type).
     fn visit_value(
         &self,
         access: &TokenStream,
         head: &Ident,
         drill_path: &Path,
-        head_box: usize,
         depth: usize,
         stack: &mut Vec<String>,
     ) -> TokenStream {
@@ -882,9 +881,8 @@ impl<'a> Lower<'a> {
             ),
         };
         stack.push(key);
-        let stars: TokenStream = (0..=head_box).map(|_| quote!(*)).collect();
         let amp = self.amp();
-        let scrut = quote!( #amp #stars #access );
+        let scrut = quote!( #amp * #access );
         let block = self.destructure(&dt.def, &dt.subast, &dt.path, &scrut, depth + 1, stack);
         stack.pop();
         block
@@ -1002,7 +1000,27 @@ impl<'a> Lower<'a> {
         stack: &mut Vec<String>,
     ) -> Option<TokenStream> {
         let user_types = self_and_subast_keys(self_ident, subast);
-        let p = peel(ty, &user_types)?;
+        let p = match peel(ty, &user_types) {
+            Some(p) => p,
+            // No followed head reachable ⇒ the field is a leaf. A `#[seq]`/`#[opt]` marker on such a
+            // field would route nowhere and silently no-op — abort so the mistake is caught here.
+            None => {
+                if let Some(kind) = view {
+                    let marker = match kind {
+                        Container::Seq => "seq",
+                        Container::Opt => "opt",
+                    };
+                    abort!(
+                        ty,
+                        "a `#[{}]` field's element type is not a visited type — mark only a field whose \
+                         element is a container of a type listed in `visitor!(..)` (or reached via \
+                         `#[subast]`)",
+                        marker
+                    );
+                }
+                return None;
+            }
+        };
         // A field behind a shared reference (`&T`/`&[T]`) is visitable on the shared side but a leaf
         // for `visit_mut` — there is no `&mut head` reachable through a `&`.
         if self.mutable && p.shared_ref {
@@ -1025,59 +1043,58 @@ impl<'a> Lower<'a> {
             Head::Tuple(_) => None,
         };
 
-        // A `#[seq]`/`#[opt]`-marked field whose peeled head is a visited type dispatches to its
-        // container-edit view (`visit_mut` only); an unmarked field falls through to the ordinary descent.
-        // The marker names the field's INNERMOST container; any outer layers (`Vec<Option<T>>`,
-        // `Option<Vec<T>>`, …) are traversed normally and the innermost element gets the view.
+        // A `#[seq]`/`#[opt]`-marked field is edited in place through the whole field's `SeqView`/`OptView`
+        // (`visit_mut` only). The field must be a **single** container of the visited head
+        // (`Vec<Head>`/`Option<Head>`/…): the marker picks the view method, and the `SeqView<Head>` /
+        // `OptView<Head>` bound on the generated method self-validates Seq-vs-Opt (a `#[seq]` on an
+        // `Option` fails the bound). No container name is matched.
         if self.mutable {
             if let Some(kind) = view {
                 let marker = match kind {
                     Container::Seq => "seq",
                     Container::Opt => "opt",
                 };
-                // The head must be a visited (method-set) type, else the marker routes nowhere and would
-                // silently no-op — abort so the mistake is caught at the field, not via a phantom method.
                 let head = match &resolved {
                     Some((h, _)) if self.method_set.contains(&h.to_string()) => h,
                     _ => abort!(
-                        Span::call_site(),
+                        ty,
                         "a `#[{}]` field's element type is not a visited type — mark only a field whose \
-                         element is listed in `visitor!(..)` (or reached via `#[subast]`)",
+                         element is a single container of a type listed in `visitor!(..)` (or reached via \
+                         `#[subast]`)",
                         marker
                     ),
                 };
-                let (inner, outer) = p.conts.split_last().unwrap_or_else(|| {
-                    abort!(
-                        Span::call_site(),
-                        "a `#[{}]` marker needs a container field (`Vec`/`VecDeque`/`Punctuated`/`Option`); \
-                         this is a direct/`Box` field",
-                        marker
-                    )
-                });
-                if inner.kind != kind {
-                    let found = match kind {
-                        Container::Seq => "an `Option`",
-                        Container::Opt => "a sequence",
-                    };
-                    abort!(
-                        Span::call_site(),
-                        "a `#[{}]` field's innermost container is {} — the marker must name the innermost \
-                         container",
+                match p.conts.as_slice() {
+                    [layer] if layer.kind == LayerKind::View => {}
+                    [] => abort!(
+                        ty,
+                        "a `#[{}]` marker needs a container field (e.g. `Vec<{}>` / `Option<{}>`); this is a \
+                         direct/single-value field",
                         marker,
-                        found
-                    );
-                }
-                if !inner.viewable {
-                    abort!(
-                        Span::call_site(),
-                        "a `#[{}]` field's innermost container has no view impl (an array/slice can't be \
-                         structurally edited — use `Vec`/`VecDeque`/`Punctuated`)",
+                        head,
+                        head
+                    ),
+                    [_] => abort!(
+                        ty,
+                        "a `#[{}]` field's container is an array/slice — not structurally editable; use \
+                         `Vec`/`VecDeque`/`Punctuated`/`Option`",
                         marker
-                    );
+                    ),
+                    _ => abort!(
+                        ty,
+                        "a `#[{}]` field must be a *single* container of the element (e.g. `Vec<{}>`); a \
+                         nested or wrapped container (`Vec<Box<{}>>`, `Box<Vec<{}>>`, …) can't be edited in \
+                         place — use a bare `Vec<{}>` / `Option<{}>`",
+                        marker,
+                        head,
+                        head,
+                        head,
+                        head,
+                        head
+                    ),
                 }
-                let inner_acc = innermost_acc(outer, binding);
-                let dispatch = self.view_dispatch(head, &inner_acc, &kind);
-                return Some(fold_containers(outer, binding, dispatch, self.mutable));
+                let dispatch = self.view_dispatch(head, binding, &kind);
+                return Some(dispatch);
             }
         }
 
@@ -1085,12 +1102,10 @@ impl<'a> Lower<'a> {
             // A tuple at the innermost position: destructure and lower each element (an element may
             // itself be a followed type, a container of one, or a nested tuple).
             Head::Tuple(elems) => {
-                self.lower_tuple(elems, &acc, p.head_box, idx, subast, self_ident, path, depth, stack)
+                self.lower_tuple(elems, &acc, idx, subast, self_ident, path, depth, stack)
             }
             Head::Path { .. } => match &resolved {
-                Some((head, drill_path)) => {
-                    self.visit_value(&acc, head, drill_path, p.head_box, depth, stack)
-                }
+                Some((head, drill_path)) => self.visit_value(&acc, head, drill_path, depth, stack),
                 None => quote!(),
             },
         };
@@ -1105,7 +1120,6 @@ impl<'a> Lower<'a> {
         &self,
         elems: &[Type],
         acc: &TokenStream,
-        head_box: usize,
         idx: usize,
         subast: &[SubEntry],
         self_ident: Option<&Ident>,
@@ -1139,8 +1153,7 @@ impl<'a> Lower<'a> {
             return quote!(); // tuple of only leaves -> leaf (empty body)
         }
         let amp = self.amp();
-        let stars: TokenStream = (0..=head_box).map(|_| quote!(*)).collect();
-        quote!( { let ( #(#pats,)* ) = #amp #stars #acc; #(#stmts)* } )
+        quote!( { let ( #(#pats,)* ) = #amp * #acc; #(#stmts)* } )
     }
 }
 
@@ -1566,6 +1579,10 @@ fn gen_side(
                 this: &mut #p_v,
                 i: #amp #{&s.ty},
             ) #{&s.free_where} {
+                // Bring the view methods into scope (unnamed) so a `View`-level descent resolves
+                // `view_iter[_mut]()` to `SeqView`/`OptView` by the compiler — no container name is named.
+                #[allow(unused_imports)]
+                use ::syan::visit::{OptView as _, SeqView as _};
                 #{&s.body}
             }
             // Default container-edit descent: visit each held node in place via the per-node `visit_*_mut`

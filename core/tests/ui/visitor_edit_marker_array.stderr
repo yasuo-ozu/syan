@@ -1,7 +1,10 @@
-error: a `#[seq]` field's innermost container has no view impl (an array/slice can't be structurally edited — use `Vec`/`VecDeque`/`Punctuated`)
-  --> tests/ui/visitor_edit_marker_array.rs:19:5
+error: a `#[seq]` field's container is an array/slice — not structurally editable; use `Vec`/`VecDeque`/`Punctuated`/`Option`
+  --> tests/ui/visitor_edit_marker_array.rs:15:16
    |
+15 |     pub items: [Leaf<S>; 3],
+   |                ^^^^^^^^^^^^
+...
 19 |     syan::visit::visitor!(crate::Wrap, crate::Leaf);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     ----------------------------------------------- in this macro invocation
    |
-   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `crate::Wrap` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

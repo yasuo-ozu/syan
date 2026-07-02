@@ -1,7 +1,7 @@
-//! `SeqView` after the `edit_each`/`for_each_mut` → `view_iter_mut` interface change: in-place iteration
-//! via `view_iter_mut`, structural changes via `retain_mut`/`push`/`insert`/`remove`. Fully-qualified
-//! trait calls are used because on a concrete `Vec` the trait's element type is ambiguous to infer (the
-//! `Wrap` blanket gives `Vec<Box<T>>` both `SeqView<T>` and `SeqView<Box<T>>`).
+//! `SeqView`/`OptView` are **bare-element**: `Vec<T>: SeqView<T>`, `Option<T>: OptView<T>`. A transparent
+//! single-slot wrapper (`Box<T>`/`Attempt<T>`) is `OptView<T>` (always one node), so a `Vec<Box<T>>` is
+//! `SeqView<Box<T>>` (element `Box<T>`) — the visitor descends the box as a further `OptView<T>` level.
+//! In-place iteration via `view_iter[_mut]`; structural changes via `retain_mut`/`push`/`insert`/`remove`.
 
 use syan::visit::{OptView, SeqView};
 
@@ -35,12 +35,13 @@ fn optview_iter_and_iter_mut() {
     }
     assert_eq!(o, Some(101));
 
-    // box-transparent: `Option<Box<T>>: OptView<T>` iterates the inner `T`.
-    let mut b: Option<Box<i32>> = Some(Box::new(7));
-    for x in <Option<Box<i32>> as OptView<i32>>::view_iter_mut(&mut b) {
+    // single-slot wrapper: `Box<T>: OptView<T>` is a 1-element view (always present).
+    let mut b: Box<i32> = Box::new(7);
+    for x in <Box<i32> as OptView<i32>>::view_iter_mut(&mut b) {
         *x += 1;
     }
-    assert_eq!(b.map(|x| *x), Some(8));
+    assert_eq!(*b, 8);
+    assert!(<Box<i32> as OptView<i32>>::is_some(&b));
 }
 
 #[test]
@@ -64,11 +65,12 @@ fn structural_index_ops() {
 }
 
 #[test]
-fn box_transparent_iter_mut() {
-    // `Vec<Box<T>>: SeqView<T>` yields `&mut T` (through the box).
+fn vec_of_box_is_bare_element() {
+    // Bare-element: `Vec<Box<T>>: SeqView<Box<T>>` yields `&mut Box<T>` (the element is the box). The
+    // visitor descends the box as a further `OptView<T>` level; here we edit through the box directly.
     let mut v: Vec<Box<i32>> = vec![Box::new(1), Box::new(2)];
-    for x in <Vec<Box<i32>> as SeqView<i32>>::view_iter_mut(&mut v) {
-        *x += 100;
+    for x in <Vec<Box<i32>> as SeqView<Box<i32>>>::view_iter_mut(&mut v) {
+        **x += 100;
     }
     assert_eq!(v.iter().map(|b| **b).collect::<Vec<_>>(), vec![101, 102]);
 }

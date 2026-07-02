@@ -112,15 +112,16 @@ mod boxed_container {
     #[derive(Debug, Ast)]
     pub struct Item<S>(pub i64, pub PhantomData<S>);
 
-    // `Box`-around-a-container fields (boxing a `Punctuated` / `Option` — not a std collection, so no
-    // `box_collection` lint): the view forwards through the box to the inner container.
+    // Edit views over a `Punctuated` seq and an `Option` slot. (Edit views require a *bare* single
+    // container — `SeqView<Item>` / `OptView<Item>` — so a box-around-a-container like `Box<Punctuated>`
+    // is not an edit target under the bare-element model; use the bare container.)
     #[derive(Debug, Ast)]
     #[subast(crate::boxed_container::Item)]
     pub struct Holder<S> {
         #[seq]
-        pub items: Box<Punctuated<Item<S>, Comma>>, // Box<Punctuated> -> SeqView<Item> forwards inward
+        pub items: Punctuated<Item<S>, Comma>, // Punctuated<Item> : SeqView<Item>
         #[opt]
-        pub last: Box<Option<Item<S>>>, // Box<Option> -> OptView<Item> forwards inward
+        pub last: Option<Item<S>>, // Option<Item> : OptView<Item>
     }
 
     pub mod v {
@@ -135,21 +136,21 @@ mod boxed_container {
         }
         fn visit_item_opt<O: OptView<Item<S>>>(&mut self, v: &mut O) {
             if matches!(v.get(), Some(i) if i.0 == 0) {
-                v.clear(); // the inner Option is emptied through the box (delegates to Option::take)
+                v.clear(); // Option::take
             }
         }
     }
 
     #[test]
-    fn box_around_container_forwards() {
+    fn punctuated_and_option_edit() {
         let mut items: Punctuated<Item<()>, Comma> = Punctuated::default();
         items.push(Item(0, PhantomData));
         items.push(Item(1, PhantomData));
         items.push(Item(2, PhantomData));
-        let mut h: Holder<()> = Holder { items: Box::new(items), last: Box::new(Some(Item(0, PhantomData))) };
+        let mut h: Holder<()> = Holder { items, last: Some(Item(0, PhantomData)) };
         h.visit_mut(&mut Editor);
         assert_eq!(h.items.iter().map(|i| i.0).collect::<Vec<_>>(), vec![1, 2, 9]);
-        assert!(h.last.is_none(), "the boxed Option was cleared via the forwarding OptView");
+        assert!(h.last.is_none(), "the Option was cleared via OptView");
     }
 }
 

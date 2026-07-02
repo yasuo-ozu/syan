@@ -1,7 +1,10 @@
-error: a `#[seq]` field's innermost container is an `Option` — the marker must name the innermost container
-  --> tests/ui/visitor_edit_marker_mismatch.rs:19:5
+error: a `#[seq]` field must be a *single* container of the element (e.g. `Vec<Item>`); a nested or wrapped container (`Vec<Box<Item>>`, `Box<Vec<Item>>`, …) can't be edited in place — use a bare `Vec<Item>` / `Option<Item>`
+  --> tests/ui/visitor_edit_marker_mismatch.rs:15:15
    |
+15 |     pub grid: Vec<Option<Item<S>>>,
+   |               ^^^^^^^^^^^^^^^^^^^^
+...
 19 |     syan::visit::visitor!(crate::Holder, crate::Item);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     ------------------------------------------------- in this macro invocation
    |
-   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `crate::Holder` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

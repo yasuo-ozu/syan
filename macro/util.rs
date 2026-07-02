@@ -137,130 +137,95 @@ pub(crate) fn item_generics(item: &Item) -> Option<&Generics> {
     }
 }
 
-/// A container layer wrapping the head: a sequence (`Vec`/`VecDeque`/slice/array/`Punctuated`) or an
-/// `Option`. `Box` is transparent (tracked as box-depth).
+/// A `#[seq]` / `#[opt]` field marker: the owning collection is edited through a `SeqView` (`Seq`) or an
+/// `OptView` (`Opt`). Used only for the edit-view path; ordinary descent does not distinguish the two.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Container {
     Seq,
     Opt,
 }
 
-/// One container layer + the `Box` layers wrapping THIS container (the `Opt` `if let` derefs through
-/// them; a `Seq`'s `.iter()`/`.iter_mut()` auto-derefs, so it ignores them).
-#[derive(Clone, Copy)]
-pub(crate) struct ContLayer {
-    pub kind: Container,
-    pub boxes: usize,
-    /// Whether this layer has a `SeqView`/`OptView` impl (Vec/VecDeque/Punctuated/Option — yes; a
-    /// fixed-size array or a slice maps to `Seq` for traversal but is NOT structurally editable). Drives
-    /// the `#[seq]`/`#[opt]` marker validation, which otherwise couldn't tell them apart.
-    pub viewable: bool,
+/// How one wrapper level of a field descends. `View`: a `SeqView`/`OptView` container
+/// (`Vec`/`Option`/`Box`/`Punctuated`/user wrapper) — descended by the `view_iter[_mut]` method, resolved
+/// to the right view by the compiler (**no container type name is matched**). `Raw`: a fixed-size array or
+/// slice — descended by the slice `iter[_mut]` (arrays/slices have no `SeqView` impl).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum LayerKind {
+    View,
+    Raw,
 }
 
-/// What sits at the innermost peeled position (after the container/box layers): the common case is a
-/// path head, but a tuple can appear there too — directly (`(A, B)`) or nested behind containers/boxes
-/// (`Vec<(A, B)>`, `Box<(A, B)>`). A tuple has no single head ident; its elements are lowered
-/// recursively (each may itself be a followed type, a container of one, or a nested tuple).
+/// One wrapper level between the field and its head.
+#[derive(Clone, Copy)]
+pub(crate) struct ContLayer {
+    pub kind: LayerKind,
+}
+
+/// What sits at the innermost peeled position: a path head (a visited type) or a tuple (destructured, each
+/// element lowered recursively).
 pub(crate) enum Head {
     Path { head: Ident },
     Tuple(Vec<Type>),
 }
 
-/// The result of peeling a field type to its visitable head.
+/// The result of peeling a field type to its visitable head. `peel` returns `Some` only when a followed
+/// head is reachable; a type with no followed head is a leaf (`None`).
 pub(crate) struct Peeled {
-    /// Container layers wrapping the head, OUTER→INNER. Empty ⇒ a direct (single-value) head; a chain
-    /// of length > 1 is a nested container (`Vec<Option<T>>` ⇒ `[Seq, Opt]`).
+    /// Wrapper levels between the field and the head, OUTER→INNER (empty ⇒ the field *is* the head).
     pub conts: Vec<ContLayer>,
     pub head: Head,
-    /// `Box` layers directly around the head/tuple; a dispatch derefs through these (`&**…`).
-    pub head_box: usize,
-    /// The head sits behind a shared reference (`&T`, `&[T]`, …) — peeled transparently. Such a field
-    /// can be visited on the shared side but NOT on the `&mut` side (no `&mut head` through a `&`), so
-    /// the mut side treats it as a leaf. (A `&mut T` field is owned-enough to mutate, so it is *not*
-    /// flagged.)
+    /// The head sits behind a shared reference (`&T`) — visitable on the shared side but a leaf on the
+    /// `&mut` side (no `&mut head` through a `&`). (`&mut T` is not flagged.)
     pub shared_ref: bool,
 }
 
-/// Wrap a peeled head in an outer container layer (prepended — `conts` is outer→inner). `viewable` marks
-/// whether the container has a `SeqView`/`OptView` impl (false for arrays/slices).
-fn container_of(c: Container, viewable: bool, mut inner: Peeled) -> Peeled {
-    inner.conts.insert(0, ContLayer { kind: c, boxes: 0, viewable });
+fn prepend(kind: LayerKind, mut inner: Peeled) -> Peeled {
+    inner.conts.insert(0, ContLayer { kind });
     inner
 }
 
-fn direct(head: Ident) -> Peeled {
-    Peeled {
-        conts: Vec::new(),
-        head: Head::Path { head },
-        head_box: 0,
-        shared_ref: false,
-    }
-}
-
-/// Peel a field type to its visitable head + its container chain. A path head listed in `user_types`
-/// (e.g. a type's `#[subast]` matchkeys plus its own ident) is always a direct head, so a user AST
-/// type named like a container keyword (`Option`, `Vec`, …) wins over the built-in container handling.
-/// `None` for a non-path leaf. The caller decides whether `head` is actually followed.
+/// Peel a field type to its head + the wrapper levels around it, **without matching any container type
+/// name**. A path whose last segment is in `user_types` (a type's `#[subast]` matchkeys + its own ident)
+/// is the head; any *other* path is a `View` wrapper level iff a head is reachable through its first type
+/// argument — so `Vec`/`Option`/`Box`/`Punctuated` and user wrappers are handled uniformly, while
+/// `Vec<String>` (no head below) is a leaf. Arrays/slices are `Raw` levels; a tuple with a followed
+/// element is a `Head::Tuple`. `None` ⇒ no followed head (a leaf).
 pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
     match ty {
-        // A shared `&` makes the head unmutable-through; flag it (the mut side will treat it as a
-        // leaf). `&mut` is not flagged — it can be reborrowed mutably.
+        // A shared `&` makes the head unmutable-through; flag it (the mut side treats it as a leaf).
+        // `&mut` is not flagged — it can be reborrowed mutably.
         Type::Reference(r) => peel(&r.elem, user_types).map(|mut inner| {
             inner.shared_ref |= r.mutability.is_none();
             inner
         }),
         Type::Group(g) => peel(&g.elem, user_types),
         Type::Paren(p) => peel(&p.elem, user_types),
-        // Slice/array traverse as a `Seq` but have no `SeqView` impl (not structurally editable).
-        Type::Slice(s) => {
-            peel(&s.elem, user_types).map(|inner| container_of(Container::Seq, false, inner))
-        }
-        Type::Array(a) => {
-            peel(&a.elem, user_types).map(|inner| container_of(Container::Seq, false, inner))
-        }
+        Type::Slice(s) => peel(&s.elem, user_types).map(|inner| prepend(LayerKind::Raw, inner)),
+        Type::Array(a) => peel(&a.elem, user_types).map(|inner| prepend(LayerKind::Raw, inner)),
         Type::Path(tp) => {
             let seg = tp.path.segments.last()?;
-            let name = seg.ident.to_string();
-            // A user AST type wins over a same-named container keyword.
-            if user_types.contains(&name) {
-                return Some(direct(seg.ident.clone()));
+            if user_types.contains(&seg.ident.to_string()) {
+                return Some(Peeled {
+                    conts: Vec::new(),
+                    head: Head::Path { head: seg.ident.clone() },
+                    shared_ref: false,
+                });
             }
-            match name.as_str() {
-                // `Box` and `Attempt` are both transparent single-`Deref` wrappers — peel through them
-                // (`*x` yields the inner value), counting one deref layer like a box.
-                "Box" | "Attempt" => {
-                    let mut inner = peel(first_ty_arg(seg)?, user_types)?;
-                    match inner.conts.first_mut() {
-                        // Wrapper around the outermost container: that layer derefs through it.
-                        Some(layer) => layer.boxes += 1,
-                        // Wrapper directly around the head.
-                        None => inner.head_box += 1,
-                    }
-                    Some(inner)
-                }
-                "Vec" | "VecDeque" | "Punctuated" => {
-                    Some(container_of(Container::Seq, true, peel(first_ty_arg(seg)?, user_types)?))
-                }
-                "Option" => {
-                    Some(container_of(Container::Opt, true, peel(first_ty_arg(seg)?, user_types)?))
-                }
-                _ => Some(direct(seg.ident.clone())),
-            }
+            // Not a head: a `View` wrapper level iff a head is reachable through its element.
+            peel(first_ty_arg(seg)?, user_types).map(|inner| prepend(LayerKind::View, inner))
         }
-        // A tuple at the innermost peeled position (`(A, B)`, or `Vec<(A, B)>` / `Box<(A, B)>` after
-        // its container/box layers are peeled): each element is lowered recursively by the caller.
-        Type::Tuple(t) => Some(Peeled {
+        // A tuple is a head iff some element is followed; each element is lowered by the caller.
+        Type::Tuple(t) if t.elems.iter().any(|e| peel(e, user_types).is_some()) => Some(Peeled {
             conts: Vec::new(),
             head: Head::Tuple(t.elems.iter().cloned().collect()),
-            head_box: 0,
             shared_ref: false,
         }),
         _ => None,
     }
 }
 
-/// The accessor for the head after peeling all `conts`: the field `binding` itself for a direct head,
-/// else the innermost loop / `if let` var that `fold_containers` introduces.
+/// The accessor for the head after peeling all `conts`: the field `binding` for a direct head, else the
+/// innermost loop var that `fold_containers` introduces.
 pub(crate) fn innermost_acc(conts: &[ContLayer], binding: &TokenStream) -> TokenStream {
     if conts.is_empty() {
         binding.clone()
@@ -270,10 +235,10 @@ pub(crate) fn innermost_acc(conts: &[ContLayer], binding: &TokenStream) -> Token
     }
 }
 
-/// Wrap an already-lowered `body` (which dispatches at `innermost_acc(conts, binding)`) in the
-/// container layers `conts` (outer→inner): `Seq` ⇒ a `for` over `.iter()`/`.iter_mut()`, `Opt` ⇒ an
-/// `if let Some(..)` (dereffing the layer's `Box`es). Layer `i` (outer→inner) binds `__nc{i+1}`,
-/// iterating `__nc{i}` (or `binding` at `i == 0`) — so nested containers nest the loops/ifs.
+/// Wrap an already-lowered `body` (dispatching at `innermost_acc(conts, binding)`) in the wrapper levels
+/// `conts` (outer→inner): a `View` level is a `for` over `view_iter[_mut]()` (resolved to `SeqView`/
+/// `OptView` by the compiler), a `Raw` level a `for` over the slice `iter[_mut]()`. Level `i` binds
+/// `__nc{i+1}`, iterating `__nc{i}` (or `binding` at `i == 0`) — so nested wrappers nest the loops.
 pub(crate) fn fold_containers(
     conts: &[ContLayer],
     binding: &TokenStream,
@@ -288,17 +253,13 @@ pub(crate) fn fold_containers(
             quote!(#e)
         };
         let elem = Ident::new(&format!("__nc{}", i + 1), Span::call_site());
-        body = match layer.kind {
-            Container::Seq => {
-                let iter = if mutable { quote!(iter_mut) } else { quote!(iter) };
-                quote!( for #elem in #bind.#iter() { #body } )
-            }
-            Container::Opt => {
-                let amp = if mutable { quote!(&mut) } else { quote!(&) };
-                let stars: TokenStream = (0..=layer.boxes).map(|_| quote!(*)).collect();
-                quote!( if let ::core::option::Option::Some(#elem) = #amp #stars #bind { #body } )
-            }
+        let iter = match (layer.kind, mutable) {
+            (LayerKind::View, true) => quote!(view_iter_mut),
+            (LayerKind::View, false) => quote!(view_iter),
+            (LayerKind::Raw, true) => quote!(iter_mut),
+            (LayerKind::Raw, false) => quote!(iter),
         };
+        body = quote!( for #elem in #bind.#iter() { #body } );
     }
     body
 }

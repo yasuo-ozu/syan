@@ -152,7 +152,7 @@ mod views {
     }
 }
 
-// ── edits through `Vec<Box<_>>` inside a `#[recurse]` cycle (box-transparent view) ───────────────
+// ── edits through a `Vec<Expr>` inside a `#[recurse]` cycle (the `Vec` gives the indirection) ─────
 mod rec {
     use super::*;
     use syan::parse::recurse;
@@ -165,9 +165,8 @@ mod rec {
 
         #[derive(Debug, Ast)]
         #[subast()]
-        #[allow(clippy::vec_box)]
         pub enum Expr<S> {
-            Many(#[seq] Vec<Box<Expr<S>>>), // self-recursive Vec-like slot -> visit_expr_seq
+            Many(#[seq] Vec<Expr<S>>), // self-recursive Vec-like slot (Vec gives the indirection) -> visit_expr_seq
             Lit(i64, PhantomData<S>),
         }
     }
@@ -193,7 +192,7 @@ mod rec {
 
     fn lits(e: &ast::Expr<()>) -> Vec<i64> {
         match e {
-            ast::Expr::Many(xs) => xs.iter().flat_map(|x| lits(x)).collect(),
+            ast::Expr::Many(xs) => xs.iter().flat_map(lits).collect(),
             ast::Expr::Lit(n, _) => vec![*n],
         }
     }
@@ -201,25 +200,24 @@ mod rec {
     #[test]
     fn vec_of_box_edits_in_cycle() {
         let mut e: ast::Expr<()> = ast::Expr::Many(vec![
-            Box::new(ast::Expr::Lit(0, PhantomData)), // removed
-            Box::new(ast::Expr::Lit(1, PhantomData)), // kept
-            Box::new(ast::Expr::Lit(2, PhantomData)), // -> 99
-            Box::new(ast::Expr::Many(vec![
-                Box::new(ast::Expr::Lit(0, PhantomData)), // removed (nested)
-                Box::new(ast::Expr::Lit(5, PhantomData)),
-                Box::new(ast::Expr::Lit(2, PhantomData)), // -> 99 (nested)
-            ])),
+            ast::Expr::Lit(0, PhantomData), // removed
+            ast::Expr::Lit(1, PhantomData), // kept
+            ast::Expr::Lit(2, PhantomData), // -> 99
+            ast::Expr::Many(vec![
+                ast::Expr::Lit(0, PhantomData), // removed (nested)
+                ast::Expr::Lit(5, PhantomData),
+                ast::Expr::Lit(2, PhantomData), // -> 99 (nested)
+            ]),
         ]);
         e.visit_mut(&mut Editor);
         assert_eq!(lits(&e), vec![1, 99, 5, 99]);
     }
 }
 
-// ── `#[recurse]` cycle, Option-like slot: visit_expr_opt prunes a node in place ──────────────────
+// ── `#[recurse]` cycle, self-recursive `Option<Box<_>>` slot: descended per level (not an edit target) ──
 mod rec_opt {
     use super::*;
     use syan::parse::recurse;
-    use syan::visit::OptView;
 
     #[recurse]
     mod ast {
@@ -229,7 +227,10 @@ mod rec_opt {
         #[derive(Debug, Ast)]
         #[subast()]
         pub enum Expr<S> {
-            Opt(#[opt] Option<Box<Expr<S>>>), // self-recursive Option-like slot -> visit_expr_opt
+            // Self-recursive `Option<Box<_>>`: descended per level (`Option` → `Box` → `Expr`). It is
+            // NOT a `#[opt]` edit target — the `Box` is needed for finite size, but a `#[opt]` view needs
+            // a bare `Option<Expr>`; so this exercises *descent* through a boxed-option cycle.
+            Opt(Option<Box<Expr<S>>>),
             Lit(i64, PhantomData<S>),
         }
     }
@@ -238,42 +239,40 @@ mod rec_opt {
         syan::visit::visitor!(crate::rec_opt::ast::Expr);
     }
 
-    // Drop a `Lit(0)` child (→ `None`), else descend into it.
-    struct Pruner;
-    impl<S> v::VisitMut<S> for Pruner {
-        fn visit_expr_opt<O: OptView<ast::Expr<S>>>(&mut self, v: &mut O) {
-            if matches!(v.get(), Some(ast::Expr::Lit(0, _))) {
-                v.take();
-            } else if let Some(e) = v.get_mut() {
-                v::visit_expr_mut(self, e);
+    // Plain descent through the boxed-Option cycle: bump every `Lit` in place via `visit_expr_mut`.
+    struct Bump;
+    impl<S> v::VisitMut<S> for Bump {
+        fn visit_expr_mut(&mut self, e: &mut ast::Expr<S>) {
+            if let ast::Expr::Lit(n, _) = e {
+                *n += 1;
             }
+            v::visit_expr_mut(self, e); // default descent into the Opt child
         }
     }
 
-    // Render as a string: `O(..)` / `O()` for Opt(Some)/Opt(None), `n` for Lit(n).
-    fn shape(e: &ast::Expr<()>) -> String {
+    fn lits(e: &ast::Expr<()>) -> Vec<i64> {
         match e {
-            ast::Expr::Opt(Some(b)) => format!("O({})", shape(b)),
-            ast::Expr::Opt(None) => "O()".to_string(),
-            ast::Expr::Lit(n, _) => n.to_string(),
+            ast::Expr::Opt(Some(b)) => lits(b),
+            ast::Expr::Opt(None) => vec![],
+            ast::Expr::Lit(n, _) => vec![*n],
         }
     }
 
     #[test]
-    fn opt_prune_in_cycle() {
-        // O( O( 0 ) )  -> the inner Lit(0) is taken, leaving O( O() ).
+    fn descends_boxed_option_cycle() {
+        // O( O( 5 ) ) — descent reaches the deep Lit through two `Option<Box<_>>` levels.
         let mut e: ast::Expr<()> = ast::Expr::Opt(Some(Box::new(ast::Expr::Opt(Some(Box::new(
-            ast::Expr::Lit(0, PhantomData),
+            ast::Expr::Lit(5, PhantomData),
         ))))));
-        e.visit_mut(&mut Pruner);
-        assert_eq!(shape(&e), "O(O())", "the deep Lit(0) was pruned through the cycle");
+        e.visit_mut(&mut Bump);
+        assert_eq!(lits(&e), vec![6], "descent through Option<Box<_>> reached the deep Lit");
     }
 
     #[test]
-    fn opt_keeps_nonzero() {
-        let mut e: ast::Expr<()> = ast::Expr::Opt(Some(Box::new(ast::Expr::Lit(3, PhantomData))));
-        e.visit_mut(&mut Pruner);
-        assert_eq!(shape(&e), "O(3)", "a non-zero leaf is kept");
+    fn descends_none_tail() {
+        let mut e: ast::Expr<()> = ast::Expr::Opt(None);
+        e.visit_mut(&mut Bump);
+        assert_eq!(lits(&e), Vec::<i64>::new());
     }
 }
 
@@ -342,7 +341,7 @@ mod drill {
     }
 }
 
-// ── multi-type `#[recurse]` cycle: edit the cross-edge `Vec<Box<Stmt>>` from `visit_stmt_seq` ────────
+// ── multi-type `#[recurse]` cycle: edit the cross-edge `Vec<Stmt>` from `visit_stmt_seq` ────────────
 mod rec_cross {
     use super::*;
     use syan::parse::recurse;
@@ -355,9 +354,8 @@ mod rec_cross {
 
         #[derive(Debug, Ast)]
         #[subast(crate::rec_cross::ast::Stmt)]
-        #[allow(clippy::vec_box)]
         pub enum Expr<S> {
-            Block(#[seq] Vec<Box<Stmt<S>>>), // cross-edge: holds `Stmt` Vec-like -> visit_stmt_seq
+            Block(#[seq] Vec<Stmt<S>>), // cross-edge: holds `Stmt` Vec-like -> visit_stmt_seq
             Lit(i64, PhantomData<S>),
         }
 
@@ -390,7 +388,7 @@ mod rec_cross {
         match e {
             ast::Expr::Block(ss) => ss
                 .iter()
-                .flat_map(|s| match &**s {
+                .flat_map(|s| match s {
                     ast::Stmt::Nop(n, _) => vec![*n],
                     ast::Stmt::Expr(inner) => nops(inner),
                 })
@@ -402,22 +400,22 @@ mod rec_cross {
     #[test]
     fn cross_edge_seq_edit_in_multitype_cycle() {
         let mut e: ast::Expr<()> = ast::Expr::Block(vec![
-            Box::new(ast::Stmt::Nop(0, PhantomData)), // removed
-            Box::new(ast::Stmt::Nop(1, PhantomData)), // kept
-            Box::new(ast::Stmt::Expr(Box::new(ast::Expr::Block(vec![
-                Box::new(ast::Stmt::Nop(0, PhantomData)), // removed (nested, via the back-edge)
-                Box::new(ast::Stmt::Nop(5, PhantomData)), // kept
-            ])))),
+            ast::Stmt::Nop(0, PhantomData), // removed
+            ast::Stmt::Nop(1, PhantomData), // kept
+            ast::Stmt::Expr(Box::new(ast::Expr::Block(vec![
+                ast::Stmt::Nop(0, PhantomData), // removed (nested, via the back-edge)
+                ast::Stmt::Nop(5, PhantomData), // kept
+            ]))),
         ]);
         e.visit_mut(&mut Editor);
         assert_eq!(nops(&e), vec![1, 5], "Nop(0) dropped at both cycle depths");
     }
 }
 
-// ── nested containers: the marker names the INNERMOST container; outer layers are iterated ────────
+// ── nested containers (`Vec<Option<_>>`, `Vec<Vec<_>>`) descend per level (not edit-view targets) ──
 mod nested {
     use super::*;
-    use syan::visit::{Ast, OptView, SeqView};
+    use syan::visit::Ast;
 
     #[derive(Debug, Ast)]
     pub struct Item<S>(pub i64, pub PhantomData<S>);
@@ -425,9 +423,10 @@ mod nested {
     #[derive(Debug, Ast)]
     #[subast(crate::nested::Item)]
     pub struct Holder<S> {
-        #[opt] // innermost is `Option` -> each inner `Option<Item>` gets an OptView
+        // Nested containers descend per level (`Vec<Option<_>>` → `Vec` then `Option`; `Vec<Vec<_>>` →
+        // `Vec` then `Vec`) — every `Item` is reached by `visit_item_mut`. They are NOT edit-view targets
+        // (a `#[seq]`/`#[opt]` view needs a bare single container), so this covers *descent* only.
         pub grid: Vec<Option<Item<S>>>,
-        #[seq] // innermost is the inner `Vec` -> each inner `Vec<Item>` gets a SeqView
         pub rows: Vec<Vec<Item<S>>>,
     }
 
@@ -435,37 +434,33 @@ mod nested {
         syan::visit::visitor!(super::Holder, super::Item);
     }
 
-    struct Editor;
-    impl<S> v::VisitMut<S> for Editor {
-        fn visit_item_seq<V: SeqView<Item<S>>>(&mut self, v: &mut V) {
-            v.retain_mut(|i| i.0 != 0);
-        }
-        fn visit_item_opt<O: OptView<Item<S>>>(&mut self, v: &mut O) {
-            if matches!(v.get(), Some(i) if i.0 == 0) {
-                v.clear();
-            }
+    // In-place edit reaching every nested item: negate each value.
+    struct Neg;
+    impl<S> v::VisitMut<S> for Neg {
+        fn visit_item_mut(&mut self, i: &mut Item<S>) {
+            i.0 = -i.0;
         }
     }
 
     #[test]
-    fn vec_of_option_and_vec_of_vec() {
+    fn nested_containers_descend() {
         let mut h: Holder<()> = Holder {
-            grid: vec![Some(Item(0, PhantomData)), None, Some(Item(5, PhantomData))],
+            grid: vec![Some(Item(1, PhantomData)), None, Some(Item(5, PhantomData))],
             rows: vec![
-                vec![Item(0, PhantomData), Item(1, PhantomData)],
-                vec![Item(0, PhantomData)],
+                vec![Item(2, PhantomData), Item(3, PhantomData)],
+                vec![Item(4, PhantomData)],
             ],
         };
-        h.visit_mut(&mut Editor);
+        h.visit_mut(&mut Neg);
         assert_eq!(
             h.grid.iter().map(|o| o.as_ref().map(|i| i.0)).collect::<Vec<_>>(),
-            vec![None, None, Some(5)],
-            "each inner Option edited via visit_item_opt (the 0 cleared)"
+            vec![Some(-1), None, Some(-5)],
+            "Vec<Option<Item>> descended per level — every present item negated"
         );
         assert_eq!(
             h.rows.iter().map(|r| r.iter().map(|i| i.0).collect::<Vec<_>>()).collect::<Vec<_>>(),
-            vec![vec![1], vec![]],
-            "each inner Vec edited via visit_item_seq (0s dropped)"
+            vec![vec![-2, -3], vec![-4]],
+            "Vec<Vec<Item>> descended per level — every item negated"
         );
     }
 }
