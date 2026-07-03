@@ -10,6 +10,11 @@ pub(crate) fn generate_substruct(
     fields: &mut VecDeque<(Member, Ident, &Field)>,
     nonce: u64,
     by_ref: bool,
+    // The enclosing enum variant, when the field lives inside one — mixed into the substruct name so
+    // that two variants with a same-named, same-shaped `#[group(..)]` field don't collide (E0428): the
+    // name would otherwise only depend on the field name + owning type + derive nonce, all shared
+    // across variants.
+    variant_ident: Option<&Ident>,
 ) -> Option<(ItemStruct, Vec<Field>)> {
     let mut subfields = Vec::new();
     let lt = Lifetime::new("'syan_substruct_ref", Span::call_site());
@@ -38,8 +43,15 @@ pub(crate) fn generate_substruct(
         }
     }
     if !subfields.is_empty() {
+        // Field index (the `Member`'s tuple position, or 0 for a named field, where the name already
+        // disambiguates) alongside the variant, per the two collision axes above.
+        let member_index = match member {
+            Member::Named(_) => 0,
+            Member::Unnamed(index) => index.index,
+        };
+        let variant_key = variant_ident.map(|v| format!("{v}_")).unwrap_or_default();
         let substruct_ident = Ident::new(
-            &format!("__SyanSubstructOf_{field_ident}_{ident}_{nonce}"),
+            &format!("__SyanSubstructOf_{variant_key}{field_ident}_{member_index}_{ident}_{nonce}"),
             member.span(),
         );
         let phantom_args: Punctuated<Type, Token![,]> = generics

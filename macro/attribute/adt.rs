@@ -44,19 +44,23 @@ fn substruct_items(
 pub(crate) trait Adt {
     fn all_fields(&self) -> Vec<&Field>;
 
+    /// `f`'s first argument is the enclosing variant's ident (`None` for a plain struct, or when the
+    /// fields span more than one variant — e.g. a Parse prefix-dedup call) — threaded down to
+    /// `generate_substruct` so a `#[group(..)]` field's substruct name stays unique per variant.
     fn extract_parse_inner(
         &self,
         syan: &Path,
         ident: &Ident,
         tp_error_final: &Type,
-        f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        f: impl FnMut(Option<&Ident>, &[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream;
 
+    /// See `extract_parse_inner` for the meaning of `f`'s variant-ident argument.
     fn extract_inner(
         &self,
         ident: &Ident,
         v_self: &TokenStream,
-        f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        f: impl FnMut(Option<&Ident>, &[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream;
 
     fn extract_parse(
@@ -88,7 +92,7 @@ pub(crate) trait Adt {
         let mut substructs: Vec<ItemStruct> = Vec::new();
 
         let field_phantom: Ident = parse_quote!(_syan_phantom);
-        let inner = self.extract_parse_inner(syan, ident,&tp_error_final, |fields| {
+        let inner = self.extract_parse_inner(syan, ident,&tp_error_final, |variant_ident, fields| {
             let mut ret = quote!();
 
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
@@ -122,7 +126,7 @@ pub(crate) trait Adt {
                     (Some(o1), Some(o2)) => abort!(quote!{#o1, #o2}, "Cannot implement both #[joint] and #[alone] to field `{}`", quote!{#{&field.ident}}),
                 };
 
-                let substruct = generate_substruct(&member, generics, ident, &field_ident, &field_phantom, &mut fields, nonce, false);
+                let substruct = generate_substruct(&member, generics, ident, &field_ident, &field_phantom, &mut fields, nonce, false, variant_ident);
                     let field_ty = &field.ty;
 
                 if let Some((substruct, subfields)) = substruct {
@@ -223,7 +227,7 @@ pub(crate) trait Adt {
             .map(|w| w.predicates.iter().cloned().collect())
             .unwrap_or_default();
 
-        let inner = self.extract_parse_inner(syan, ident, &err_final, |fields| {
+        let inner = self.extract_parse_inner(syan, ident, &err_final, |_variant_ident, fields| {
             let mut ret = quote!();
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
             while let Some((_member, field_ident, field)) = fields.pop_front() {
@@ -313,7 +317,7 @@ pub(crate) trait Adt {
         let v_self: TokenStream = quote!(self);
         let mut substructs = Vec::new();
         let field_phantom: Ident = parse_quote!(_syan_phantom);
-        let inner = self.extract_inner(ident, &v_self, |fields| {
+        let inner = self.extract_inner(ident, &v_self, |variant_ident, fields| {
             let mut ret = quote!();
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
 
@@ -339,6 +343,7 @@ pub(crate) trait Adt {
                     &mut fields,
                     nonce,
                     true,
+                    variant_ident,
                 ) {
                     ret.extend(quote! {
                         let #field_ident = <#field_ty as #syan::nested::group::EmptyGroup>::fill(
@@ -429,7 +434,7 @@ pub(crate) trait Adt {
         }
         let v_self: TokenStream = quote!(self);
 
-        let span_impl = self.extract_inner(ident, &v_self, |fields| {
+        let span_impl = self.extract_inner(ident, &v_self, |_variant_ident, fields| {
             for (_, _, field) in fields {
                 if field.has_default() {
                     continue;
@@ -558,10 +563,10 @@ impl Adt for DataStruct {
         _syan: &Path,
         ident: &Ident,
         _tp_error_final: &Type,
-        mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        mut f: impl FnMut(Option<&Ident>, &[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream {
         let fields = map_fields_to_idents(&self.fields);
-        let inner = f(&fields[..]);
+        let inner = f(None, &fields[..]);
         quote! {
             #inner
 
@@ -575,10 +580,10 @@ impl Adt for DataStruct {
         &self,
         ident: &Ident,
         v_self: &TokenStream,
-        mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        mut f: impl FnMut(Option<&Ident>, &[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream {
         let fields = map_fields_to_idents(&self.fields);
-        let inner = f(&fields[..]);
+        let inner = f(None, &fields[..]);
         quote! {
             let #ident #{fields_pattern(&self.fields, &fields)} = #v_self;
             #inner
@@ -596,7 +601,7 @@ impl Adt for DataEnum {
         syan: &Path,
         ident: &Ident,
         tp_error_final: &Type,
-        mut f: impl FnMut(&[MappedField]) -> TokenStream,
+        mut f: impl FnMut(Option<&Ident>, &[MappedField]) -> TokenStream,
     ) -> TokenStream {
         let variants: Vec<VariantFields> = self
             .variants
@@ -621,7 +626,7 @@ impl Adt for DataEnum {
             let blocks: Vec<TokenStream> = variants
                 .iter()
                 .map(|(variant, fields)| {
-                    let inner = f(&fields[..]);
+                    let inner = f(Some(&variant.ident), &fields[..]);
                     let construct = construct_of(variant, fields);
                     quote! {
                         match #syan::parse::ParseStream::dup(&mut __syan_stream, |mut __syan_stream| {
@@ -648,7 +653,8 @@ impl Adt for DataEnum {
         // the "enum parse rewinds on failure" property of the per-variant scheme); the prefix is parsed
         // once inside it, and each non-empty suffix gets its own inner `dup` so a failed variant rewinds
         // only the suffix and the next variant is tried from the post-prefix position.
-        let prefix_parse = f(&variants[0].1[..lcp]);
+        // Shared by every variant, so there's no single owning variant to disambiguate by.
+        let prefix_parse = f(None, &variants[0].1[..lcp]);
 
         // A variant whose fields are exactly the prefix is an unconditional fallback (empty suffix); the
         // FIRST such variant ends the chain (later variants are unreachable). It becomes the closure's tail
@@ -663,7 +669,7 @@ impl Adt for DataEnum {
             .map(|(variant, fields)| {
                 let construct = construct_of(variant, fields);
                 let suffix = &fields[lcp..]; // non-empty (the first empty one is the fallback, excluded)
-                let suffix_parse = f(suffix);
+                let suffix_parse = f(Some(&variant.ident), suffix);
                 let suffix_ids: Vec<&Ident> = suffix.iter().map(|(_, id, _)| id).collect();
                 let on_err = if has_fallback {
                     quote!( ::core::result::Result::Err(_) => {} )
@@ -716,11 +722,11 @@ impl Adt for DataEnum {
         &self,
         ident: &Ident,
         v_self: &TokenStream,
-        mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        mut f: impl FnMut(Option<&Ident>, &[(Member, Ident, &Field)]) -> TokenStream,
     ) -> TokenStream {
         let variants = self.variants.iter().map(|v| {
             let fields = map_fields_to_idents(&v.fields);
-            let inner = f(&fields[..]);
+            let inner = f(Some(&v.ident), &fields[..]);
             (v, fields, inner)
         });
         quote! {
