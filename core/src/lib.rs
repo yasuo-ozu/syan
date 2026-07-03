@@ -7,6 +7,12 @@ pub mod symbol;
 pub mod tuple;
 pub mod visit;
 
+/// Derive one leaf-token struct (with the standard `Parse`/`Unparse`/`Spanned` trio) per annotated
+/// variant of a custom token enum. See [`syan_macro::TokenLeaves`]. Grouped here with the crate-root
+/// derive re-exports; the trait derives themselves live next to their traits (`parse::Parse`,
+/// `parse::unparse::Unparse`, `span::Spanned`, `visit::Ast`).
+pub use syan_macro::TokenLeaves;
+
 #[doc(hidden)]
 pub mod _imp {
     pub use crate::parse::{Parse, Unparse};

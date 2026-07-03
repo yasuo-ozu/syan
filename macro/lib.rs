@@ -86,6 +86,29 @@ pub fn unparse(input: TokenStream1) -> TokenStream1 {
     .into()
 }
 
+/// Derive `TokenLeaves` — from a custom token enum, generate one **leaf struct** per annotated variant,
+/// each with the standard `Parse`/`Unparse`/`Spanned` trio (peek one atom → match this variant → push
+/// the atom back and error on mismatch).
+///
+/// # Attributes
+///
+/// - **`#[token_leaf(atom = "..", span = "..")]`** (on the enum) — `atom` is the atom type path, a
+///   `WithSpan<Self, S>`-shaped span-carrier (public `slot: Self`, `span: S`); `span` is a closure
+///   `|a| ..` reading a leaf's span from an `&atom` (e.g. `"|a| a.span.clone()"`). The leaf span type is
+///   `<atom as Spanned>::Span`.
+/// - **`#[leaf(name = "..", expect = ".."[, field = ".."])]`** (per variant) — `name` is the generated
+///   struct ident, `expect` the human-readable expectation used in the parse error, and `field` (only
+///   for a single-field variant) overrides the payload field's name. A **unit** variant `V` becomes
+///   `struct N(pub S)`; a **single-field** variant `V(T)` / `V { f: T }` becomes `struct N { f: T, span:
+///   S }`. Unannotated variants are skipped; a multi-field variant is an error.
+#[proc_macro_error]
+#[proc_macro_derive(TokenLeaves, attributes(syan, token_leaf, leaf))]
+pub fn token_leaves(input: TokenStream1) -> TokenStream1 {
+    let input: DeriveInput = parse_macro_input!(input);
+    let syan = input.attrs.get_syan();
+    attribute::token_leaves(&input, random(), &syan).into()
+}
+
 #[proc_macro_error]
 #[proc_macro_derive(Ast, attributes(syan, subast, seq, opt))]
 pub fn ast_derive(input: TokenStream1) -> TokenStream1 {
