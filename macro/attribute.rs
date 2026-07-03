@@ -9,7 +9,9 @@ use template_quote::quote;
 mod adt;
 mod find;
 mod substruct;
-use adt::*;
+// `pub(crate)` so the `#[recurse]` decycle path (feature `recurse-decycle`) can reach `adt::Adt`
+// (`Adt::extract_parse_dyn`) — a re-export, so it is never "unused" regardless of feature.
+pub(crate) use adt::*;
 use find::*;
 use substruct::*;
 

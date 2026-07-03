@@ -186,6 +186,109 @@ pub(crate) trait Adt {
         }
     }
 
+    /// Emit the decycle cycle-mode `Parse` for ONE cycle type (feature `recurse-decycle`): an
+    /// `impl <decycle_trait> for X` whose `parse_dyn` body reuses the derive's parse-body skeleton
+    /// (`extract_parse_inner` — same per-variant `dup` backtracking / prefix-dedup / struct
+    /// sequencing), plus the public `impl Parse<A> for X` facade that erases the stream once and
+    /// delegates into `parse_dyn`. A *recursive-head* field (peeled head ∈ the SCC) is lowered by
+    /// `recur` (inline `<Head as decycle_trait>::parse_dyn::<A, _>` dispatch — so the cyclic bound is a
+    /// bare `Head: decycle_trait` decycle ranks, never a `Container<Head>: Parse` side-bound); a leaf
+    /// field parses via the ordinary `Parse<A>` facade. `method_leaf_bounds` is the SCC-wide union of
+    /// S-free leaf types, carried as `T: Parse<A>` on both the (shared) trait method and every impl
+    /// method + facade; `cyclic_heads` are this type's recursive-head types, bounded `H: decycle_trait`
+    /// on the impl. Only ever called for a decycle-able SCC (group-free, S-free leaves, direct/Box
+    /// recursive edges) — the span/group-tying and container shapes stay on the engine.
+    #[cfg(feature = "recurse-decycle")]
+    #[allow(clippy::too_many_arguments)]
+    fn extract_parse_dyn(
+        &self,
+        syan: &Path,
+        ident: &Ident,
+        generics: &Generics,
+        decycle_trait: &Ident,
+        method_leaf_bounds: &[Type],
+        cyclic_heads: &[Type],
+        recur: &dyn Fn(&Type, &TokenStream) -> Option<TokenStream>,
+    ) -> TokenStream {
+        let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
+        let tp_err: Ident = parse_quote!(__SyanMacro_Err);
+        let ty_generics = generics.split_for_impl().1;
+        let mut impl_params = generics.params.clone();
+        strip_param_defaults(&mut impl_params);
+        let v_stream: Ident = parse_quote!(__syan_stream);
+        let err_final: Type = parse_quote!(#syan::error::ParseError);
+        let user_where: Vec<WherePredicate> = generics
+            .where_clause
+            .as_ref()
+            .map(|w| w.predicates.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let inner = self.extract_parse_inner(syan, ident, &err_final, |fields| {
+            let mut ret = quote!();
+            let mut fields: VecDeque<_> = fields.iter().cloned().collect();
+            while let Some((_member, field_ident, field)) = fields.pop_front() {
+                if field.has_default() {
+                    ret.extend(quote!(let #field_ident = ::core::default::Default::default();));
+                    continue;
+                }
+                if let Some(parse) = recur(&field.ty, &quote!(#v_stream)) {
+                    ret.extend(quote!(let #field_ident = #parse;));
+                } else {
+                    let field_ty = &field.ty;
+                    ret.extend(quote!(
+                        let #field_ident = ::core::result::Result::map_err(
+                            <#field_ty as #syan::parse::parse::Parse<#tp_atom>>::parse(&mut #v_stream),
+                            |err| <_ as #syan::error::Error>::into_parse_error(err),
+                        )?;
+                    ));
+                }
+            }
+            ret
+        });
+
+        // The facade's `impl<…>` always carries the method-generic atom, so build a combined param list
+        // (never empty ⇒ no leading-comma when the cycle type is non-generic). The `__ParseDyn` impl
+        // carries only the type's own params, so its `<…>` is omitted entirely when empty.
+        let mut facade_params = impl_params.clone();
+        facade_params.push(parse_quote!(#tp_atom));
+
+        quote! {
+            impl #(if !impl_params.is_empty()) { < #impl_params > } #decycle_trait for #ident #ty_generics
+            #(if !cyclic_heads.is_empty() || !user_where.is_empty()) {
+                where
+                    #(#cyclic_heads: #decycle_trait,)*
+                    #(#user_where,)*
+            }
+            {
+                fn parse_dyn<#tp_atom: #syan::span::Spanned + ::core::clone::Clone, #tp_err>(
+                    mut #v_stream: &mut (dyn #syan::parse::parse_stream::ParseStream<Atom = #tp_atom, Error = #tp_err> + '_),
+                ) -> ::core::result::Result<Self, #syan::error::ParseError>
+                #(if !method_leaf_bounds.is_empty()) {
+                    where #(#method_leaf_bounds: #syan::parse::parse::Parse<#tp_atom>,)*
+                }
+                {
+                    #inner
+                }
+            }
+
+            impl< #facade_params > #syan::parse::parse::Parse<#tp_atom> for #ident #ty_generics
+            where
+                #tp_atom: #syan::span::Spanned + ::core::clone::Clone,
+                #(#method_leaf_bounds: #syan::parse::parse::Parse<#tp_atom>,)*
+                #ident #ty_generics: #decycle_trait,
+                #(#user_where,)*
+            {
+                type Error = #syan::error::ParseError;
+                fn parse(
+                    __syan_s: impl #syan::parse::into_parse_stream::IntoParseStream<Atom = #tp_atom>,
+                ) -> ::core::result::Result<Self, Self::Error> {
+                    let mut __syan_st = __syan_s.into_parse_stream();
+                    <#ident #ty_generics as #decycle_trait>::parse_dyn::<#tp_atom, _>(&mut __syan_st)
+                }
+            }
+        }
+    }
+
     fn extract_unparse(
         &self,
         syan: &Path,

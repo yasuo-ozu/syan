@@ -19,6 +19,12 @@ parametrized = "0.1.7"
 newer-type = "0.1.1"
 proc-macro2 = { version = "1.0", optional = true }
 syan-macro = { path = "../macro", version = "0.1.0" }
+# Phase-1 recurse-via-decycle: the cycle-breaking backend for `#[recurse]` Parse. Pinned to the
+# validated snapshot; re-exported as `syan::__decycle` so #[recurse]-generated `#[decycle]` modules
+# resolve the crate and its runtime `__reentry` registry. Optional + off by default so default builds
+# are byte-identical to the engine path (no dep-graph diagnostic drift); the `#[recurse]` decycle
+# codegen enables it. (Final form — path vs published — is a later decision.)
+decycle = { path = "/home/yasuo/ghq/github.com/yasuo-ozu/decycle-snapshot", optional = true }
 
 [dev-dependencies]
 template-quote = "0.4"
@@ -28,3 +34,6 @@ trybuild = { version = "1.0", features = ["diff"] }
 [features]
 default = ["proc_macro2"]
 proc_macro2 = ["dep:proc-macro2"]
+# Phase-1 recurse-via-decycle Parse backend. Off by default (engine path unchanged); pulls in decycle
+# and enables the `syan::__decycle` re-export that generated `#[decycle]` modules reference.
+recurse-decycle = ["dep:decycle", "syan-macro/recurse-decycle"]

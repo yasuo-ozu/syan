@@ -12,6 +12,8 @@ use template_quote::quote;
 
 mod build;
 mod convert;
+#[cfg(feature = "recurse-decycle")]
+mod decycle;
 mod emit;
 mod graph;
 mod items;
@@ -214,6 +216,41 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
         spanned: delegated_us("Spanned"),
     };
 
+    // Feature `recurse-decycle`: which SCCs host the decycle cycle-mode `Parse` (group-free, S-free
+    // leaves, direct/`Box` recursive edges — the shapes decycle can express). Their `Parse` is removed
+    // from the engine's delegation (`deleg.parse`) and supplied by a `#[decycle]` module instead; being
+    // group-free their `Unparse`/`Spanned` are already direct on the natural type, so they need *no*
+    // engine at all. Feature-off: no SCC qualifies (byte-identical engine path).
+    #[cfg(feature = "recurse-decycle")]
+    let decycle_scc: Vec<bool> = sccs
+        .iter()
+        .enumerate()
+        .map(|(i, scc)| decycle::scc_is_decycleable(scc, &items, &deleg.parse, scc_has_group[i]))
+        .collect();
+    #[cfg(not(feature = "recurse-decycle"))]
+    let decycle_scc: Vec<bool> = vec![false; sccs.len()];
+
+    #[cfg(feature = "recurse-decycle")]
+    let deleg = {
+        let mut d = deleg;
+        for (scc, &dc) in sccs.iter().zip(&decycle_scc) {
+            if dc {
+                for n in scc {
+                    d.parse.remove(n);
+                }
+            }
+        }
+        d
+    };
+
+    // A decycle-hosted SCC needs no engine at all (its `Parse` is decycle's, its `Unparse`/`Spanned`
+    // are direct). Feature-off `decycle_scc` is all-false, so this is a no-op.
+    let scc_needs_engine: Vec<bool> = scc_needs_engine
+        .iter()
+        .zip(&decycle_scc)
+        .map(|(&e, &d)| e && !d)
+        .collect();
+
     // Per SCC: the transform `ctx` + the engine/conversion/delegated-`Parse`/`Unparse`/`Spanned` tail.
     let plans: Vec<(TransformCtx, TokenStream)> = sccs
         .iter()
@@ -286,11 +323,40 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
         .filter_map(|(i, (_, tail))| scc_needs_engine[i].then_some(tail))
         .collect();
 
+    // Feature `recurse-decycle`: the `#[decycle]` module attribute + the per-SCC `__ParseDyn` trait /
+    // impls / `Parse` facades spliced into the module. `recurse_level` = the widest decycle SCC (≥ its
+    // width — level < width panics at the re-entry floor). Feature-off: both empty (byte-identical).
+    #[cfg(feature = "recurse-decycle")]
+    let (decycle_attr, decycle_items): (TokenStream, TokenStream) = {
+        let mut items_out = TokenStream::new();
+        let mut level = 1usize;
+        for (scc, &dc) in sccs.iter().zip(&decycle_scc) {
+            if dc {
+                items_out.extend(decycle::emit_scc(scc, &items, nonce));
+                level = level.max(scc.len().max(1));
+            }
+        }
+        if decycle_scc.iter().any(|&b| b) {
+            (
+                quote!( #[::syan::__decycle::decycle(recurse_level = #level, decycle = ::syan::__decycle)] ),
+                items_out,
+            )
+        } else {
+            (quote!(), quote!())
+        }
+    };
+    #[cfg(not(feature = "recurse-decycle"))]
+    let (decycle_attr, decycle_items): (TokenStream, TokenStream) = (quote!(), quote!());
+
     quote! {
-        #(#mod_attrs)* #mod_vis mod #mod_ident {
+        #(#mod_attrs)*
+        #decycle_attr
+        #mod_vis mod #mod_ident {
             #(#out_items)*
 
             #(#tails)*
+
+            #decycle_items
         }
     }
     .into()

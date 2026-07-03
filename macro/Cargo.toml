@@ -18,6 +18,14 @@ license = "MIT"
 proc-macro = true
 path = "lib.rs"
 
+[features]
+# Phase-1 recurse-via-decycle Parse backend (build-time global on the proc-macro crate — a proc-macro
+# cannot cfg on the consumer's features, so the switch is a macro-crate feature that core's own
+# `recurse-decycle` feature forwards to). Off by default: the `#[recurse]` engine path stays
+# byte-identical. When on, `#[recurse]` emits the decycle-based cycle-mode `Parse` (a `#[decycle]`
+# module + `__ParseDyn` trait) instead of the delegated-engine `Parse`.
+recurse-decycle = []
+
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
