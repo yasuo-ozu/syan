@@ -3,6 +3,49 @@ use newer_type::{implement, traits};
 pub use syan_macro::Spanned;
 
 pub trait Span: Clone + core::fmt::Debug + Default {
+    /// Merge `self` (reached earlier) with `other` (reached later during the same left-to-right
+    /// walk) into the span covering both. Callers fold an arbitrary number of sub-spans this way —
+    /// [`Spanned`]'s tuple/slice/`Option` impls fold a sequence left to right,
+    /// [`ParseStream::validate_spacing`] merges an entry and an exit peek — so `migrate`
+    /// **must be an associative merge**:
+    /// `a.migrate(b).migrate(c) == a.migrate(b.migrate(c))` for any three spans reached in that
+    /// order. Grouping must not change the result.
+    ///
+    /// It should also normally be a genuine union of the covered source range, not "pick one
+    /// argument and discard the other" — a `migrate` that throws away positional information can
+    /// silently collapse a span folded from several sub-spans down to zero width (see the two
+    /// built-in impls below for the concrete difference).
+    ///
+    /// Built-in implementations:
+    /// - [`source::string::Span`](crate::source::string::Span) is a single *position*
+    ///   (`line`/`col`/`loc`), not a range, so its `migrate` implements **pick-the-later**: whichever
+    ///   operand has the greater `loc` wins outright, the other is discarded. That is correct for a
+    ///   positional span type, but copying the same "keep one side" shape onto a *range* span
+    ///   (`start..end`) is a trap — merging two ranges by keeping only the later one discards the
+    ///   earlier `start`, so a span folded from several sub-spans comes out zero-width instead of
+    ///   covering the whole range. This is exactly the failure mode to watch for when writing a new
+    ///   `Span` impl.
+    /// - [`source::proc_macro2::Span`](crate::source::proc_macro2::Span) *is* a `(start, end)`
+    ///   range, and its `migrate` unions: the merged span's start comes from the earlier operand's
+    ///   start, its end from the later operand's end (via `proc_macro2::Span::join`, falling back to
+    ///   the respective endpoint when spans aren't joinable). This is the shape a range-based `Span`
+    ///   should follow.
+    ///
+    /// ```
+    /// use syan::source::string::Span;
+    /// use syan::span::Span as _;
+    ///
+    /// let a = Span { line: 1, col: 1, loc: 0 };
+    /// let b = Span { line: 1, col: 5, loc: 4 };
+    /// let c = Span { line: 2, col: 1, loc: 10 };
+    ///
+    /// // Grouping the folds differently must agree — the associativity every `Span` impl owes its
+    /// // callers. (Compared via `Debug` since `string::Span` doesn't derive `PartialEq`.)
+    /// assert_eq!(
+    ///     format!("{:?}", a.clone().migrate(b.clone()).migrate(c.clone())),
+    ///     format!("{:?}", a.migrate(b.migrate(c))),
+    /// );
+    /// ```
     fn migrate(self, other: Self) -> Self;
 }
 

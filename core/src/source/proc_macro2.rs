@@ -11,6 +11,9 @@ pub mod literal;
 pub struct Span(Option<(proc_macro2::Span, proc_macro2::Span)>);
 
 impl crate::span::Span for Span {
+    // Union, not pick-the-later: `Span` here is a `(start, end)` range, so the merge keeps the
+    // earlier operand's start and the later operand's end — this is the shape `span::Span::migrate`'s
+    // doc recommends for any range-based `Span`.
     fn migrate(self, other: Self) -> Self {
         match (self.0, other.0) {
             (None, other) => Span(other),
