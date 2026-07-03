@@ -9,6 +9,7 @@ use template_quote::quote;
 mod adt;
 mod find;
 mod substruct;
+mod token_leaves;
 // `pub(crate)` so the `#[recurse]` decycle path (feature `recurse-decycle`) can reach `adt::Adt`
 // (`Adt::extract_parse_dyn`) — a re-export, so it is never "unused" regardless of feature.
 pub(crate) use adt::*;
@@ -52,6 +53,10 @@ pub fn unparse(
         }
         _ => abort!(ident, "Bad data"),
     }
+}
+
+pub fn token_leaves(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
+    token_leaves::token_leaves(input, nonce, syan)
 }
 
 pub fn spanned(input: &DeriveInput, trait_path: Path) -> TokenStream {
