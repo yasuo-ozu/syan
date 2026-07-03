@@ -9,7 +9,7 @@ pub mod vtable;
 
 mod tuple;
 
-pub use into_parse_stream::IntoParseStream;
+pub use into_parse_stream::{BufStream, IntoParseStream};
 pub use parse::Parse;
 pub use parse_stream::ParseStream;
 pub use syan_macro::recurse;
