@@ -12,6 +12,10 @@ pub struct Span {
 }
 
 impl crate::span::Span for Span {
+    // Pick-the-later: `Span` here is a single position, not a range, so there is nothing to union —
+    // keeping the operand with the greater `loc` is the whole merge. See `span::Span::migrate`'s doc
+    // for why this exact shape is wrong to copy onto a range-based `Span` (it collapses to zero
+    // width instead of unioning).
     fn migrate(self, other: Self) -> Self {
         if other.loc > self.loc {
             other
