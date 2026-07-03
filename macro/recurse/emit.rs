@@ -162,14 +162,17 @@ pub(crate) fn emit_borrow_terminator_and_reentry(
                     &self,
                     __sink: &mut __E,
                 ) -> ::core::result::Result<(), __E::Error> {
+                    // Keyed on the nonce-stamped borrow terminator (`#term_ref`), not the bare root type
+                    // — the root's `type_name` is byte-identical across two linked versions of one AST
+                    // crate, but the terminator is a fresh type per `#[recurse]` expansion.
                     let __raw = ::syan::parse::vtable::lookup::<
-                        ::syan::parse::vtable::ReKey<#root_id<#(#gen_use),*>, __Atom, __E::Error>,
+                        ::syan::parse::vtable::ReKey<#term_ref<'_, #(#gen_use),*>, __Atom, __E::Error>,
                     >();
                     type __ReUnFn<#(#gen_bf,)* __Atom, __E> = fn(
                         &#root_id<#(#gen_use),*>,
                         &mut (dyn ::syan::parse::unparse::Emitter<__Atom, Error = __E> + '_),
                     ) -> ::core::result::Result<(), __E>;
-                    // SAFETY: the (root, atom, error) key always stores exactly this concrete fn type.
+                    // SAFETY: the (terminator, atom, error) key always stores exactly this concrete fn type.
                     let __f: __ReUnFn<#(#gen_use,)* __Atom, __E::Error> =
                         unsafe { ::core::mem::transmute::<usize, __ReUnFn<#(#gen_use,)* __Atom, __E::Error>>(__raw) };
                     let __dyns: &mut (dyn ::syan::parse::unparse::Emitter<__Atom, Error = __E::Error> + '_) = __sink;
@@ -197,11 +200,12 @@ pub(crate) fn emit_borrow_terminator_and_reentry(
                 {
                     type Span = #sp;
                     fn span(&self) -> Self::Span {
+                        // Keyed on the nonce-stamped borrow terminator — see the `Unparse` impl above.
                         let __raw = ::syan::parse::vtable::lookup::<
-                            ::syan::parse::vtable::ReKey<#root_id<#(#gen_use),*>, ::syan::parse::vtable::SpanReentry, #sp>,
+                            ::syan::parse::vtable::ReKey<#term_ref<'_, #(#gen_use),*>, ::syan::parse::vtable::SpanReentry, #sp>,
                         >();
                         type __ReSpFn<#(#gen_bf,)* __Sp> = fn(&#root_id<#(#gen_use),*>) -> __Sp;
-                        // SAFETY: the (root, SpanReentry, span) key always stores exactly this fn type.
+                        // SAFETY: the (terminator, SpanReentry, span) key always stores exactly this fn type.
                         let __f: __ReSpFn<#(#gen_use,)* #sp> =
                             unsafe { ::core::mem::transmute::<usize, __ReSpFn<#(#gen_use,)* #sp>>(__raw) };
                         __f(self.0)
@@ -254,11 +258,14 @@ pub(crate) fn emit_delegated_unparse(
     let registrations: Vec<TokenStream> = roots
         .iter()
         .map(|r| {
-            let RootReentry { root_id, name, .. } = r;
+            let RootReentry { name, .. } = r;
+            // Keyed on the nonce-stamped borrow terminator (matches the lookup in
+            // `emit_borrow_terminator_and_reentry`), not the bare root type — see `core::parse::vtable`.
+            let term_ref = term_ref_name(name, nonce);
             let re_un = reentry_unparse_name(name, nonce);
             quote! {
                 ::syan::parse::vtable::register::<
-                    ::syan::parse::vtable::ReKey<#root_id #root_targs, __Atom, __E::Error>,
+                    ::syan::parse::vtable::ReKey<#term_ref<'_, #(#root_use),*>, __Atom, __E::Error>,
                 >(#re_un::<#(#root_use,)* __Atom, __E::Error> as usize);
             }
         })
@@ -322,11 +329,13 @@ pub(crate) fn emit_delegated_spanned(
     let registrations: Vec<TokenStream> = roots
         .iter()
         .map(|r| {
-            let RootReentry { root_id, name, .. } = r;
+            let RootReentry { name, .. } = r;
+            // Keyed on the nonce-stamped borrow terminator — see `emit_delegated_unparse` above.
+            let term_ref = term_ref_name(name, nonce);
             let re_sp = reentry_span_name(name, nonce);
             quote! {
                 ::syan::parse::vtable::register::<
-                    ::syan::parse::vtable::ReKey<#root_id #root_targs, ::syan::parse::vtable::SpanReentry, #sp>,
+                    ::syan::parse::vtable::ReKey<#term_ref<'_, #(#root_use),*>, ::syan::parse::vtable::SpanReentry, #sp>,
                 >(#re_sp::<#(#root_use),*> as usize);
             }
         })

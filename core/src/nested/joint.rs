@@ -14,19 +14,6 @@ impl<Tuple: Default> Default for Joint<Tuple> {
     }
 }
 
-mod _joint_impl {
-    #[macro_export]
-    #[doc(hidden)]
-    macro_rules! _joint_impl {
-        ($($t:ty),* $(,)?) => {
-            $xrate::nested::Joint<($($t,)*)>
-        };
-    }
-    pub use _joint_impl as Joint;
-}
-#[doc(inline)]
-pub use _joint_impl::*;
-
 impl<Tuple> core::ops::Deref for Joint<Tuple> {
     type Target = Tuple;
     fn deref(&self) -> &Self::Target {

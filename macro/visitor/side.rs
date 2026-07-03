@@ -52,6 +52,26 @@ pub(crate) fn gen_side(
     let p_vw = fresh_ident("__VW", &reserved);
     let p_ow = fresh_ident("__OW", &reserved);
 
+    /// One container-edit view (`#[seq]` or `#[opt]`) generated for a visited type. Replaces the
+    /// paired `has_seq`/`has_opt` bools + `seq_method`/`opt_method` + `seq_doc`/`opt_doc` fields on `S`
+    /// with a single `Vec` so `trait_def`/`blanket_ref_impl` iterate once instead of two parallel
+    /// `#(if ..)` blocks.
+    struct ViewSpec {
+        /// `visit_<name>_seq` / `visit_<name>_opt`.
+        method: Ident,
+        /// Doc string for the trait method (was `S::seq_doc`/`S::opt_doc`).
+        doc: String,
+        /// `::syan::visit::SeqView` / `::syan::visit::OptView` — bound root, sans `<Ty>`.
+        view_trait: TokenStream,
+        /// The per-method generic naming the view type: `p_vw` for seq, `p_ow` for opt (the *same*
+        /// idents `gen_side` already mints once via `fresh_ident` — not reminted per type/kind).
+        view_param: Ident,
+        /// Trait-method default body. NOT further folded: the seq body is a `for .. in
+        /// view_iter_mut(v)` loop, the opt body an `if let Some(..) = get_mut(v)` — genuinely
+        /// different shapes, only the *emission site* (trait_def/blanket_ref_impl) is shared.
+        default_body: TokenStream,
+    }
+
     struct S {
         ty: TokenStream,
         /// The visited type's bare name (e.g. `Expr`), for generated doc comments.
@@ -59,16 +79,9 @@ pub(crate) fn gen_side(
         /// Generated doc for the trait method (`fn visit_<name>`) and the free fn (`visit_<name>`).
         tdoc: String,
         fdoc: String,
-        /// Docs for the `visit_mut`-side container-edit methods (`visit_<name>_seq`/`_opt`).
-        seq_doc: String,
-        opt_doc: String,
         method: Ident,
-        /// Container-edit methods (`visit_<name>_seq`/`_opt`); emitted only when `has_seq`/`has_opt`.
-        seq_method: Ident,
-        opt_method: Ident,
-        /// Whether some AST holds this type Vec-like / Option-like (drives emission of `seq`/`opt`).
-        has_seq: bool,
-        has_opt: bool,
+        /// Container-edit views (`visit_<name>_seq`/`_opt`); emitted only where the type is held that way.
+        views: Vec<ViewSpec>,
         /// This type's non-shared params (heterogeneous mode), as the trait method's generics —
         /// lifetimes-first; empty in union mode.
         method_params: Vec<GenericParam>,
@@ -121,8 +134,9 @@ pub(crate) fn gen_side(
                 preds.extend(method_where.iter().cloned());
                 where_clause(&preds)
             };
+            let method = method_ident_m(&ident, mutable);
             let name = ident.to_string();
-            let mname = method_ident_m(&ident, mutable).to_string();
+            let mname = method.to_string();
             let tdoc = format!(
                 "Visit an `{name}` node; the default recurses via [`{mname}`]. Override to act, calling \
                  `{mname}(self, i)` to keep descending."
@@ -132,29 +146,49 @@ pub(crate) fn gen_side(
                  ([`{visit_tr}::{mname}`]'s default delegates here).",
                 mut_sfx = mt(mutable),
             );
-            let seq_doc = format!(
-                "Structurally edit the `{name}` nodes in a `Vec`-like parent slot via a \
-                 [`SeqView`](::syan::visit::SeqView) (`push`/`insert`/`remove`/`retain_mut`/`view_iter_mut`); \
-                 default descends each via `{mname}`."
-            );
-            let opt_doc = format!(
-                "Structurally edit the `{name}` node in an `Option`-like parent slot via an \
-                 [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`); default descends it via `{mname}`."
-            );
-            let has_seq = mutable && seq_used.contains(&name);
-            let has_opt = mutable && opt_used.contains(&name);
+            let mut views = Vec::new();
+            if mutable && seq_used.contains(&name) {
+                let seq_doc = format!(
+                    "Structurally edit the `{name}` nodes in a `Vec`-like parent slot via a \
+                     [`SeqView`](::syan::visit::SeqView) (`push`/`insert`/`remove`/`retain_mut`/`view_iter_mut`); \
+                     default descends each via `{mname}`."
+                );
+                views.push(ViewSpec {
+                    method: Ident::new(&format!("visit_{}_seq", to_snake(&ident)), Span::call_site()),
+                    doc: seq_doc,
+                    view_trait: quote!(::syan::visit::SeqView),
+                    view_param: p_vw.clone(),
+                    default_body: quote! {
+                        for __syan_e in ::syan::visit::SeqView::view_iter_mut(v) {
+                            self.#method(__syan_e);
+                        }
+                    },
+                });
+            }
+            if mutable && opt_used.contains(&name) {
+                let opt_doc = format!(
+                    "Structurally edit the `{name}` node in an `Option`-like parent slot via an \
+                     [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`); default descends it via `{mname}`."
+                );
+                views.push(ViewSpec {
+                    method: Ident::new(&format!("visit_{}_opt", to_snake(&ident)), Span::call_site()),
+                    doc: opt_doc,
+                    view_trait: quote!(::syan::visit::OptView),
+                    view_param: p_ow.clone(),
+                    default_body: quote! {
+                        if let ::core::option::Option::Some(__syan_e) = ::syan::visit::OptView::get_mut(v) {
+                            self.#method(__syan_e);
+                        }
+                    },
+                });
+            }
             S {
                 ty,
                 name,
                 tdoc,
                 fdoc,
-                seq_doc,
-                opt_doc,
-                method: method_ident_m(&ident, mutable),
-                seq_method: Ident::new(&format!("visit_{}_seq", to_snake(&ident)), Span::call_site()),
-                opt_method: Ident::new(&format!("visit_{}_opt", to_snake(&ident)), Span::call_site()),
-                has_seq,
-                has_opt,
+                method,
+                views,
                 method_params,
                 free_params,
                 trait_where,
@@ -175,7 +209,6 @@ pub(crate) fn gen_side(
     // Chain impls) so a visited type like `enum Expr<S> where S: Bound { .. }` stays well-formed.
     let uw = where_clause(union_where);
 
-    // Generated API docs.
     let visited_list = sides.iter().map(|s| format!("`{}`", s.name)).collect::<Vec<_>>().join(", ");
     let entry = visit_method.to_string();
     let trait_doc = format!(
@@ -240,8 +273,6 @@ pub(crate) fn gen_side(
         })
         .collect();
 
-    // Assembled from named token-blocks below (all share this fn's locals / `sides`) for readability;
-    // the final `quote!` splices them verbatim, so the emitted tokens are identical to one big block.
     let trait_def = quote! {
         #[doc = #trait_doc]
         pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #base_g_use } #uw {
@@ -254,28 +285,13 @@ pub(crate) fn gen_side(
                 {
                     #{&s.method}(self, i)
                 }
-                // Opt-in container-edit hooks (mut side; emitted only where the type is held that way).
-                // Default: descend each held node via `visit_*_mut`. Override to restructure the parent.
-                #(if s.has_seq) {
-                    #[doc = #{&s.seq_doc}]
-                    fn #{&s.seq_method}< #(for mp in &s.method_params) { #mp, } #p_vw: ::syan::visit::SeqView< #{&s.ty} > >(
+                #(for spec in &s.views) {
+                    #[doc = #{&spec.doc}]
+                    fn #{&spec.method}< #(for mp in &s.method_params) { #mp, } #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(
                         &mut self,
-                        v: &mut #p_vw,
+                        v: &mut #{&spec.view_param},
                     ) #{&s.trait_where} {
-                        for __syan_e in ::syan::visit::SeqView::view_iter_mut(v) {
-                            self.#{&s.method}(__syan_e);
-                        }
-                    }
-                }
-                #(if s.has_opt) {
-                    #[doc = #{&s.opt_doc}]
-                    fn #{&s.opt_method}< #(for mp in &s.method_params) { #mp, } #p_ow: ::syan::visit::OptView< #{&s.ty} > >(
-                        &mut self,
-                        v: &mut #p_ow,
-                    ) #{&s.trait_where} {
-                        if let ::core::option::Option::Some(__syan_e) = ::syan::visit::OptView::get_mut(v) {
-                            self.#{&s.method}(__syan_e);
-                        }
+                        #{&spec.default_body}
                     }
                 }
             }
@@ -289,14 +305,9 @@ pub(crate) fn gen_side(
                     fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
                         <#p_v as #visit_tr #g_use>::#{&s.method}(self, i)
                     }
-                    #(if s.has_seq) {
-                        fn #{&s.seq_method}< #p_vw: ::syan::visit::SeqView< #{&s.ty} > >(&mut self, v: &mut #p_vw) {
-                            <#p_v as #visit_tr #g_use>::#{&s.seq_method}(self, v)
-                        }
-                    }
-                    #(if s.has_opt) {
-                        fn #{&s.opt_method}< #p_ow: ::syan::visit::OptView< #{&s.ty} > >(&mut self, v: &mut #p_ow) {
-                            <#p_v as #visit_tr #g_use>::#{&s.opt_method}(self, v)
+                    #(for spec in &s.views) {
+                        fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
+                            <#p_v as #visit_tr #g_use>::#{&spec.method}(self, v)
                         }
                     }
                 }
@@ -314,10 +325,6 @@ pub(crate) fn gen_side(
                 this: &mut #p_v,
                 i: #amp #{&s.ty},
             ) #{&s.free_where} {
-                // Bring the view methods into scope (unnamed) so a `View`-level descent resolves
-                // `view_iter[_mut]()` to `SeqView`/`OptView` by the compiler — no container name is named.
-                #[allow(unused_imports)]
-                use ::syan::visit::{OptView as _, SeqView as _};
                 #{&s.body}
             }
             // The `visit_*_seq`/`_opt` container-edit views have no free fn: their default descent is

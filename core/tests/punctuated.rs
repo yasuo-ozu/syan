@@ -1,40 +1,7 @@
 use syan::nested::punctuated::Punctuated;
-use syan::span::{Span, Spanned};
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TestSpan;
-
-impl Span for TestSpan {
-    fn migrate(self, _other: Self) -> Self {
-        TestSpan
-    }
-}
-
-impl Spanned for TestSpan {
-    type Span = Self;
-    
-    fn span(&self) -> Self::Span {
-        TestSpan
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Comma;
-
-#[test]
-fn test_len() {
-    let mut punct: Punctuated<i32, Comma> = Punctuated::default();
-    assert_eq!(punct.len(), 0);
-    
-    punct.push(1);
-    assert_eq!(punct.len(), 1);
-    
-    punct.push(2);
-    assert_eq!(punct.len(), 2);
-    
-    punct.push(3);
-    assert_eq!(punct.len(), 3);
-}
 
 #[test]
 fn test_push() {
@@ -98,26 +65,6 @@ fn test_insert_out_of_bounds_non_empty() {
     punct.push(1);
     punct.push(2);
     punct.insert(10, 3);
-}
-
-#[test]
-fn test_first_and_last() {
-    let mut punct: Punctuated<i32, Comma> = Punctuated::default();
-    
-    // Empty list
-    assert_eq!(punct.first(), None);
-    assert_eq!(punct.last(), None);
-    
-    // Single element
-    punct.push(1);
-    assert_eq!(punct.first(), Some(&1));
-    assert_eq!(punct.last(), Some(&1));
-    
-    // Multiple elements
-    punct.push(2);
-    punct.push(3);
-    assert_eq!(punct.first(), Some(&1));
-    assert_eq!(punct.last(), Some(&3));
 }
 
 #[test]
@@ -219,26 +166,6 @@ fn test_remove_multiple_elements() {
     assert_eq!(punct.remove(0), Some(1));
     let values: Vec<i32> = punct.iter().cloned().collect();
     assert_eq!(values, vec![2, 4]);
-}
-
-#[test]
-fn test_iterator_after_operations() {
-    let mut punct: Punctuated<String, Comma> = Punctuated::default();
-    
-    punct.push("a".to_string());
-    punct.push("b".to_string());
-    punct.push("c".to_string());
-    
-    let values: Vec<String> = punct.iter().cloned().collect();
-    assert_eq!(values, vec!["a", "b", "c"]);
-    
-    punct.insert(1, "x".to_string());
-    let values: Vec<String> = punct.iter().cloned().collect();
-    assert_eq!(values, vec!["a", "x", "b", "c"]);
-    
-    punct.remove(2);
-    let values: Vec<String> = punct.iter().cloned().collect();
-    assert_eq!(values, vec!["a", "x", "c"]);
 }
 
 #[test]

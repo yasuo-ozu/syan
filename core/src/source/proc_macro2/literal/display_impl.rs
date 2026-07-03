@@ -1,6 +1,5 @@
 use super::*;
 
-// Display implementations
 impl std::fmt::Display for Bool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", if self.value { "true" } else { "false" })
@@ -9,7 +8,6 @@ impl std::fmt::Display for Bool {
 
 impl std::fmt::Display for ByteChar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Handle common escape sequences
         match self.value {
             b'\n' => write!(f, "b'\\n'"),
             b'\t' => write!(f, "b'\\t'"),
@@ -25,7 +23,6 @@ impl std::fmt::Display for ByteChar {
 
 impl std::fmt::Display for Char {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Handle common escape sequences
         match self.value {
             '\n' => write!(f, "'\\n'"),
             '\t' => write!(f, "'\\t'"),
@@ -40,19 +37,13 @@ impl std::fmt::Display for Char {
 
 impl std::fmt::Display for Integer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.suffix {
-            Some(suffix) => write!(f, "{}{}", self.value, suffix),
-            None => write!(f, "{}", self.value),
-        }
+        write!(f, "{}{}", self.value, self.suffix.as_deref().unwrap_or(""))
     }
 }
 
 impl std::fmt::Display for Float {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.suffix {
-            Some(suffix) => write!(f, "{}{}", self.value, suffix),
-            None => write!(f, "{}", self.value),
-        }
+        write!(f, "{}{}", self.value, self.suffix.as_deref().unwrap_or(""))
     }
 }
 
@@ -66,10 +57,19 @@ impl std::fmt::Display for Str {
     }
 }
 
+fn raw(
+    f: &mut std::fmt::Formatter<'_>,
+    prefix: &str,
+    value: impl std::fmt::Display,
+    hash_count: usize,
+) -> std::fmt::Result {
+    let hashes = "#".repeat(hash_count);
+    write!(f, "{}{}\"{}\"{}", prefix, hashes, value, hashes)
+}
+
 impl std::fmt::Display for StrRaw {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let hashes = "#".repeat(self.hash_count);
-        write!(f, "r{}\"{}\"{}", hashes, self.value, hashes)
+        raw(f, "r", &self.value, self.hash_count)
     }
 }
 
@@ -93,9 +93,12 @@ impl std::fmt::Display for ByteStr {
 
 impl std::fmt::Display for ByteStrRaw {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let hashes = "#".repeat(self.hash_count);
-        let value_str = String::from_utf8_lossy(&self.value);
-        write!(f, "br{}\"{}\"{}", hashes, value_str, hashes)
+        raw(
+            f,
+            "br",
+            String::from_utf8_lossy(&self.value),
+            self.hash_count,
+        )
     }
 }
 
@@ -111,7 +114,6 @@ impl std::fmt::Display for CStr {
 
 impl std::fmt::Display for CStrRaw {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let hashes = "#".repeat(self.hash_count);
-        write!(f, "cr{}\"{}\"{}", hashes, self.value, hashes)
+        raw(f, "cr", &self.value, self.hash_count)
     }
 }

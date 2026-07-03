@@ -1,47 +1,47 @@
 error: #[recurse]: the cycle (Expr) has no heap indirection on a by-value reference cycle, so its natural recursive type would be infinite-size. Wrap a cyclic field in `Box<…>` (or `Vec`/`Option<Box<…>>`) to break the value cycle.
-  --> tests/ui/problem1_trait_impl.rs:11:5
-   |
-11 | mod m {
-   |     ^
-
-warning: unused import: `syan::source::proc_macro2::literal::Integer`
  --> tests/ui/problem1_trait_impl.rs:8:5
   |
-8 | use syan::source::proc_macro2::literal::Integer;
+8 | mod m {
+  |     ^
+
+warning: unused import: `syan::source::proc_macro2::literal::Integer`
+ --> tests/ui/problem1_trait_impl.rs:5:5
+  |
+5 | use syan::source::proc_macro2::literal::Integer;
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |
   = note: `#[warn(unused_imports)]` on by default
 
 error: type parameter `S` is only used recursively
-  --> tests/ui/problem1_trait_impl.rs:18:21
+  --> tests/ui/problem1_trait_impl.rs:15:21
    |
-16 |     pub enum Expr<S> {
+13 |     pub enum Expr<S> {
    |                   - type parameter must be used non-recursively in the definition
-17 |         Lit(Integer),
-18 |         Nested(Expr<S>),
+14 |         Lit(Integer),
+15 |         Nested(Expr<S>),
    |                     ^
    |
    = help: consider removing `S`, referring to it in a field, or using a marker such as `PhantomData`
    = note: all type parameters must be used in a non-recursive way in order to constrain their variance
 
 error[E0072]: recursive type `Expr` has infinite size
-  --> tests/ui/problem1_trait_impl.rs:16:5
+  --> tests/ui/problem1_trait_impl.rs:13:5
    |
-16 |     pub enum Expr<S> {
+13 |     pub enum Expr<S> {
    |     ^^^^^^^^^^^^^^^^
-17 |         Lit(Integer),
-18 |         Nested(Expr<S>),
+14 |         Lit(Integer),
+15 |         Nested(Expr<S>),
    |                ------- recursive without indirection
    |
 help: insert some indirection (e.g., a `Box`, `Rc`, or `&`) to break the cycle
    |
-18 |         Nested(Box<Expr<S>>),
+15 |         Nested(Box<Expr<S>>),
    |                ++++       +
 
 error[E0277]: `?` couldn't convert the error to `<Expr<S> as Parse<__SyanMacro_Atom>>::Error`
-  --> tests/ui/problem1_trait_impl.rs:15:18
+  --> tests/ui/problem1_trait_impl.rs:12:18
    |
-15 |     #[derive(Parse, Unparse)]
+12 |     #[derive(Parse, Unparse)]
    |              ----^
    |              |   |
    |              |   the trait `From<ParseError>` is not implemented for `<Expr<S> as Parse<__SyanMacro_Atom>>::Error`
@@ -51,9 +51,9 @@ error[E0277]: `?` couldn't convert the error to `<Expr<S> as Parse<__SyanMacro_A
    = note: this error originates in the derive macro `Parse` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0308]: mismatched types
-  --> tests/ui/problem1_trait_impl.rs:15:14
+  --> tests/ui/problem1_trait_impl.rs:12:14
    |
-15 |     #[derive(Parse, Unparse)]
+12 |     #[derive(Parse, Unparse)]
    |              ^^^^^
    |              |
    |              expected `Vec<ParseError>`, found `Vec<<Expr<S> as Parse<...>>::Error>`
@@ -72,9 +72,9 @@ note: associated function defined here
    = note: this error originates in the derive macro `Parse` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0308]: mismatched types
-  --> tests/ui/problem1_trait_impl.rs:15:14
+  --> tests/ui/problem1_trait_impl.rs:12:14
    |
-15 |     #[derive(Parse, Unparse)]
+12 |     #[derive(Parse, Unparse)]
    |              ^^^^^
    |              |
    |              expected associated type, found `ParseError`
@@ -85,9 +85,9 @@ error[E0308]: mismatched types
    = help: consider constraining the associated type `<Expr<S> as Parse<__SyanMacro_Atom>>::Error` to `ParseError` or calling a method that returns `<Expr<S> as Parse<__SyanMacro_Atom>>::Error`
    = note: for more information, visit https://doc.rust-lang.org/book/ch19-03-advanced-traits.html
 help: the type constructed contains `ParseError` due to the type of the argument passed
-  --> tests/ui/problem1_trait_impl.rs:15:14
+  --> tests/ui/problem1_trait_impl.rs:12:14
    |
-15 |     #[derive(Parse, Unparse)]
+12 |     #[derive(Parse, Unparse)]
    |              ^^^^^ this argument influences the type of `Err`
 note: tuple variant defined here
   --> $RUST/core/src/result.rs

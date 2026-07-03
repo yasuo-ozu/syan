@@ -140,7 +140,7 @@ pub(crate) fn item_generics(item: &Item) -> Option<&Generics> {
 
 /// A `#[seq]` / `#[opt]` field marker: the owning collection is edited through a `SeqView` (`Seq`) or an
 /// `OptView` (`Opt`). Used only for the edit-view path; ordinary descent does not distinguish the two.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 pub(crate) enum Container {
     Seq,
     Opt,

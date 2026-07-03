@@ -203,7 +203,6 @@ fn test_item_function() {
 
 #[test]
 fn test_expression_literal() {
-    // failed
     let tokens = quote! { 123 };
     let expr: Expr<_> = Parse::parse(tokens).unwrap();
     match expr {
@@ -214,7 +213,6 @@ fn test_expression_literal() {
 
 #[test]
 fn test_expression_block() {
-    // inf loop
     let tokens = quote! {
         {
             let 1 = 2;

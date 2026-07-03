@@ -21,6 +21,7 @@ mod containers {
             // A tuple mixing a followed element with a leaf.
             Tagged((Box<Expr<S>>, PhantomData<S>)),
             Many(Vec<Box<Expr<S>>>),
+            ManyOpt(Vec<Option<Expr<S>>>),
             OptIn(Option<Box<Expr<S>>>),
             Lit(PhantomData<S>),
         }
@@ -73,6 +74,16 @@ mod containers {
         let e: ast::Expr<()> =
             ast::Expr::Tagged((Box::new(ast::Expr::Lit(PhantomData)), PhantomData));
         assert_eq!(count(&e), 2, "leaf tuple element is skipped, cycle ref visited");
+    }
+
+    #[test]
+    fn vec_of_option_descends() {
+        let e: ast::Expr<()> = ast::Expr::ManyOpt(vec![
+            Some(ast::Expr::Lit(PhantomData)),
+            None,
+            Some(ast::Expr::Lit(PhantomData)),
+        ]);
+        assert_eq!(count(&e), 3, "outer Expr + 2 back-edges; None skipped");
     }
 }
 

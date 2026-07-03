@@ -11,6 +11,7 @@ mod nested {
     #[subast()]
     pub struct Leaf<S> {
         pub _p: PhantomData<S>,
+        pub value: i64,
     }
 
     #[derive(Ast)]
@@ -25,16 +26,16 @@ mod nested {
         syan::visit::visitor!(crate::nested::Leaf, crate::nested::Holder);
     }
 
-    fn leaf<S>() -> Leaf<S> {
-        Leaf { _p: PhantomData }
+    fn leaf<S>(value: i64) -> Leaf<S> {
+        Leaf { _p: PhantomData, value }
     }
 
     #[test]
     fn nested_containers_are_traversed() {
         let h: Holder<()> = Holder {
-            vo: vec![Some(leaf()), None, Some(leaf())],
-            ov: Some(vec![leaf(), leaf()]),
-            vv: vec![vec![leaf()], vec![leaf(), leaf()]],
+            vo: vec![Some(leaf(1)), None, Some(leaf(2))],
+            ov: Some(vec![leaf(3), leaf(4)]),
+            vv: vec![vec![leaf(5)], vec![leaf(6), leaf(7)]],
         };
         let mut n = 0usize;
         h.visit(|_: &Leaf<()>| n += 1);
@@ -43,48 +44,18 @@ mod nested {
 
     #[test]
     fn nested_containers_visit_mut() {
-        let mut h: Holder<()> = Holder { vo: vec![Some(leaf())], ov: None, vv: vec![] };
+        let mut h: Holder<()> =
+            Holder { vo: vec![Some(leaf(1))], ov: None, vv: vec![vec![leaf(2)]] };
         let mut n = 0usize;
-        h.visit_mut(|_: &mut Leaf<()>| n += 1);
-        assert_eq!(n, 1);
-    }
-
-    #[syan::parse::recurse]
-    mod rec {
-        use core::marker::PhantomData;
-        use syan::visit::Ast;
-
-        #[derive(Ast)]
-        #[subast()]
-        pub enum Expr<S> {
-            Many(Vec<Option<Expr<S>>>),
-            Lit(PhantomData<S>),
-        }
-    }
-
-    mod rv {
-        syan::visit::visitor!(crate::nested::rec::Expr);
-    }
-
-    #[derive(Default)]
-    struct Counter(usize);
-    impl<S> rv::Visit<S> for Counter {
-        fn visit_expr(&mut self, i: &rec::Expr<S>) {
-            self.0 += 1;
-            rv::visit_expr(self, i);
-        }
-    }
-
-    #[test]
-    fn recurse_nested_container_is_traversed() {
-        let e: rec::Expr<()> = rec::Expr::Many(vec![
-            Some(rec::Expr::Lit(PhantomData)),
-            None,
-            Some(rec::Expr::Lit(PhantomData)),
-        ]);
-        let mut c = Counter::default();
-        rv::Visit::visit_expr(&mut c, &e);
-        assert_eq!(c.0, 3, "outer Expr + 2 inner (Vec<Option<Expr>> back-edges)");
+        h.visit_mut(|l: &mut Leaf<()>| {
+            n += 1;
+            l.value = -l.value;
+        });
+        assert_eq!(n, 2, "Vec<Option<_>> and Vec<Vec<_>> both descended on the mut side");
+        // The mutation must persist through the owning container, not just be observed transiently by
+        // the visitor closure.
+        assert_eq!(h.vo[0].as_ref().map(|l| l.value), Some(-1), "Vec<Option<Leaf>> write persists");
+        assert_eq!(h.vv[0][0].value, -2, "Vec<Vec<Leaf>> write persists");
     }
 }
 

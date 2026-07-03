@@ -7,12 +7,9 @@ pub(crate) fn followed_intermediates(
     def: &Item,
     subast: &[SubEntry],
     method_set: &HashSet<String>,
-    self_ident: Option<&str>,
+    self_ident: Option<&Ident>,
 ) -> Vec<Path> {
-    let mut user_types: HashSet<String> = subast.iter().map(|e| e.key.to_string()).collect();
-    if let Some(s) = self_ident {
-        user_types.insert(s.to_string());
-    }
+    let user_types = self_and_subast_keys(self_ident, subast);
     let mut out = Vec::new();
     for_each_field_type(def, &mut |ty| {
         discover_followed(ty, subast, method_set, self_ident, &user_types, &mut out)
@@ -26,7 +23,7 @@ fn discover_followed(
     ty: &Type,
     subast: &[SubEntry],
     method_set: &HashSet<String>,
-    self_ident: Option<&str>,
+    self_ident: Option<&Ident>,
     user_types: &HashSet<String>,
     out: &mut Vec<Path>,
 ) {
@@ -40,8 +37,7 @@ fn discover_followed(
                 }
             }
             Head::Path { head, .. } => {
-                let hs = head.to_string();
-                if Some(hs.as_str()) == self_ident {
+                if Some(head) == self_ident {
                     return; // self -> already in `done`
                 }
                 if let Some(e) = subast.iter().find(|e| &e.key == head) {

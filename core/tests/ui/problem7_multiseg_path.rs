@@ -1,8 +1,6 @@
-// Problem 7: multi-segment paths are not recognized as cycle references.
-// `collect_refs` checks only `path.segments.first()` for the outer type name,
-// so `inner::Expr<S>` is not identified as a reference to `Expr`.
-// The cycle is not detected; neither type is transformed; Rust rejects the
-// self-referential `Expr` as an infinitely-sized type.
+// Problem 7: multi-segment paths are not recognized as cycle references — `collect_refs` checks only
+// `path.segments.first()`, so `inner::Expr<S>` is not identified as a reference to `Expr`; the cycle is
+// not detected, so Rust rejects the self-referential `Expr` as an infinitely-sized type.
 
 use syan::parse::recurse;
 

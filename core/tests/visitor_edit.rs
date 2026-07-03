@@ -105,7 +105,6 @@ mod views {
         syan::visit::visitor!(super::Block, super::Stmt);
     }
 
-    // Drop 0s, replace 2 -> 102, and append a 7 sentinel; fill/replace the Option tail.
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
@@ -115,12 +114,13 @@ mod views {
                 }
             }
             v.retain_mut(|s| s.0 != 0);
-            v.push(Stmt(7, PhantomData)); // insert into the (now-shorter) collection
+            v.push(Stmt(7, PhantomData));
         }
         fn visit_stmt_opt<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
             match v.get().map(|s| s.0) {
                 Some(0) => v.clear(),
-                None => v.set(Stmt(5, PhantomData)), // fill an empty slot
+                Some(2) => v.set(Stmt(102, PhantomData)),
+                None => v.set(Stmt(5, PhantomData)),
                 _ => {}
             }
         }
@@ -150,6 +150,37 @@ mod views {
         assert_eq!(b.stmts.iter().map(|s| s.0).collect::<Vec<_>>(), vec![7], "push into empty Vec");
         assert!(b.tail.is_none(), "a zero tail was cleared");
     }
+
+    #[test]
+    fn opt_replace_on_two() {
+        let mut b: Block<()> = Block { stmts: vec![], tail: Some(Stmt(2, PhantomData)) };
+        b.visit_mut(&mut Editor);
+        assert_eq!(b.stmts.iter().map(|s| s.0).collect::<Vec<_>>(), vec![7], "7 pushed into the empty Vec");
+        assert_eq!(b.tail.as_ref().map(|s| s.0), Some(102), "the Option tail (a 2) was replaced");
+    }
+
+    // ── back-compat: overriding the *parent* and editing its `&mut Vec`/`&mut Option` directly still works ──
+    struct ParentEditor;
+    impl<S> v::VisitMut<S> for ParentEditor {
+        fn visit_block_mut(&mut self, b: &mut Block<S>) {
+            b.stmts.retain(|s| s.0 != 0);
+            b.stmts.push(Stmt(99, PhantomData));
+            b.tail = None;
+            v::visit_block_mut(self, b);
+        }
+    }
+
+    #[test]
+    fn parent_override_still_works() {
+        let mut block: Block<()> = Block {
+            stmts: vec![Stmt(0, PhantomData), Stmt(1, PhantomData), Stmt(2, PhantomData)],
+            tail: Some(Stmt(7, PhantomData)),
+        };
+        block.visit_mut(&mut ParentEditor);
+        let vals: Vec<i64> = block.stmts.iter().map(|s| s.0).collect();
+        assert_eq!(vals, vec![1, 2, 99]);
+        assert!(block.tail.is_none());
+    }
 }
 
 // ── edits through a `Vec<Expr>` inside a `#[recurse]` cycle (the `Vec` gives the indirection) ─────
@@ -175,7 +206,6 @@ mod rec {
         syan::visit::visitor!(crate::rec::ast::Expr);
     }
 
-    // Remove Lit(0), replace Lit(2) -> Lit(99); recurse into a nested Many via the per-node visit.
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_expr_seq<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
@@ -239,14 +269,13 @@ mod rec_opt {
         syan::visit::visitor!(crate::rec_opt::ast::Expr);
     }
 
-    // Plain descent through the boxed-Option cycle: bump every `Lit` in place via `visit_expr_mut`.
     struct Bump;
     impl<S> v::VisitMut<S> for Bump {
         fn visit_expr_mut(&mut self, e: &mut ast::Expr<S>) {
             if let ast::Expr::Lit(n, _) = e {
                 *n += 1;
             }
-            v::visit_expr_mut(self, e); // default descent into the Opt child
+            v::visit_expr_mut(self, e);
         }
     }
 
@@ -371,7 +400,6 @@ mod rec_cross {
         syan::visit::visitor!(crate::rec_cross::ast::Expr, crate::rec_cross::ast::Stmt);
     }
 
-    // Drop `Nop(0)` statements anywhere in the cycle; descend through the rest.
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_stmt_seq<V: SeqView<ast::Stmt<S>>>(&mut self, v: &mut V) {
@@ -400,68 +428,15 @@ mod rec_cross {
     #[test]
     fn cross_edge_seq_edit_in_multitype_cycle() {
         let mut e: ast::Expr<()> = ast::Expr::Block(vec![
-            ast::Stmt::Nop(0, PhantomData), // removed
-            ast::Stmt::Nop(1, PhantomData), // kept
+            ast::Stmt::Nop(0, PhantomData),
+            ast::Stmt::Nop(1, PhantomData),
             ast::Stmt::Expr(Box::new(ast::Expr::Block(vec![
-                ast::Stmt::Nop(0, PhantomData), // removed (nested, via the back-edge)
-                ast::Stmt::Nop(5, PhantomData), // kept
+                ast::Stmt::Nop(0, PhantomData),
+                ast::Stmt::Nop(5, PhantomData),
             ]))),
         ]);
         e.visit_mut(&mut Editor);
         assert_eq!(nops(&e), vec![1, 5], "Nop(0) dropped at both cycle depths");
-    }
-}
-
-// ── nested containers (`Vec<Option<_>>`, `Vec<Vec<_>>`) descend per level (not edit-view targets) ──
-mod nested {
-    use super::*;
-    use syan::visit::Ast;
-
-    #[derive(Debug, Ast)]
-    pub struct Item<S>(pub i64, pub PhantomData<S>);
-
-    #[derive(Debug, Ast)]
-    #[subast(crate::nested::Item)]
-    pub struct Holder<S> {
-        // Nested containers descend per level (`Vec<Option<_>>` → `Vec` then `Option`; `Vec<Vec<_>>` →
-        // `Vec` then `Vec`) — every `Item` is reached by `visit_item_mut`. They are NOT edit-view targets
-        // (a `#[seq]`/`#[opt]` view needs a bare single container), so this covers *descent* only.
-        pub grid: Vec<Option<Item<S>>>,
-        pub rows: Vec<Vec<Item<S>>>,
-    }
-
-    pub mod v {
-        syan::visit::visitor!(super::Holder, super::Item);
-    }
-
-    // In-place edit reaching every nested item: negate each value.
-    struct Neg;
-    impl<S> v::VisitMut<S> for Neg {
-        fn visit_item_mut(&mut self, i: &mut Item<S>) {
-            i.0 = -i.0;
-        }
-    }
-
-    #[test]
-    fn nested_containers_descend() {
-        let mut h: Holder<()> = Holder {
-            grid: vec![Some(Item(1, PhantomData)), None, Some(Item(5, PhantomData))],
-            rows: vec![
-                vec![Item(2, PhantomData), Item(3, PhantomData)],
-                vec![Item(4, PhantomData)],
-            ],
-        };
-        h.visit_mut(&mut Neg);
-        assert_eq!(
-            h.grid.iter().map(|o| o.as_ref().map(|i| i.0)).collect::<Vec<_>>(),
-            vec![Some(-1), None, Some(-5)],
-            "Vec<Option<Item>> descended per level — every present item negated"
-        );
-        assert_eq!(
-            h.rows.iter().map(|r| r.iter().map(|i| i.0).collect::<Vec<_>>()).collect::<Vec<_>>(),
-            vec![vec![-2, -3], vec![-4]],
-            "Vec<Vec<Item>> descended per level — every item negated"
-        );
     }
 }
 

@@ -3,7 +3,7 @@ use super::*;
 /// The deduped union of every target's generic params (first declaration wins), followed by the
 /// base's params (for inheritance — the new trait must declare them to name `base::Visit<base params>`
 /// as a supertrait, so the new union must ⊇ the base's). The caller normalizes order with
-/// `sort_lifetimes_first`; the recurse path additionally filters this to the cycle roots' params.
+/// `sort_lifetimes_first`.
 pub(crate) fn param_union(targets: &[&DoneType], base_generics: &[GenericParam]) -> Vec<GenericParam> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();

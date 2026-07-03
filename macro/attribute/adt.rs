@@ -1,5 +1,46 @@
 use super::*;
 
+/// The `__SyanMacro_Atom`-generic impl header shared by `extract_parse`/`extract_unparse`: the atom
+/// type param, the fully-applied trait path, the impl's generic params (with the atom appended), and
+/// the type generics to instantiate `ident` with.
+fn atom_impl_header<'g>(
+    generics: &'g Generics,
+    trait_path: &Path,
+) -> (Ident, Path, Punctuated<GenericParam, Token![,]>, syn::TypeGenerics<'g>) {
+    let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
+    let trait_fullpath: Path = parse_quote!(#trait_path<#tp_atom>);
+    let mut generic_params = generics.params.clone();
+    strip_param_defaults(&mut generic_params);
+    generic_params.push(parse_quote!(#tp_atom));
+    let ty_generics = generics.split_for_impl().1;
+    (tp_atom, trait_fullpath, generic_params, ty_generics)
+}
+
+/// Emits a `#[group]` substruct's own item definition (stripped of derive-helper attrs) plus its
+/// derived impl, for every substruct collected while walking a struct/enum's fields.
+fn substruct_items(
+    substructs: &[ItemStruct],
+    mut derive: impl FnMut(&DataStruct, &Generics, &Ident) -> TokenStream,
+) -> TokenStream {
+    let substructs_for_emit: Vec<ItemStruct> =
+        substructs.iter().map(strip_derive_helper_attrs).collect();
+    let substruct_impls: Vec<TokenStream> = substructs
+        .iter()
+        .map(|substruct| {
+            let data_struct = DataStruct {
+                struct_token: Default::default(),
+                fields: substruct.fields.clone(),
+                semi_token: substruct.semi_token,
+            };
+            derive(&data_struct, &substruct.generics, &substruct.ident)
+        })
+        .collect();
+    quote! {
+        #(for substruct in &substructs_for_emit) { #substruct }
+        #(for substruct_impl in &substruct_impls) { #substruct_impl }
+    }
+}
+
 pub(crate) trait Adt {
     fn all_fields(&self) -> Vec<&Field>;
 
@@ -26,13 +67,8 @@ pub(crate) trait Adt {
         nonce: u64,
         trait_path: &Path,
     ) -> TokenStream {
-        let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
-        let trait_path_owned: Path = trait_path.clone();
-        let trait_fullpath: Path = parse_quote!(#trait_path_owned<#tp_atom>);
-        let mut generic_params = generics.params.clone();
-        strip_param_defaults(&mut generic_params);
-        generic_params.push(parse_quote!(#tp_atom));
-        let ty_generics = generics.split_for_impl().1;
+        let (tp_atom, trait_fullpath, generic_params, ty_generics) =
+            atom_impl_header(generics, trait_path);
         proc_macro_error::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
                 type Error = ::core::convert::Infallible;
@@ -57,7 +93,6 @@ pub(crate) trait Adt {
 
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
             while let Some((member, field_ident, field)) = fields.pop_front() {
-                // Skip fields with #[default] attribute - they use Default::default()
                 if field.has_default() {
                     ret.extend(quote!(
                         let #field_ident = ::core::default::Default::default();
@@ -130,35 +165,12 @@ pub(crate) trait Adt {
             }
             ret
         });
-        let substruct_impls: Vec<TokenStream> = substructs
-            .iter()
-            .map(|substruct| {
-                let data_struct = DataStruct {
-                    struct_token: Default::default(),
-                    fields: substruct.fields.clone(),
-                    semi_token: substruct.semi_token,
-                };
-                data_struct.extract_parse(
-                    syan,
-                    &substruct.generics,
-                    &substruct.ident,
-                    nonce,
-                    trait_path,
-                )
-            })
-            .collect();
-        let substructs_for_emit: Vec<ItemStruct> =
-            substructs.iter().map(strip_derive_helper_attrs).collect();
-        // Thread the user's where-clause predicates into the generated impl (merged with the
-        // synthesized bounds) so a Parse-derived type may carry a where-clause.
+        let substruct_defs = substruct_items(&substructs, |data_struct, generics, ident| {
+            data_struct.extract_parse(syan, generics, ident, nonce, trait_path)
+        });
         append_user_where_predicates(&mut where_predicates, generics);
         quote! {
-            #(for substruct in &substructs_for_emit) {
-                #substruct
-            }
-            #(for substruct_impl in &substruct_impls) {
-                #substruct_impl
-            }
+            #substruct_defs
             #[automatically_derived]
             impl< #generic_params > #trait_fullpath for #ident #ty_generics
             #(if !where_predicates.is_empty()) { where #where_predicates}
@@ -183,13 +195,8 @@ pub(crate) trait Adt {
         nonce: u64,
         trait_path: &Path,
     ) -> TokenStream {
-        let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
-        let trait_path_owned: Path = trait_path.clone();
-        let trait_fullpath: Path = parse_quote!(#trait_path_owned<#tp_atom>);
-        let mut generic_params = generics.params.clone();
-        strip_param_defaults(&mut generic_params);
-        generic_params.push(parse_quote!(#tp_atom));
-        let ty_generics = generics.split_for_impl().1;
+        let (tp_atom, trait_fullpath, generic_params, ty_generics) =
+            atom_impl_header(generics, trait_path);
         proc_macro_error::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
                 fn unparse<__Syan_Emitter: #syan::parse::unparse::Emitter<#tp_atom>>(&self, _: &mut __Syan_Emitter) -> ::core::result::Result<(), __Syan_Emitter::Error> {
@@ -208,7 +215,6 @@ pub(crate) trait Adt {
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
 
             while let Some((member, field_ident, field)) = fields.pop_front() {
-                // Skip fields with #[default] attribute - they are not unparsed
                 if field.has_default() {
                     continue;
                 }
@@ -265,40 +271,15 @@ pub(crate) trait Adt {
             }
         });
 
-        let substruct_impls: Vec<TokenStream> = substructs
-            .iter()
-            .map(|substruct| {
-                let data_struct = DataStruct {
-                    struct_token: Default::default(),
-                    fields: substruct.fields.clone(),
-                    semi_token: substruct.semi_token,
-                };
-                data_struct.extract_unparse(
-                    syan,
-                    &substruct.generics,
-                    &substruct.ident,
-                    &[],
-                    nonce,
-                    &trait_path_owned,
-                )
-            })
-            .collect();
-        let substructs_for_emit: Vec<ItemStruct> =
-            substructs.iter().map(strip_derive_helper_attrs).collect();
-        // `#[predicate_unparse(Ty, …)]` → `Ty: Unparse<__SyanMacro_Atom>` (the cross-cycle leaf union).
+        let substruct_defs = substruct_items(&substructs, |data_struct, generics, ident| {
+            data_struct.extract_unparse(syan, generics, ident, &[], nonce, trait_path)
+        });
         for ty in predicate_tys(attrs, "predicate_unparse") {
             where_predicates.push(parse_quote!(#ty: #trait_fullpath));
         }
-        // Thread the user's where-clause predicates into the generated impl (merged with the
-        // synthesized bounds); otherwise the Self type fails WF with "required by a bound in <T>".
         append_user_where_predicates(&mut where_predicates, generics);
         quote! {
-            #(for substruct in &substructs_for_emit) {
-                #substruct
-            }
-            #(for substruct_impl in &substruct_impls) {
-                #substruct_impl
-            }
+            #substruct_defs
             #[automatically_derived]
             impl< #generic_params > #trait_fullpath for #ident #ty_generics
             #(if !where_predicates.is_empty()) { where #where_predicates}
@@ -326,7 +307,6 @@ pub(crate) trait Adt {
 
         let tp_span: Ident = parse_quote!(__Syan_Span);
 
-        // Add `T: Spanned<Span = __Syan_Span>` for each unbounded type parameter.
         add_spanned_param_predicates(&mut where_predicates, generics, syan, &tp_span);
         generic_params.push(parse_quote!(#tp_span: #syan::span::Span));
         proc_macro_error::append_dummy(quote! {
@@ -348,7 +328,6 @@ pub(crate) trait Adt {
 
         let span_impl = self.extract_inner(ident, &v_self, |fields| {
             for (_, _, field) in fields {
-                // Skip fields with #[default] attribute - they don't contribute to span
                 if field.has_default() {
                     continue;
                 }
@@ -371,7 +350,6 @@ pub(crate) trait Adt {
             let ret = quote! {
                 let __syan_span = <#tp_span as ::core::default::Default>::default();
                 #(for (_, field, Field{attrs, ..}) in fields){
-                    // Skip fields with #[default] attribute
                     #(if !attrs.has_default()) {
                         let __syan_span = #syan::span::Span::migrate(
                             __syan_span,
@@ -384,12 +362,9 @@ pub(crate) trait Adt {
             ret
         });
 
-        // `#[predicate_spanned(Ty, …)]` → `Ty: Spanned<Span = __Syan_Span>` (the cross-cycle leaf union).
         for ty in predicate_tys(attrs, "predicate_spanned") {
             where_predicates.push(parse_quote!(#ty: #syan::span::Spanned<Span = #tp_span>));
         }
-        // Thread the user's where-clause predicates into the generated impl (merged with the
-        // synthesized bounds); otherwise the Self type fails WF with "required by a bound in <T>".
         append_user_where_predicates(&mut where_predicates, generics);
         quote! {
             #[automatically_derived]
@@ -432,6 +407,18 @@ fn map_fields_to_idents<'a>(
 type MappedField<'a> = (Member, Ident, &'a Field);
 /// A variant paired with its mapped fields.
 type VariantFields<'a> = (&'a Variant, Vec<MappedField<'a>>);
+
+/// `(a, b,)` for tuple fields, `{a, b,}` for named fields, or nothing for a unit shape.
+fn fields_pattern(shape: &Fields, fields: &[MappedField]) -> TokenStream {
+    quote! {
+        #(if let Fields::Unnamed(_) = shape) {
+            (#(for (_, id, _) in fields) {#id,})
+        }
+        #(if let Fields::Named(_) = shape) {
+            {#(for (_, id, _) in fields) {#id,}}
+        }
+    }
+}
 
 /// The number of leading fields that EVERY variant shares with identical parse behaviour — same member
 /// (so the binding ident aligns for construction), type, and attributes. Drives the enum `Parse`
@@ -476,13 +463,7 @@ impl Adt for DataStruct {
             #inner
 
             ::core::result::Result::Ok(
-                #ident
-                #(if let Fields::Unnamed(_) = &self.fields) {
-                    (#(for (_, field_ident, _) in &fields) {#field_ident,})
-                }
-                #(if let Fields::Named(_) = &self.fields) {
-                    {#(for (_, field_ident, _) in &fields) {#field_ident,}}
-                }
+                #ident #{fields_pattern(&self.fields, &fields)}
             )
         }
     }
@@ -496,13 +477,7 @@ impl Adt for DataStruct {
         let fields = map_fields_to_idents(&self.fields);
         let inner = f(&fields[..]);
         quote! {
-            let #ident
-            #(if let Fields::Unnamed(_) = &self.fields) {
-                (#(for (_, field_ident, _) in &fields) {#field_ident,})
-            }
-            #(if let Fields::Named(_) = &self.fields) {
-                {#(for (_, field_ident, _) in &fields) {#field_ident,}}
-            } = #v_self;
+            let #ident #{fields_pattern(&self.fields, &fields)} = #v_self;
             #inner
         }
     }
@@ -526,16 +501,9 @@ impl Adt for DataEnum {
             .map(|v| (v, map_fields_to_idents(&v.fields)))
             .collect();
 
-        // Construct `Ident::Variant { fields… }` / `Ident::Variant(fields…)` from the field bindings.
         let construct_of = |variant: &Variant, fields: &[MappedField]| -> TokenStream {
             quote! {
-                #ident :: #{ &variant.ident }
-                #(if let Fields::Unnamed(_) = &variant.fields) {
-                    (#(for (_, id, _) in fields) {#id,})
-                }
-                #(if let Fields::Named(_) = &variant.fields) {
-                    {#(for (_, id, _) in fields) {#id,}}
-                }
+                #ident :: #{ &variant.ident } #{fields_pattern(&variant.fields, fields)}
             }
         };
 
@@ -655,13 +623,7 @@ impl Adt for DataEnum {
         quote! {
             match #v_self {
                 #(for (variant, fields, inner) in variants) {
-                    #ident :: #{ &variant.ident }
-                    #(if let Fields::Unnamed(_) = &variant.fields) {
-                        (#(for (_, field_ident, _) in &fields) {#field_ident,})
-                    }
-                    #(if let Fields::Named(_) = &variant.fields) {
-                        {#(for (_, field_ident, _) in &fields) {#field_ident,}}
-                    } => {
+                    #ident :: #{ &variant.ident } #{fields_pattern(&variant.fields, &fields)} => {
                         #inner
                     }
                 }

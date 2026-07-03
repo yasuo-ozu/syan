@@ -19,13 +19,19 @@
 //! - **Key.** Keyed on `core::any::type_name::<K>()`'s *string content* — robustly per-type and
 //!   independent of pointer interning (cf. ICF/`-Zshare-generics`, which could fold equal-bodied fns). `K`
 //!   is the [`ReKey`] marker carrying `(terminator, atom, stream-error)`, so the stored `usize`'s concrete
-//!   fn type is unambiguous at every lookup.
+//!   fn type is unambiguous at every lookup. The terminator component is **nonce-stamped per
+//!   `#[recurse]` expansion** (a fresh, uniquely-named type per compilation — `macro/recurse/names.rs`)
+//!   rather than the bare natural root type, so keys are unique per compilation: even two independently
+//!   linked versions of one AST crate, whose root type's `type_name` would otherwise be byte-identical,
+//!   cannot collide.
 //! - **Value.** The fn pointer is stored as `usize` and **copied out** on lookup, so a `HashMap` rehash
 //!   never dangles a borrow into the map (no entry-stability hazard). The caller transmutes the `usize`
 //!   back to the one concrete fn type that key denotes (an audited `unsafe` in the generated terminator).
 //! - **Locking.** Each lookup briefly locks a global `Mutex`. This is a compile-time parser (the depth is
 //!   the *syntactic* nesting of the input), so the per-re-entry lock is negligible; a lock-free cached
-//!   cell is a possible future optimization (`docs/recurse-unbounded-plan.md` §8.4).
+//!   cell is a possible future optimization (`docs/recurse-unbounded-plan.md` §8.4). The lock is
+//!   poison-tolerant (`unwrap_or_else(|e| e.into_inner())`): the map holds only `Copy` `usize` values, so
+//!   there is no invariant a poisoned lock would need to protect.
 
 use crate::parse::unparse::Emitter;
 use core::marker::PhantomData;
@@ -68,7 +74,7 @@ static REG: OnceLock<Mutex<HashMap<&'static str, usize>>> = OnceLock::new();
 /// a harmless overwrite.
 pub fn register<K: ?Sized>(f: usize) {
     let map = REG.get_or_init(|| Mutex::new(HashMap::new()));
-    map.lock().unwrap().insert(type_name::<K>(), f);
+    map.lock().unwrap_or_else(|e| e.into_inner()).insert(type_name::<K>(), f);
 }
 
 /// Look up the re-entry parser registered for key `K`, as a `usize` to transmute back to its concrete fn
@@ -76,7 +82,10 @@ pub fn register<K: ?Sized>(f: usize) {
 /// internal invariant the generated code always upholds.
 pub fn lookup<K: ?Sized>() -> usize {
     let map = REG.get_or_init(|| Mutex::new(HashMap::new()));
-    *map.lock().unwrap().get(type_name::<K>()).expect(
+    // Copy the `usize` out and drop the guard before `.expect()` — panicking while the guard is still
+    // held would poison the global `REG` and cascade a `PoisonError` into unrelated, later parses.
+    let found = map.lock().unwrap_or_else(|e| e.into_inner()).get(type_name::<K>()).copied();
+    found.expect(
         "#[recurse] internal: re-entry parser not registered before the terminator was reached",
     )
 }

@@ -57,13 +57,13 @@ pub trait Repeater<const INDEX: usize> {
 // descent passes `&mut self.field` with no wrapper. Two dedicated interfaces: [`SeqView`] (Vec-like,
 // unbounded) and [`OptView`] (Option-like, ≤1). See `docs/visitor-edit-plan.md`.
 //
-// The element type is a **type parameter** (`SeqView<T>`, not an associated type) so the `Box`-wrapped
-// element forms (`Vec<Box<T>>`, `Option<Box<T>>`) can implement the *unboxed* view (`SeqView<T>`) without
-// colliding with the plain `SeqView<Box<T>>` impl — a `Vec<Box<U>>` implements both `SeqView<Box<U>>` and
-// `SeqView<U>` (distinct trait parameters), and the generated `visit_t_seq` selects `SeqView<T>` by `T`.
+// The element type is a **type parameter** (`SeqView<T>`, not an associated type); the traits are
+// bare-element only — a wrapper like `Box<T>`/`Attempt<T>` implements `OptView<T>` directly (single-slot,
+// always-full) and the visitor descends *through* wrapped shapes by recursing per layer, not via any
+// wrapped-element `SeqView`/`OptView` impl.
 
-/// A mutable, **sequence-like** view of an AST collection field (`Vec`/`VecDeque`/`Punctuated`, and their
-/// `Box`-wrapped element forms — box-transparent, so the element type is `T`, not `Box<T>`). A generated
+/// A mutable, **sequence-like** view of an AST collection field (`Vec`/`VecDeque`/`Punctuated`),
+/// bare-element — the element type is `T` itself, never a wrapped `Box<T>`. A generated
 /// `visit_<t>_seq(&mut self, &mut impl SeqView<T>)` receives one; override it to edit the collection in
 /// place. The required core (`len`/`get`/`get_mut`/`insert`/`remove`) is object-safe; the ergonomic
 /// helpers are `Self: Sized` provided methods.
@@ -180,8 +180,9 @@ impl<'a, T> Iterator for SeqIterMut<'a, T> {
 
 impl<'a, T> ExactSizeIterator for SeqIterMut<'a, T> {}
 
-/// A mutable, **Option-like** view (≤1 element) of an AST `Option` field (and `Option<Box<T>>`,
-/// box-transparent). A generated `visit_<t>_opt(&mut self, &mut impl OptView<T>)` receives one.
+/// A mutable, **Option-like** view (≤1 element) of an AST `Option` field, bare-element (nested
+/// `Box`/`Attempt` layers descend separately). A generated
+/// `visit_<t>_opt(&mut self, &mut impl OptView<T>)` receives one.
 pub trait OptView<T> {
     fn is_some(&self) -> bool;
     fn get(&self) -> Option<&T>;

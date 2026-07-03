@@ -270,6 +270,68 @@ mod group_ful {
         }
         let _s: () = deep.span();
     }
+
+    // `Parse` is ALWAYS engine-delegated (group-ful or not), so its runtime re-entry must correctly
+    // rewind past MANY re-entry boundaries when a LATE failure forces backtracking, not just recurse
+    // forward. Two outer variants share the identical deep `( … )` spine (parsed through the group-ful
+    // engine, well past `DEFAULT_RECURSION_DEPTH`) and differ only in a trailing token; the input is
+    // crafted so the first variant's spine parses in full and only THEN fails on the trailing token,
+    // forcing the outer `dup()` to rewind the entire re-entered parse before the second variant retries.
+    #[recurse]
+    mod df {
+        use syan::nested::group::GroupParen;
+        use syan::parse::{Parse, Unparse};
+        use syan::source::proc_macro2::literal::Integer;
+
+        #[derive(Parse, Unparse)]
+        pub enum Expr<S> {
+            Paren {
+                paren: GroupParen<(), S>,
+                #[group(self.paren)]
+                inner: Box<Expr<S>>,
+            },
+            Lit(Integer),
+        }
+    }
+
+    #[type_macro_derive_tricks::macro_derive(Parse, Unparse)]
+    enum Top<S> {
+        // Tried first (declaration order) — matches the whole spine, then fails on the trailing token.
+        Bang {
+            e: df::Expr<S>,
+            bang: syan::symbol::Token![S => !],
+        },
+        // Field names differ from `Bang` (no shared-prefix dedup), so this re-parses the spine from
+        // scratch on retry — exactly the rewound backtrack under test.
+        Question {
+            e2: df::Expr<S>,
+            quest: syan::symbol::Token![S => ?],
+        },
+    }
+
+    #[test]
+    fn deep_backtrack_rewinds_past_reentry_boundaries() {
+        // Far past `DEFAULT_RECURSION_DEPTH` (4).
+        const N: usize = 120;
+        let mut spine = quote! { 1 };
+        for _ in 0..N {
+            spine = quote! { ( #spine ) };
+        }
+        let full = quote! { #spine ? };
+        let top: Top<_> = Parse::parse(full.clone())
+            .expect("Bang fails on the trailing `?`; Question must succeed after the rewind");
+        assert!(
+            matches!(top, Top::Question { .. }),
+            "Bang's spine must fully parse then fail on the trailing token, backtracking to Question"
+        );
+        let mut out = Vec::<proc_macro2::TokenTree>::new();
+        top.unparse(&mut (&mut out)).unwrap();
+        assert_eq!(
+            out.into_iter().collect::<proc_macro2::TokenStream>().to_string(),
+            full.to_string(),
+            "round-trips after the deep backtrack",
+        );
+    }
 }
 
 // `#[ignore_bounds]` drops the synthesized `field_ty: Trait` where-bound so a mutually-recursive pair's

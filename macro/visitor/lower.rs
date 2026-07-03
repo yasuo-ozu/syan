@@ -88,6 +88,25 @@ fn marker_word(kind: &Container) -> &'static str {
     }
 }
 
+/// Abort: a `#[seq]`/`#[opt]`-marked field's element isn't a visited type. `single` distinguishes
+/// the two call sites: `false` when `peel` found no followed head at all (a leaf field, e.g.
+/// `Vec<String>`); `true` when a head *was* found but it resolves to an unlisted intermediate or a
+/// tuple, not a `visitor!(..)`-listed type. Only the `false` (first) wording is UI-pinned
+/// (`core/tests/ui/visitor_edit_marker_unvisited.stderr`) — the `true` wording is unpinned
+/// anywhere in the trybuild suite, so this merge is free to standardize on the pinned text plus one
+/// inserted word.
+fn abort_marker_not_visited(ty: &Type, kind: &Container, single: bool) -> ! {
+    let marker = marker_word(kind);
+    let extra = if single { "single " } else { "" };
+    abort!(
+        ty,
+        "a `#[{}]` field's element type is not a visited type — mark only a field whose element is \
+         a {}container of a type listed in `visitor!(..)` (or reached via `#[subast]`)",
+        marker,
+        extra
+    );
+}
+
 /// Lowers a visited type's `visit_*` body: a field followed via a *visited/inherited* head becomes a
 /// `this.visit_<head>(..)` method call; a field followed via an *unlisted intermediate* is drilled
 /// through inline (its def destructured, recursing into its `#[subast]` fields); any other field is
@@ -142,7 +161,6 @@ impl<'a> Lower<'a> {
             let m = method_ident_m(head, self.mutable);
             return quote!( this.#m(#access); );
         }
-        // Unlisted intermediate -> inline drill.
         let key = norm_path(drill_path);
         if stack.iter().any(|s| s == &key) {
             abort!(
@@ -287,14 +305,7 @@ impl<'a> Lower<'a> {
             // field would route nowhere and silently no-op — abort so the mistake is caught here.
             None => {
                 if let Some(kind) = view {
-                    let marker = marker_word(&kind);
-                    abort!(
-                        ty,
-                        "a `#[{}]` field's element type is not a visited type — mark only a field whose \
-                         element is a container of a type listed in `visitor!(..)` (or reached via \
-                         `#[subast]`)",
-                        marker
-                    );
+                    abort_marker_not_visited(ty, &kind, false);
                 }
                 return None;
             }
@@ -304,9 +315,7 @@ impl<'a> Lower<'a> {
         if self.mutable && p.shared_ref {
             return None;
         }
-        // Dispatch at the innermost (container-peeled) accessor, then wrap the container chain
-        // (handles nested containers like `Vec<Option<T>>`, and now `Vec<(A, B)>`). An empty body
-        // (a leaf head, or a finite drill reaching nothing) ⇒ the whole field is a leaf.
+        // An empty body (a leaf head, or a finite drill reaching nothing) ⇒ the whole field is a leaf.
         let acc = innermost_acc(&p.conts, binding);
         // The effective head type (real ident + path) when this is a followed `Head::Path`: self
         // (implicit) or a `#[subast]` entry (an aliased `Real as Aliased` dispatches to `visit_real`).
@@ -331,13 +340,7 @@ impl<'a> Lower<'a> {
                 let marker = marker_word(&kind);
                 let head = match &resolved {
                     Some((h, _)) if self.method_set.contains(&h.to_string()) => h,
-                    _ => abort!(
-                        ty,
-                        "a `#[{}]` field's element type is not a visited type — mark only a field whose \
-                         element is a single container of a type listed in `visitor!(..)` (or reached via \
-                         `#[subast]`)",
-                        marker
-                    ),
+                    _ => abort_marker_not_visited(ty, &kind, true),
                 };
                 match p.conts.as_slice() {
                     [LayerKind::View] => {}
@@ -425,7 +428,7 @@ impl<'a> Lower<'a> {
             }
         }
         if stmts.is_empty() {
-            return quote!(); // tuple of only leaves -> leaf (empty body)
+            return quote!();
         }
         let amp = self.amp();
         quote!( { let ( #(#pats,)* ) = #amp * #acc; #(#stmts)* } )

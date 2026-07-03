@@ -40,8 +40,7 @@ impl SubastEntry {
 
 /// Render a `#[subast(..)]` allowlist as the `@subast { path as key, … }` token list carried in a
 /// metadata macro: each entry's path is `$crate`-rooted (so it resolves downstream, exactly as
-/// `derive_ast`) and paired with its matchkey. Shared by `#[derive(Ast)]` and `#[recurse]`'s
-/// per-cycle-type metadata macros.
+/// `derive_ast`) and paired with its matchkey.
 pub(crate) fn subast_tokens(entries: &[SubastEntry]) -> Vec<TokenStream> {
     entries
         .iter()
@@ -303,8 +302,6 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    // `#[subast(..)]` allowlist of this type's sub-AST children (+ their resolvable paths). Carried
-    // verbatim in the metadata macro; the visitor matches field heads against it.
     let subast = parse_subast(&input.attrs);
     let has_subast_attr = input.attrs.iter().any(|a| a.path().is_ident("subast"));
     let field_heads = field_head_idents(input);
@@ -332,11 +329,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
             .generics
             .params
             .iter()
-            .map(|p| match p {
-                GenericParam::Type(t) => t.ident.to_string(),
-                GenericParam::Const(c) => c.ident.to_string(),
-                GenericParam::Lifetime(l) => l.lifetime.ident.to_string(),
-            })
+            .map(crate::util::param_name)
             .collect();
         let mut suspects: Vec<String> = Vec::new();
         for_each_field(&input.data, |ty| {

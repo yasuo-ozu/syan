@@ -5,8 +5,7 @@
 //! stating the correct expectation, so the day a fix lands the assertion flips and points here.
 //! Compile-error / panic findings live in `macro_audit_test.rs` (+ `ui/audit_*.rs`).
 //!
-//! (The visitor!() tuple-skip finding that lived here is now FIXED — see `visitor_tuple_field.rs`.
-//! The two symbol! encoding bugs below remain open.)
+//! The two symbol! encoding bugs below remain open.
 #![allow(dead_code)]
 
 // ── BUG: symbol! re-encodes non-decimal / underscored int literals to canonical decimal ──────────

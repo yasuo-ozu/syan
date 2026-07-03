@@ -52,21 +52,15 @@ pub(crate) trait FindAttribute {
 }
 
 fn is_derive_helper_attr(attr: &Attribute) -> bool {
-    attr.path().is_ident("group")
-        || attr.path().is_ident("syan")
-        || attr.path().is_ident("joint")
-        || attr.path().is_ident("alone")
-        || attr.path().is_ident("ignore_bounds")
-        || attr.path().is_ident("default")
-        || attr.path().is_ident("fundamental_tys")
-        || attr.path().is_ident("predicate")
-        || attr.path().is_ident("predicate_parse")
-        || attr.path().is_ident("predicate_unparse")
+    [
+        "group", "syan", "joint", "alone", "ignore_bounds", "default", "predicate_unparse",
         // `#[derive(Ast)]`'s view markers: strip them off a `#[group]`-cloned substruct (which carries no
         // `Ast` derive to register them), else `#[group] #[seq] Punctuated<..>` fails with "cannot find
         // attribute `seq`".
-        || attr.path().is_ident("seq")
-        || attr.path().is_ident("opt")
+        "seq", "opt",
+    ]
+    .iter()
+    .any(|n| attr.path().is_ident(n))
 }
 
 pub(crate) fn strip_derive_helper_attrs(substruct: &ItemStruct) -> ItemStruct {

@@ -80,7 +80,6 @@ fn has_concrete_fill(targets: &[&DoneType], shared: &HashSet<String>) -> bool {
                                 }
                             }
                         }
-                        // Recurse into every type argument (nested containers / cross-edges).
                         for arg in &ab.args {
                             if let GenericArgument::Type(at) = arg {
                                 if ty_fills(at, params_of, shared) {
@@ -152,12 +151,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     let visited: HashSet<String> = path_of.keys().cloned().collect();
     // Heads that recurse via a `visit_*` method (visited here + inherited from a base); every other
     // followed head is an unlisted intermediate that gets drilled through inline.
-    let method_set: HashSet<String> = visited
-        .iter()
-        .cloned()
-        .chain(st.inherited.iter().map(|i| i.to_string()))
-        .collect();
-    // Fetched types keyed by full path, for resolving an intermediate's def while drilling.
+    let method_set = st.method_set();
     let done_by_path: HashMap<String, &DoneType> =
         st.done.iter().map(|d| (norm_path(&d.path), d)).collect();
 
@@ -305,20 +299,15 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     // which `visit_<t>_seq` / `visit_<t>_opt` to emit. Shared by both `Lower`s (only the mut one records).
     let seq_used: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     let opt_used: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    let lower = Lower {
+    let mk_lower = |mutable: bool| Lower {
         method_set: &method_set,
         done_by_path: &done_by_path,
-        mutable: false,
+        mutable,
         seq_used: &seq_used,
         opt_used: &opt_used,
     };
-    let lower_mut = Lower {
-        method_set: &method_set,
-        done_by_path: &done_by_path,
-        mutable: true,
-        seq_used: &seq_used,
-        opt_used: &opt_used,
-    };
+    let lower = mk_lower(false);
+    let lower_mut = mk_lower(true);
 
     let vtypes: Vec<VType> = targets
         .iter()
@@ -339,8 +328,6 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             } else {
                 Vec::new()
             };
-            // The path the visited type is named by (its `visitor!(..)` path), also the scrutinee
-            // path for its own body; falls back to the fetched path if somehow unmapped.
             let scrut_path: &Path = path_of.get(&ident.to_string()).copied().unwrap_or(&d.path);
             let path_tokens = quote!(#scrut_path);
             let mut stack = Vec::new();
@@ -379,7 +366,6 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .filter(|p| seen_pred.insert(quote!(#p).to_string()))
         .collect();
 
-    // The mut walk has finished recording container-edit usage; take the populated sets.
     let seq_used = seq_used.into_inner();
     let opt_used = opt_used.into_inner();
 
@@ -397,14 +383,12 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         );
     }
 
-    let shared = gen_side(
-        false, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
-        &union_where, struct_only, &seq_used, &opt_used,
-    );
-    let mutable = gen_side(
-        true, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
-        &union_where, struct_only, &seq_used, &opt_used,
-    );
+    let [shared, mutable] = [false, true].map(|m| {
+        gen_side(
+            m, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
+            &union_where, struct_only, &seq_used, &opt_used,
+        )
+    });
 
     // Every visitor module exports its full visited-type set (idents), its generic-param union
     // (`@bg`), and its full ancestor chain (`@an`) so another visitor can inherit it (transitively).
@@ -421,6 +405,13 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             #[allow(unused_imports)]
             use #{&a.path}::{Visit as _, VisitMut as _};
         }
+
+        // Bring the view methods into scope (unnamed) so a `View`-level descent in any free fn
+        // resolves `view_iter[_mut]()` to `SeqView`/`OptView` by the compiler — no container name is
+        // named. One copy for the whole module (every generated free fn shares this scope) instead of
+        // one per visited type.
+        #[allow(unused_imports)]
+        use ::syan::visit::{OptView as _, SeqView as _};
 
         #shared
         #mutable

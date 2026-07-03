@@ -4,7 +4,6 @@ use syn::parse::{Parse, ParseStream};
 use syn::*;
 use template_quote::quote;
 
-#[derive(Debug)]
 pub struct SymbolToken {
     slot: String,
     span: Span,
@@ -128,21 +127,11 @@ fn create_joint_type(char_types: Vec<TokenStream>, syan_path: &Ident) -> TokenSt
     if char_types.len() <= MAX_TUPLE_SIZE {
         quote! { #syan_path::nested::Joint<(#(#char_types,)*)> }
     } else {
-        let chunks: Vec<Vec<TokenStream>> = char_types
+        let joint_types: Vec<TokenStream> = char_types
             .chunks(MAX_TUPLE_SIZE)
-            .map(|chunk| chunk.to_vec())
+            .map(|chunk| create_joint_type(chunk.to_vec(), syan_path))
             .collect();
-
-        let joint_types: Vec<TokenStream> = chunks
-            .into_iter()
-            .map(|chunk| create_joint_type(chunk, syan_path))
-            .collect();
-
-        if joint_types.len() == 1 {
-            joint_types[0].clone()
-        } else {
-            quote! { #syan_path::nested::Joint<(#(#joint_types),*)> }
-        }
+        quote! { #syan_path::nested::Joint<(#(#joint_types),*)> }
     }
 }
 

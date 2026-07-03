@@ -12,8 +12,7 @@ pub struct Group<T, O, C> {
 
 // `Unparse` to a `TokenTree`: a delimited group is a *single* `TokenTree::Group` (the delimiters aren't
 // standalone tokens), so `Group` is hand-written per real delimiter rather than `#[derive(Unparse)]`d —
-// the slot is unparsed into a sub-stream wrapped in the matching `Delimiter`. (`GroupAngle` has no
-// proc-macro delimiter, hence no impl.)
+// the slot is unparsed into a sub-stream wrapped in the matching `Delimiter`.
 macro_rules! impl_group_unparse_tt {
     ($open:ident, $close:ident, $delim:ident) => {
         impl<T, S> Unparse<proc_macro2::TokenTree>
@@ -76,7 +75,6 @@ pub type GroupParen<T, S> = Group<T, WithSpan<punct::OpenParen, S>, WithSpan<pun
 pub type GroupBrace<T, S> = Group<T, WithSpan<punct::OpenBrace, S>, WithSpan<punct::CloseBrace, S>>;
 pub type GroupBracket<T, S> =
     Group<T, WithSpan<punct::OpenBracket, S>, WithSpan<punct::CloseBracket, S>>;
-pub type GroupAngle<T, S> = Group<T, WithSpan<punct::OpenAngle, S>, WithSpan<punct::CloseAngle, S>>;
 
 pub trait EmptyGroup {
     type Fill<Slot>;

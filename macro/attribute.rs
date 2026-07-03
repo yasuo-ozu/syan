@@ -13,7 +13,6 @@ use adt::*;
 use find::*;
 use substruct::*;
 
-// `FindAttribute` is imported directly by `lib.rs`.
 pub(crate) use find::FindAttribute;
 pub fn parse(
     ident: &Ident,

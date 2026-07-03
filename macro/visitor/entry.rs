@@ -76,7 +76,6 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
         abort!(Span::call_site(), "visitor!(..) needs at least one AST type");
     }
     let build: Path = parse_quote!(#syan::_imp::syan_macro::__visitor_build);
-    let base_tokens = base_tokens(&args.base);
     let nonce = nonce.to_string();
     let nonce: TokenStream = nonce.parse().unwrap();
     let all_types = &args.types;
@@ -84,17 +83,11 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
     // `@visited` carries the *full paths* as written, so the generated items name the visited types
     // in the caller's path context. `@fetching` is the path of the type whose def trails the next
     // bounce (so the fetched def is recorded under it).
+    let base_ts = base_tokens(&args.base);
     let make_state = |fetching: TokenStream, rest: &[Path]| {
-        quote! {
-            @base { #base_tokens }
-            @build { #build }
-            @nonce { #nonce }
-            @visited { #(#all_types),* }
-            @inherited { }
-            @fetching { #fetching }
-            @done { }
-            @rest { #(#rest),* }
-        }
+        state_tokens(
+            &base_ts, &build, &nonce, all_types, &[], &[], &quote!(), &fetching, &quote!(), rest,
+        )
     };
 
     match &args.base {

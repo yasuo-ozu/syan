@@ -30,9 +30,8 @@ impl Error for Infallible {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParseError {
-    // span: Box<dyn Span>,
     message: String,
     sub_errors: Vec<Self>,
 }
@@ -40,7 +39,6 @@ pub struct ParseError {
 impl ParseError {
     pub fn new(_span: impl Span, message: impl core::fmt::Display) -> Self {
         Self {
-            // span: Box::new(span),
             message: format!("{message}"),
             sub_errors: Vec::new(),
         }
@@ -49,23 +47,6 @@ impl ParseError {
     pub fn add_sub_error(&mut self, error: Self) -> &mut Self {
         self.sub_errors.push(error);
         self
-    }
-
-    pub fn add_sub_errors(&mut self, errors: impl IntoIterator<Item = Self>) -> &mut Self {
-        for error in errors.into_iter() {
-            self.sub_errors.push(error);
-        }
-        self
-    }
-}
-
-impl Clone for ParseError {
-    fn clone(&self) -> Self {
-        Self {
-            // span: self.span.clone_box(),
-            message: self.message.clone(),
-            sub_errors: self.sub_errors.clone(),
-        }
     }
 }
 
@@ -76,8 +57,6 @@ impl core::fmt::Display for ParseError {
         f.write_str(&self.message)
     }
 }
-
-pub type Result<T> = core::result::Result<T, ParseError>;
 
 pub trait UnionWith<Rhs>: Sized {
     type Output: Error;

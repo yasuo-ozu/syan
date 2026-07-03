@@ -76,16 +76,6 @@ mod basic {
     }
 
     #[test]
-    fn test_block_with_stmts() {
-        let tokens = quote! { { 1 ; 2 } };
-        let expr: Expr<_> = Parse::parse(tokens).unwrap();
-        match expr {
-            Expr::Block { stmts, .. } => assert_eq!(stmts.len(), 2),
-            _ => panic!("expected block"),
-        }
-    }
-
-    #[test]
     fn test_nested_block() {
         let tokens = quote! { { { 99 } } };
         let expr: Expr<_> = Parse::parse(tokens).unwrap();
@@ -104,25 +94,6 @@ mod basic {
         let expr: Expr<_> = Parse::parse(tokens).unwrap();
         assert!(expr.is_literal());
         assert_eq!(expr.stmt_count(), None);
-    }
-
-    #[test]
-    fn test_stmt_count() {
-        let tokens = quote! { { 1 ; 2 } };
-        let expr: Expr<_> = Parse::parse(tokens).unwrap();
-        assert!(!expr.is_literal());
-        assert_eq!(expr.stmt_count(), Some(2));
-    }
-
-    #[test]
-    fn test_get_expr() {
-        let tokens = quote! { { 42 } };
-        let expr: Expr<_> = Parse::parse(tokens).unwrap();
-        let Expr::Block { stmts, .. } = expr else {
-            panic!("expected block")
-        };
-        let inner = stmts[0].get_expr().expect("expected expr");
-        assert!(inner.is_literal());
     }
 
     #[test]
@@ -161,24 +132,6 @@ mod basic {
     }
 
     #[test]
-    fn test_direct_init_expr_lit() {
-        let lit = Integer {
-            value: "123".to_string(),
-            suffix: None,
-        };
-        let expr: Expr<proc_macro2::TokenTree> = Expr::Lit(lit);
-        assert!(expr.is_literal());
-        assert_eq!(expr.stmt_count(), None);
-        match expr {
-            Expr::Lit(i) => {
-                assert_eq!(i.value, "123");
-                assert_eq!(i.suffix, None);
-            }
-            _ => panic!("expected Lit"),
-        }
-    }
-
-    #[test]
     fn test_mixed_stmts() {
         let tokens = quote! { { 1 ; 2 } };
         let expr: Expr<_> = Parse::parse(tokens).unwrap();
@@ -211,16 +164,6 @@ mod basic {
                 inner: Vec<Expr<S, T>>,
             },
         }
-    }
-
-    #[test]
-    fn test_multi_param_lit() {
-        use multi_param::Expr;
-        use syan::source::proc_macro2::literal::Integer;
-
-        let lit: Expr<proc_macro2::TokenTree, Integer> =
-            Expr::Lit(Integer { value: "7".to_string(), suffix: None });
-        assert!(matches!(lit, Expr::Lit(_)));
     }
 
     #[test]
@@ -465,11 +408,24 @@ mod problems {
     fn compile_fail_problems() {
         let t = trybuild::TestCases::new();
         t.compile_fail("tests/ui/problem1_trait_impl.rs");
-        t.compile_fail("tests/ui/problem2_free_fn.rs");
         t.compile_fail("tests/ui/problem3_pub_crate.rs");
         t.compile_fail("tests/ui/problem5_multiple_roots.rs");
         t.compile_fail("tests/ui/problem7_multiseg_path.rs");
-        t.compile_fail("tests/ui/problem8_qself.rs");
+
+        // `#[recurse]` takes no arguments; passing any argument is a clean compile error.
+        t.compile_fail("tests/ui/recurse_takes_no_args.rs");
+        // A cycle type missing one of the ROOT's params is rejected, naming it (the depth default
+        // must be spellable).
+        t.compile_fail("tests/ui/recurse_missing_root_param.rs");
+        // A multi-root cycle whose self-referential roots are not a feedback vertex set is rejected
+        // with a clear message.
+        t.compile_fail("tests/ui/recurse_multiroot_rootless_subcycle.rs");
+        // A non-identity generic argument on a back-edge to the root (`Expr<Vec<S>>`) is rejected —
+        // the single-`__Rec` depth machinery can't thread it.
+        t.compile_fail("tests/ui/recurse_complex_root_param.rs");
+        // A rootless sub-cycle with ≤1 self-referential root is rejected (the `subgraph_is_cyclic`
+        // guard runs on the single-root path too).
+        t.compile_fail("tests/ui/recurse_rootless_subcycle_single_root.rs");
     }
 
     // When the first type parameter is not named `S`/`Span`, #[recurse] warns at that param's

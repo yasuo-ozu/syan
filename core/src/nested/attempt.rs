@@ -15,13 +15,6 @@ use core::ops::{Deref, DerefMut};
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Attempt<T>(pub T);
 
-impl<T> Attempt<T> {
-    /// Consume into the inner `T`.
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
-
 impl<T> Deref for Attempt<T> {
     type Target = T;
     fn deref(&self) -> &T {

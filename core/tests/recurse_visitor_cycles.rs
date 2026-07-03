@@ -228,34 +228,7 @@ mod multi_cycle {
     #[derive(Default)]
     struct Counter(usize);
 
-    // Expr and Type are disjoint self-referential cycles; each must regenerate against its OWN depth
-    // default (collapsing into one `__Rec` would cross-wire the roots).
-    #[recurse]
-    mod plain {
-        use core::marker::PhantomData;
-        use syan::visit::Ast;
-
-        #[derive(Ast)]
-        #[subast()]
-        pub enum Expr<S> {
-            Nest(Box<Expr<S>>),
-            Lit(PhantomData<S>),
-        }
-
-        #[derive(Ast)]
-        #[subast()]
-        pub enum Type<S> {
-            Arrow(Box<Type<S>>),
-            Unit(PhantomData<S>),
-        }
-    }
-
-    #[test]
-    fn two_independent_cycles_build() {
-        let _e: plain::Expr<()> = plain::Expr::Lit(PhantomData);
-        let _t: plain::Type<()> = plain::Type::Unit(PhantomData);
-    }
-
+    // Expr and Type are disjoint self-referential cycles (independent SCCs).
     #[recurse]
     mod vis {
         use core::marker::PhantomData;

@@ -33,6 +33,18 @@ pub(crate) struct BuildInput {
     pub(crate) just_subast: Vec<SubEntry>,
 }
 
+impl BuildInput {
+    /// Visited types' last-idents ∪ inherited idents — the set of heads that dispatch via a
+    /// `visit_*` method call rather than being drilled/leaf.
+    pub(crate) fn method_set(&self) -> HashSet<String> {
+        self.visited
+            .iter()
+            .map(|p| last_ident(p).to_string())
+            .chain(self.inherited.iter().map(|i| i.to_string()))
+            .collect()
+    }
+}
+
 /// Parse one `@<name> { .. }` section, returning the name and the braced content as tokens.
 pub(crate) fn parse_section(input: ParseStream) -> Result<(Ident, TokenStream)> {
     input.parse::<Token![@]>()?;
@@ -44,7 +56,6 @@ pub(crate) fn parse_section(input: ParseStream) -> Result<(Ident, TokenStream)> 
 
 /// One transitive-base obligation for multi-level inheritance: an ancestor visitor's path and the
 /// names of its generic params (re-mapped into the extending visitor's union when emitted).
-#[derive(Clone)]
 pub(crate) struct AncIn {
     pub(crate) path: Path,
     pub(crate) names: Vec<Ident>,
@@ -201,7 +212,6 @@ pub(crate) fn requalify_ancestor(anc: &Path, base: &Path) -> Path {
     };
     match first.ident.to_string().as_str() {
         "crate" => {
-            // crate::REST -> <host>::REST (replace only the leading segment)
             let mut out = anc.clone();
             out.segments[0].ident = base_mod[0].ident.clone();
             out
@@ -356,14 +366,44 @@ fn parse_idents(ts: TokenStream) -> Result<Vec<Ident>> {
     parser.parse2(ts)
 }
 
+/// Serialize one `__visitor_build` ping-pong bounce's full state payload. Shared by `entry` (the
+/// first bounce — `inherited`/`base_generics`/`anc`/`done` are always empty, nothing fetched yet)
+/// and `build` (every later bounce, carrying the accumulated state). Content pieces that need
+/// their own rendering (`@base`, `@anc`, `@done`) are passed pre-rendered so this fn stays a pure
+/// section-list assembler.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn state_tokens(
+    base: &TokenStream,   // base_tokens(&base_path) or quote!()
+    build: &Path,
+    nonce: &TokenStream,
+    visited: &[Path],
+    inherited: &[Ident],
+    base_generics: &[GenericParam],
+    anc: &TokenStream, // emit_ancestors(&base_ancestors) or quote!()
+    fetching: &TokenStream,
+    done: &TokenStream, // emit_done(&done) or quote!()
+    rest: &[Path],
+) -> TokenStream {
+    quote! {
+        @base { #base }
+        @build { #build }
+        @nonce { #nonce }
+        @visited { #(#visited),* }
+        @inherited { #(#inherited)* }
+        @baseg { #(#base_generics),* }
+        @anc { #anc }
+        @fetching { #fetching }
+        @done { #done }
+        @rest { #(#rest),* }
+    }
+}
+
 pub fn build(input: TokenStream) -> TokenStream {
     let mut st: BuildInput = match syn::parse2(input) {
         Ok(s) => s,
         Err(e) => return e.to_compile_error(),
     };
 
-    // Record the just-fetched type (def + subast) under the path it was fetched by, then discover
-    // the followed-but-unvisited intermediates it references and enqueue them for drilling.
     if let Some(def) = st.just_def.take() {
         let path = match st.fetching.clone() {
             Some(p) => p,
@@ -374,22 +414,15 @@ pub fn build(input: TokenStream) -> TokenStream {
         };
         let subast = std::mem::take(&mut st.just_subast);
 
-        let method_set: HashSet<String> = st
-            .visited
-            .iter()
-            .map(|p| last_ident(p).to_string())
-            .chain(st.inherited.iter().map(|i| i.to_string()))
-            .collect();
-        let self_ident = item_ident(&def).map(|i| i.to_string());
+        let method_set = st.method_set();
+        let self_ident = item_ident(&def);
         let mut seen: HashSet<String> = st
             .done
             .iter()
             .map(|d| norm_path(&d.path))
             .chain(st.rest.iter().map(norm_path))
             .collect();
-        for entry_path in
-            followed_intermediates(&def, &subast, &method_set, self_ident.as_deref())
-        {
+        for entry_path in followed_intermediates(&def, &subast, &method_set, self_ident) {
             if seen.insert(norm_path(&entry_path)) {
                 st.rest.push(entry_path);
             }
@@ -412,25 +445,14 @@ pub fn build(input: TokenStream) -> TokenStream {
             rest,
             ..
         } = &st;
-        let base_tokens = base_tokens(base);
-        let done_tokens = emit_done(done);
-        let anc_tokens = emit_ancestors(base_ancestors);
-        return quote! {
-            #next ! {
-                @ast #build {
-                    @base { #base_tokens }
-                    @build { #build }
-                    @nonce { #nonce }
-                    @visited { #(#visited),* }
-                    @inherited { #(#inherited)* }
-                    @baseg { #(#base_generics),* }
-                    @anc { #anc_tokens }
-                    @fetching { #next }
-                    @done { #done_tokens }
-                    @rest { #(#rest),* }
-                }
-            }
-        };
+        let base_ts = base_tokens(base);
+        let done_ts = emit_done(done);
+        let anc_ts = emit_ancestors(base_ancestors);
+        let state = state_tokens(
+            &base_ts, build, nonce, visited, inherited, base_generics, &anc_ts, &quote!(#next),
+            &done_ts, rest,
+        );
+        return quote! { #next ! { @ast #build { #state } } };
     }
 
     generate_module(&st)
