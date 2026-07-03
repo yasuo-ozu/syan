@@ -107,6 +107,40 @@ impl IntoParseStream for String {
     }
 }
 
+/// A [`ParseError`] from [`parse_str`] rendered against this source's positional [`Span`]: `Display`
+/// prints `line:col: message` from the span the error carried (recovered via
+/// [`ParseError::span_of`]), which for this source is the furthest input the parse reached.
+#[derive(Debug, Clone)]
+pub struct SpannedError(pub ParseError);
+
+impl SpannedError {
+    /// The source position the parse failed at, if the error carried one.
+    pub fn span(&self) -> Option<Span> {
+        self.0.span_of::<Span>()
+    }
+}
+
+impl core::fmt::Display for SpannedError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.span() {
+            Some(span) => write!(f, "{}:{}: {}", span.line, span.col, self.0),
+            None => write!(f, "{}", self.0),
+        }
+    }
+}
+
+impl std::error::Error for SpannedError {}
+
+/// Parse `T` from a source string through the built-in char stream, wrapping a failure in a
+/// [`SpannedError`] that renders `line:col: message`. The span-carrying convenience over
+/// `T::parse(src)` — the position comes from the [`Span`] the failing [`ParseError`] carried.
+pub fn parse_str<T>(src: impl Into<String>) -> Result<T, SpannedError>
+where
+    T: Parse<WithSpan<char, Span>, Error = ParseError>,
+{
+    T::parse(src.into()).map_err(SpannedError)
+}
+
 macro_rules! impl_parse_for_char {
     ($($name:ident),* $(,)?) => {
         $(
@@ -124,8 +158,9 @@ macro_rules! impl_parse_for_char {
                             Ok(Default::default())
                         }
                         Some(atom) => {
+                            let span = atom.span.clone();
                             stream.push(atom);
-                            Err(ParseError::new(Span::default(), "expected character"))
+                            Err(ParseError::new(span, "expected character"))
                         }
                         None => Err(ParseError::new(Span::default(), "unexpected end of input")),
                     }

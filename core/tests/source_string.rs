@@ -1,5 +1,5 @@
 use syan::parse::{IntoParseStream, Parse, ParseStream};
-use syan::source::string::{Span, Stream};
+use syan::source::string::{parse_str, Span, SpannedError, Stream};
 use syan::span::{Span as SpanTrait, WithSpan};
 use syan::symbol::{chars, Symbol};
 
@@ -295,4 +295,25 @@ fn test_multiline_position_tracking() {
     assert_eq!(atom.span.line, 4);
     assert_eq!(atom.span.col, 1);
     assert_eq!(atom.span.loc, 13);
+}
+#[test]
+fn parse_str_ok() {
+    let _: Symbol<chars::_a> = parse_str("a").unwrap();
+}
+
+#[test]
+fn parse_str_err_renders_position() {
+    // A single-char mismatch: 'b' sits at line 1, col 1 (loc 0) — §5C recovers it from the error's span.
+    let err: SpannedError = parse_str::<Symbol<chars::_a>>("b").unwrap_err();
+    let span = err.span().expect("failing char carried a span");
+    assert_eq!((span.line, span.col, span.loc), (1, 1, 0));
+    assert_eq!(err.to_string(), "1:1: expected character");
+}
+
+#[test]
+fn parse_str_err_points_at_furthest_input() {
+    // `(_a, _b)` consumes 'a' then fails on the second char, so the reported position advanced past it.
+    let err = parse_str::<(Symbol<chars::_a>, Symbol<chars::_b>)>("ax").unwrap_err();
+    let span = err.span().expect("failing char carried a span");
+    assert_eq!((span.col, span.loc), (2, 1));
 }
