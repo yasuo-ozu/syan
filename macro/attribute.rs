@@ -3,7 +3,6 @@ use proc_macro_error::abort;
 use std::collections::VecDeque;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::visit::Visit;
 use syn::*;
 use template_quote::quote;
 
@@ -58,28 +57,6 @@ pub(crate) trait FindAttribute {
     }
 }
 
-#[allow(dead_code)]
-fn collect_primitive_tys(ty: &Type) -> impl Iterator<Item = Type> {
-    #[derive(Default)]
-    struct TypeCollector {
-        types: Vec<Type>,
-    }
-
-    impl<'ast> Visit<'ast> for TypeCollector {
-        fn visit_type(&mut self, ty: &'ast Type) {
-            if let Type::Macro(_type_macro) = ty {
-                self.types.push(ty.clone());
-            } else {
-                syn::visit::visit_type(self, ty);
-            }
-        }
-    }
-
-    let mut collector = TypeCollector::default();
-    collector.visit_type(ty);
-    collector.types.into_iter()
-}
-
 fn is_derive_helper_attr(attr: &Attribute) -> bool {
     attr.path().is_ident("group")
         || attr.path().is_ident("syan")
@@ -114,6 +91,25 @@ fn strip_derive_helper_attrs(substruct: &ItemStruct) -> ItemStruct {
         Fields::Unit => {}
     }
     substruct
+}
+
+/// Strip any type/const generic-param defaults. A default (e.g. the engine's
+/// `__Rec = __ExprDefault<S>`) is only valid in the type *definition*; carried onto an `impl` header it
+/// is an error (and a non-trailing one once an invented param like `__Syan_Span` is appended).
+fn strip_param_defaults(params: &mut Punctuated<GenericParam, Token![,]>) {
+    for param in params {
+        match param {
+            GenericParam::Type(type_param) => {
+                type_param.eq_token = None;
+                type_param.default = None;
+            }
+            GenericParam::Const(const_param) => {
+                const_param.eq_token = None;
+                const_param.default = None;
+            }
+            GenericParam::Lifetime(_) => {}
+        }
+    }
 }
 
 /// For each **unbounded** type param of `generics`, add `T: Spanned<Span = #tp_span>` to
@@ -329,19 +325,7 @@ pub(crate) trait Adt {
         let trait_path_owned: Path = trait_path.clone();
         let trait_fullpath: Path = parse_quote!(#trait_path_owned<#tp_atom>);
         let mut generic_params = generics.params.clone();
-        for param in &mut generic_params {
-            match param {
-                GenericParam::Type(type_param) => {
-                    type_param.eq_token = None;
-                    type_param.default = None;
-                }
-                GenericParam::Const(const_param) => {
-                    const_param.eq_token = None;
-                    const_param.default = None;
-                }
-                _ => (),
-            }
-        }
+        strip_param_defaults(&mut generic_params);
         generic_params.push(parse_quote!(#tp_atom));
         let ty_generics = generics.split_for_impl().1;
         proc_macro_error::append_dummy(quote! {
@@ -356,7 +340,6 @@ pub(crate) trait Adt {
         });
         let mut where_predicates: Punctuated<WherePredicate, token::Comma> = Punctuated::new();
         let v_stream: Ident = parse_quote!(__syan_stream);
-        let mut wrapper_counter = 0usize;
 
         where_predicates.push(parse_quote!(#tp_atom: #syan::span::Spanned));
         where_predicates.push(parse_quote!(#tp_atom: ::core::clone::Clone));
@@ -384,7 +367,6 @@ pub(crate) trait Adt {
                     });
                 }
 
-                // check if the toplevel field has no `#[group(..)]` attr
                 if let Some(group_member) = field.find_group() {
                     abort!(
                         &group_member,
@@ -440,8 +422,6 @@ pub(crate) trait Adt {
                         )?;
                     ));
                 }
-                    wrapper_counter += 1;
-
             }
             ret
         });
@@ -502,19 +482,7 @@ pub(crate) trait Adt {
         let trait_path_owned: Path = trait_path.clone();
         let trait_fullpath: Path = parse_quote!(#trait_path_owned<#tp_atom>);
         let mut generic_params = generics.params.clone();
-        for param in &mut generic_params {
-            match param {
-                GenericParam::Type(type_param) => {
-                    type_param.eq_token = None;
-                    type_param.default = None;
-                }
-                GenericParam::Const(const_param) => {
-                    const_param.eq_token = None;
-                    const_param.default = None;
-                }
-                _ => (),
-            }
-        }
+        strip_param_defaults(&mut generic_params);
         generic_params.push(parse_quote!(#tp_atom));
         let ty_generics = generics.split_for_impl().1;
         proc_macro_error::append_dummy(quote! {
@@ -548,7 +516,6 @@ pub(crate) trait Adt {
                 }
 
                 let field_ty = &field.ty;
-                // Check if this field has grouped subfields (though for unparse we don't generate substructs)
                 if let Some((substruct, subfields)) = generate_substruct(
                     &member,
                     generics,
@@ -649,22 +616,7 @@ pub(crate) trait Adt {
         let trait_fullpath: Path = trait_path.clone();
         let ty_generics = generics.split_for_impl().1;
         let mut generic_params = generics.params.clone();
-        // A generic param default (e.g. the engine's `__Rec = __ExprDefault<S>`) is only valid in the
-        // type *definition*; carried onto an `impl` header it is an error (and a non-trailing one once
-        // `__Syan_Span` is appended). Strip defaults here, mirroring the `Parse`/`Unparse` derives.
-        for param in &mut generic_params {
-            match param {
-                GenericParam::Type(type_param) => {
-                    type_param.eq_token = None;
-                    type_param.default = None;
-                }
-                GenericParam::Const(const_param) => {
-                    const_param.eq_token = None;
-                    const_param.default = None;
-                }
-                _ => {}
-            }
-        }
+        strip_param_defaults(&mut generic_params);
         let mut where_predicates: Punctuated<WherePredicate, token::Comma> = Punctuated::new();
 
         let tp_span: Ident = parse_quote!(__Syan_Span);
@@ -688,7 +640,6 @@ pub(crate) trait Adt {
             abort!(Span::call_site(), "no field exists");
         }
         let v_self: TokenStream = quote!(self);
-        let mut wrapper_counter = 0usize;
 
         let span_impl = self.extract_inner(ident, &v_self, |fields| {
             for (_, _, field) in fields {
@@ -725,7 +676,6 @@ pub(crate) trait Adt {
                 }
                 __syan_span
             };
-            wrapper_counter += 1;
             ret
         });
 

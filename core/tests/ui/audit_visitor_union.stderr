@@ -1,10 +1,5 @@
 error: no AST definitions resolved for the visitor
-  --> tests/ui/audit_visitor_union.rs:7:23
+  --> tests/ui/audit_visitor_union.rs:14:34
    |
- 7 | #[derive(Clone, Copy, syan::visit::Ast)]
-   |                       ^^^^^^^^^^^^^^^^
-...
 14 |     syan::visit::visitor!(crate::U);
-   |     ------------------------------- in this macro invocation
-   |
-   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+   |                                  ^

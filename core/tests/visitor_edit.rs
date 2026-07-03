@@ -464,3 +464,44 @@ mod nested {
         );
     }
 }
+
+// ── `#[opt]` on a `Box`-topped field: `Box<Head>` is a single-slot `OptView<Head>` (always present), so
+//    it IS a valid opt edit target — get/get_mut/set edit the boxed node in place. (`take`/`clear` would
+//    panic — a `Box` can't be emptied — so only get/get_mut/set apply. A `Box<Vec>`/`Box<Option>` wraps a
+//    container and is NOT an edit target: see `ui/visitor_edit_marker_boxed.rs`.) ─────────────────────
+mod boxed_opt {
+    use super::*;
+    use syan::visit::{Ast, OptView};
+
+    #[derive(Debug, Ast)]
+    pub struct Leaf<S>(pub i64, pub PhantomData<S>);
+
+    #[derive(Debug, Ast)]
+    #[subast(crate::boxed_opt::Leaf)]
+    pub struct Holder<S> {
+        #[opt]
+        pub boxed: Box<Leaf<S>>,
+    }
+
+    pub mod v {
+        syan::visit::visitor!(super::Holder, super::Leaf);
+    }
+
+    struct Editor;
+    impl<S> v::VisitMut<S> for Editor {
+        fn visit_leaf_opt<O: OptView<Leaf<S>>>(&mut self, v: &mut O) {
+            assert!(v.is_some(), "a Box<Leaf> single-slot view is always present");
+            if let Some(l) = v.get_mut() {
+                l.0 += 100; // edit the boxed node in place
+            }
+            v.set(Leaf(v.get().unwrap().0 + 1, PhantomData)); // replace the boxed node
+        }
+    }
+
+    #[test]
+    fn opt_edits_boxed_single_node() {
+        let mut h: Holder<()> = Holder { boxed: Box::new(Leaf(5, PhantomData)) };
+        h.visit_mut(&mut Editor);
+        assert_eq!(h.boxed.0, 106, "5 -> +100 (get_mut) -> +1 (set) = 106");
+    }
+}

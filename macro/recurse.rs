@@ -10,11 +10,11 @@ use syn::{
 };
 use template_quote::quote;
 
-/// The fixed type-depth of the internal `Parse` engine (the depth chain `__XxxDefault`). Only `Parse`
-/// goes through the engine now; `Unparse`/`Spanned` are unbounded (direct on the natural type) for a
-/// group-free cycle, or engine-bounded at this depth for a group-ful one. This is *not* user-tunable —
-/// `#[recurse]` takes no arguments (the former `limit = N` was removed; a deeper `Parse` is the job of
-/// the planned vtable re-entry, `docs/recurse-unbounded-plan.md`).
+/// The fixed type-depth of the internal engine (the depth chain `__XxxDefault`). The engine backs
+/// `Parse` always, and `Unparse`/`Spanned` for a group-ful cycle; all three are nonetheless unbounded —
+/// the depth-floor terminator re-enters the top-level impl at runtime via `core::parse::vtable`, so this
+/// depth is not a ceiling. This is *not* user-tunable — `#[recurse]` takes no arguments (the former
+/// `limit = N` was removed).
 const DEFAULT_RECURSION_DEPTH: usize = 4;
 
 struct TransformCtx {
@@ -434,15 +434,6 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Multi-root soundness guard.
-//
-// `#[recurse]` only emits the depth-limited *types* + `@recurse` metadata; the depth-generic visitor
-// is built by `visitor!(<cycle types>)` (see `macro/visitor.rs`). The depth decrements only at a
-// self-referential root, so a multi-root cycle whose roots are not a feedback vertex set would not
-// terminate — `subgraph_is_cyclic` rejects that at the type level.
-// ---------------------------------------------------------------------------
-
 /// Is the subgraph induced by the cycle's **non-root** types cyclic? Used as the multi-root soundness
 /// guard: the depth only decrements at a self-referential root, so a cycle running entirely through
 /// non-root types would never terminate. Built and tested with `safegraph` (same `u32`-keyed graph as
@@ -479,8 +470,6 @@ fn subgraph_is_cyclic(
     is_cyclic_directed(&g)
 }
 
-// ───────────────────────────── engine → natural conversion codegen ──────────────────────────────
-//
 // The public cycle types are emitted as *natural* recursive types; `Parse` is delegated to the
 // depth-limited engine (`__XRec`) and the parsed engine value is converted back to the natural type by
 // a generated `__ToNat_X` trait. See `docs/recurse-natural-types-plan.md` §4. A field is a *recursive
@@ -489,8 +478,7 @@ fn subgraph_is_cyclic(
 
 /// Direction of a natural↔engine field/variant conversion. The tree-walk (`conv_expr`/`conv_body`) is
 /// identical either way; only the recursive-child call, the by-value-vs-by-reference container access,
-/// and the leaf handling differ — captured here so one pair of functions serves both bridges (mirroring
-/// `emit_delegated_impl`'s one-algorithm treatment of the traits that use them).
+/// and the leaf handling differ — captured here so one pair of functions serves both bridges.
 #[derive(Clone, Copy)]
 enum ConvDir {
     /// engine → natural, **by value**: a recursive child is `val.__to_nat()`; containers move
@@ -657,8 +645,6 @@ fn conv_body(
     }
 }
 
-// ── nonce-stamped internal names ────────────────────────────────────────────────────────────────
-//
 // Every generated, otherwise-private item carries a per-`#[recurse]`-expansion `nonce` so its name
 // cannot collide with the user's own items — a user type literally named `ExprTerm` no longer clashes
 // with the generated terminator (cf. `ui/audit_recurse_terminator_collision.rs`). The nonce is constant
@@ -1122,9 +1108,8 @@ struct RootReentry {
     name: String,
 }
 
-/// Emit the delegated `impl Parse for <natural type>` — the **unbounded** variant. Unlike the
-/// `Unparse`/`Spanned` delegations (which go through `emit_delegated_impl`), `Parse` must, before running
-/// the engine, **register** each root's erased re-entry parser into `core::parse::vtable` so the engine's
+/// Emit the delegated `impl Parse for <natural type>` — the **unbounded** variant. Before running
+/// the engine it **registers** each root's erased re-entry parser into `core::parse::vtable` so the engine's
 /// terminator can re-enter at runtime (giving unbounded depth). An inner `__run` fn names the concrete
 /// stream type `__St` so the registry key/erasure can spell `__St::Error` (the `Parse` trait method's
 /// `impl IntoParseStream` is anonymous). Registering ALL roots (not just self) is required because parsing
@@ -1222,13 +1207,12 @@ struct RootData<'a> {
 }
 
 /// For an SCC whose natural types own the public names, emit the engine→natural bridge: one
-/// `__ToNat_X` trait + impl per cycle type, a terminator `__to_nat` (`unreachable!`) per root, and the
-/// delegated `impl Parse for X` (parse the depth-limited engine, then `.__to_nat()`). `Unparse`/`Spanned`
-/// are likewise re-supplied on the natural type by **delegation**: the *reverse* `__FromNat_X` bridge
-/// (natural→engine, `Clone`ing leaves, terminator `panic!`s past the depth limit) + a delegated
-/// `impl Unparse`/`impl Spanned` that converts then calls the engine's impl. All three delegating impls
-/// are emitted by the single `emit_delegated_impl` algorithm. Replaces the old `@recurse` metadata +
-/// public aliases. `default_for_root` maps each root to its `__<root>Default` depth alias; `rec_for_root`
+/// `__ToNat_X` trait + impl per cycle type, a terminator `__to_nat` (unwraps its `Box`) per root, and the
+/// delegated `impl Parse for X` (parse the depth-limited engine, then `.__to_nat()`). Group-ful
+/// `Unparse`/`Spanned` are likewise re-supplied on the natural type by **delegation**: the *reverse*
+/// `__FromNat_X` bridge (natural→borrow engine, `Clone`ing leaves, borrowing recursive children) + a
+/// delegated `impl Unparse`/`impl Spanned` (`emit_delegated_unparse`/`_spanned`) that converts then calls
+/// the engine's impl. `default_for_root` maps each root to its `__<root>Default` depth alias; `rec_for_root`
 /// to its depth param; `root_generics` are the roots' (shared) params.
 fn gen_natural_extras(
     scc: &HashSet<String>,
@@ -1332,11 +1316,7 @@ fn gen_natural_extras(
         // method signatures, and the conversion/delegated impls) must repeat these — naming `Expr<S>`
         // is only well-formed when its where-clause holds — else the obligation surfaces undischarged
         // (E0277). They reference the cycle's own params, which are in scope on all of these.
-        let where_preds: Vec<TokenStream> = generics
-            .where_clause
-            .as_ref()
-            .map(|w| w.predicates.iter().map(|p| quote!(#p)).collect())
-            .unwrap_or_default();
+        let where_preds = where_preds(generics);
         where_preds_of.insert(xs.clone(), where_preds.clone());
         // engine instantiation at the public depth defaults: `__XRec<own…, __RootDefault<root>…>`
         let default_args: Vec<TokenStream> = roots_sorted
@@ -1390,9 +1370,9 @@ fn gen_natural_extras(
 
         // Natural→engine bridge (`__FromNat_X`) for a delegated `Unparse`/`Spanned` cycle, plus the
         // delegated impls. The bridge `Clone`s leaves into the engine; recursive children recurse through
-        // it (terminator `panic!`s past the depth limit — see below). `Unparse`/`Spanned` then convert the
-        // (borrowed) natural value to the depth-default engine value and call the engine's own impl — all
-        // via the same `emit_delegated_impl` algorithm (natural→engine via `__FromNat`).
+        // it, bottoming at the borrow terminator (which re-enters at runtime — see below).
+        // `Unparse`/`Spanned` then convert the (borrowed) natural value to the depth-1 borrow engine and
+        // call the engine's own impl (`emit_delegated_unparse`/`_spanned`).
         if needs_from_nat {
             // natural → borrow engine: clone leaves, recurse into children, bottoming at the borrow
             // terminator `__XxxTermRef<'__n>` (just `&'__n child`) — so only leaves copy (no `Root: Clone`).
@@ -1463,10 +1443,9 @@ fn gen_natural_extras(
 
 /// Build the recurse machinery for ONE independent cycle (`scc`): pick its root, rename its types,
 /// and produce (a) the `TransformCtx` that rewrites the cycle's items and (b) the *tail* tokens
-/// appended to the module (terminator + its `Parse`/`Unparse` impls, the depth-default alias, the
-/// public type aliases, and the per-cycle-type `@recurse` metadata macros that `visitor!()` consumes
-/// to build a depth-generic visitor). Each cycle is handled independently, so a module may hold
-/// several (see `find_cycle_sccs`).
+/// appended to the module (terminators + their re-entry impls, the depth-default aliases, and the
+/// engine→natural bridge + delegated `Parse`/`Unparse`/`Spanned` impls via `gen_natural_extras`). Each
+/// cycle is handled independently, so a module may hold several (see `find_cycle_sccs`).
 #[allow(clippy::too_many_arguments)]
 fn build_scc(
     scc: &HashSet<String>,
@@ -1574,9 +1553,8 @@ fn build_scc(
 
     // The terminator struct must be generic over the root's params when the cycle is generic, so the
     // depth-default alias `type __RootDefault<S> = …Term<S>` actually *uses* every param (otherwise an
-    // unused-param E0091 fires on the user's own definition — notably at `limit = 1`, where the depth
-    // chain bottoms out directly at the terminator). When the cycle has no params the terminator stays
-    // the byte-identical unit struct `pub struct RootTerm;`.
+    // unused-param E0091 fires on the user's own definition). When the cycle has no params the terminator
+    // stays the byte-identical unit struct `pub struct RootTerm;`.
     let has_gen = !gen_decl.is_empty();
     // Self-type arguments for the terminator (`RootTerm<S, …>`), empty when non-generic.
     let term_args: TokenStream = if has_gen {
@@ -1693,7 +1671,6 @@ fn build_scc(
     let derives_parse = scc.iter().any(|n| deleg.parse.contains(n));
 
     let tail = if single_root {
-        // ── single root: the original depth machinery ───────────────────────────────────────────
         // Soundness: the depth decrements only at the root's back-edge, so a sub-cycle that never
         // touches the root would never terminate. The multi-root path checks this; do it here too
         // (it was previously skipped whenever ≤1 cycle type self-references, silently leaving such a
@@ -1719,10 +1696,9 @@ fn build_scc(
             depth_ty = quote!(#root_internal<#(#gen_use,)* #depth_ty>);
         }
 
-        // NOTE (natural-type design): the public `pub type Expr = __ExprRec<…>` aliases are *not*
-        // emitted — the natural recursive enums/structs own those names. Only the internal depth-chain
-        // alias `__ExprDefault` is kept (the delegated `Parse` references `__ExprRec<…, __ExprDefault>`).
-        let _ = &default_alias;
+        // The public `pub type Expr = __ExprRec<…>` aliases are *not* emitted — the natural recursive
+        // enums/structs own those names. Only the internal depth-chain alias `__ExprDefault` is kept
+        // (the delegated `Parse` references `__ExprRec<…, __ExprDefault>`).
         // The inhabited terminator + erased re-entry give `Parse` unbounded depth (the terminator
         // re-enters the top-level parser at runtime instead of erroring at the depth floor).
         let terminator = emit_terminator_and_reentry(items, &root_name, nonce, derives_parse);
@@ -1732,7 +1708,6 @@ fn build_scc(
             type #default_alias<#(#gen_decl),*> = #depth_ty;
         }
     } else {
-        // ── several self-referential roots in one cycle ─────────────────────────────────────────
         build_multiroot_tail(
             scc,
             items,
@@ -1753,9 +1728,9 @@ fn build_scc(
         )
     };
 
-    // Engine→natural bridge: `__ToNat_X` conversion traits/impls + terminator `unreachable!` +
-    // delegated `impl Parse for X` (parse the depth-limited engine, then convert). Replaces the old
-    // `@recurse` metadata + public `pub type` aliases.
+    // Engine→natural bridge: `__ToNat_X` conversion traits/impls + terminator `__to_nat` +
+    // delegated `impl Parse for X` (parse the depth-limited engine, then convert), plus the group-ful
+    // `Unparse`/`Spanned` delegations.
     let extras = gen_natural_extras(
         scc,
         items,
@@ -1885,19 +1860,6 @@ fn build_multiroot_tail(
     }
 }
 
-/// Split a cycle type's `#[derive(...)]`: route the *structural* syan derives that emit per-field
-/// `field_ty: Trait` bounds (`Parse`/`Unparse`/`Spanned`) to the depth-limited **engine** (they would
-/// form an E0275 where-bound cycle on the natural type; on the engine the recursive child is the depth
-/// param, breaking the cycle). Everything else (`Ast`, `Debug`, `Clone`, `#[subast]`, docs, …) stays on
-/// the natural type. Returns `(natural attrs, engine-routed derive paths)`. `Parse` on the natural type
-/// is re-supplied as a delegating impl (parse engine → convert); `Unparse`/`Spanned` currently live on
-/// the engine only (a direct natural impl needs cycle-wide union bounds — see
-/// `docs/recurse-natural-types-plan.md` §5).
-/// Partition a cycle type's `#[derive(...)]` into (kept-on-natural attrs, engine-routed derive paths),
-/// routing the derives in `engine_routed` to the engine. `Parse` is *always* engine-routed (it needs
-/// the depth-limited engine — see `make_natural_item`'s doc); `Unparse`/`Spanned` are engine-routed only
-/// for a **group-ful** cycle (their natural derive would need cycle-wide union bounds the group `Fill`
-/// machinery makes infeasible). Everything else (`Ast`, `Debug`, `#[subast]`, docs, …) stays on natural.
 /// If `attr` is a derive-like list attribute, return its name (`"derive"` or `"macro_derive"`), else
 /// `None`. `#[macro_derive]` (from the `type-macro-derive-tricks` crate) is the form a cycle type must use
 /// when it has `Token![..]`-style *type-macro* fields, which rustc forbids under a plain `#[derive]`;
@@ -1978,11 +1940,11 @@ fn strip_field_helper_attrs(fields: &mut Fields) {
     }
 }
 
-/// The public **natural** form of a cycle type. `Parse`/`Unparse`/`Spanned` are **all** routed to the
-/// depth-limited engine and re-supplied on the natural type by delegation (`gen_natural_extras` /
-/// `emit_delegated_impl`): a natural `Parse` overflows (per-field where-bound cycle + backtracking
-/// `Dup<…>` stream recursion), and `Unparse`/`Spanned` use the uniform delegated path so every cycle —
-/// single/multi-type, group-free/group-ful — is handled identically. Everything else (`Ast`, `Debug`,
+/// The public **natural** form of a cycle type. `Parse` is always routed to the depth-limited engine and
+/// re-supplied on the natural type by delegation (`gen_natural_extras`): a natural `Parse` overflows
+/// (per-field where-bound cycle + backtracking `Dup<…>` stream recursion). `Unparse`/`Spanned` are routed
+/// to the engine (delegated) only for a **group-ful** cycle; a group-free cycle derives them directly on
+/// the natural type (unbounded — see the body). Everything else (`Ast`, `Debug`,
 /// `Default`, `#[subast]`, docs, …) stays on the natural type; the engine-routed structural-derive field
 /// helper attrs (`#[group]`/`#[ignore_bounds]`/…) are stripped from the natural type (it carries no
 /// structural derive that would consume them — they live on the engine, built from the original item).
@@ -2178,7 +2140,7 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
     //                          the primary signal for root selection (a bare field, not `Vec`/`Box`).
     // `type_refs` is kept a plain adjacency `HashMap` rather than a `safegraph` graph: it is built
     // straight from the AST and is also queried as a map for self-reference and degree counting;
-    // `find_cycle_types` lifts it into a `safegraph` graph for the one operation that needs graph
+    // `find_cycle_sccs` lifts it into a `safegraph` graph for the one operation that needs graph
     // algorithms (Tarjan SCC). A `Copy`-keyed graph here would just push name<->id bookkeeping outward.
     let mut type_refs: HashMap<String, HashSet<String>> = HashMap::new();
     let mut direct_type_refs: HashMap<String, HashSet<String>> = HashMap::new();

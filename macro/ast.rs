@@ -263,24 +263,7 @@ fn collect_type_idents(ty: &Type, out: &mut std::collections::HashSet<String>) {
 
 fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    let visit_fields = |fields: &Fields, out: &mut std::collections::HashSet<String>| {
-        for f in fields {
-            collect_type_idents(&f.ty, out);
-        }
-    };
-    match &input.data {
-        Data::Struct(s) => visit_fields(&s.fields, &mut out),
-        Data::Enum(e) => {
-            for v in &e.variants {
-                visit_fields(&v.fields, &mut out);
-            }
-        }
-        Data::Union(u) => {
-            for f in &u.fields.named {
-                collect_type_idents(&f.ty, &mut out);
-            }
-        }
-    }
+    for_each_field(&input.data, |ty| collect_type_idents(ty, &mut out));
     out
 }
 

@@ -48,8 +48,8 @@ fn optview_iter_and_iter_mut() {
 fn retain_mut_visits_then_drops() {
     let mut v = vec![1, 2, 3, 4];
     <Vec<i32> as SeqView<i32>>::retain_mut(&mut v, |x| {
-        *x += 1; // visited in place first
-        *x % 2 == 0 // keep evens
+        *x += 1;
+        *x % 2 == 0
     });
     assert_eq!(v, vec![2, 4], "1->2 keep, 2->3 drop, 3->4 keep, 4->5 drop");
 }

@@ -25,6 +25,9 @@ fn visitor_diagnostics() {
     t.compile_fail("tests/ui/visitor_edit_marker_array.rs");
     t.compile_fail("tests/ui/visitor_edit_marker_noncontainer.rs");
     t.compile_fail("tests/ui/visitor_edit_marker_unvisited.rs");
+    // A `#[seq]`/`#[opt]` field whose top-level type wraps a container (`Box<Vec<T>>`) is not an edit
+    // target — edit views need a bare single container (the field still descends).
+    t.compile_fail("tests/ui/visitor_edit_marker_boxed.rs");
     // (A `where`-bounded generic param not shared by all visited types is now SUPPORTED — the bounded
     //  param becomes a per-method generic, trait keyed on the shared subset; see
     //  `visitor_union_where_unshared_param.rs`.)

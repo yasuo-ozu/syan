@@ -1,0 +1,10 @@
+error: a `#[seq]` field must be a *single* container of the element (e.g. `Vec<Leaf>`); a nested or wrapped container (`Vec<Box<Leaf>>`, `Box<Vec<Leaf>>`, …) can't be edited in place — use a bare `Vec<Leaf>` / `Option<Leaf>`
+  --> tests/ui/visitor_edit_marker_boxed.rs:16:16
+   |
+16 |     pub items: Box<Vec<Leaf<S>>>,
+   |                ^^^^^^^^^^^^^^^^^
+...
+20 |     syan::visit::visitor!(crate::Wrap, crate::Leaf);
+   |     ----------------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `crate::Wrap` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

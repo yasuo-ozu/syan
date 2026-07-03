@@ -54,20 +54,21 @@ pub(crate) fn param_use(p: &GenericParam) -> TokenStream {
 /// params (`T`) but differ for const params (`const N: usize` vs `N`). The declaration form is bare
 /// (no bounds/defaults), so it suits a method generic too.
 pub(crate) fn param_tokens(p: &GenericParam) -> (TokenStream, TokenStream) {
-    match p {
+    let decl = match p {
         GenericParam::Lifetime(lt) => {
             let l = &lt.lifetime;
-            (quote!(#l), quote!(#l))
+            quote!(#l)
         }
         GenericParam::Type(t) => {
             let i = &t.ident;
-            (quote!(#i), quote!(#i))
+            quote!(#i)
         }
         GenericParam::Const(c) => {
             let (i, ty) = (&c.ident, &c.ty);
-            (quote!(const #i: #ty), quote!(#i))
+            quote!(const #i: #ty)
         }
-    }
+    };
+    (decl, param_use(p))
 }
 
 /// Generic params with defaults stripped (for `impl<...>` / `trait<...>` / `struct<...>` headers).
@@ -155,12 +156,6 @@ pub(crate) enum LayerKind {
     Raw,
 }
 
-/// One wrapper level between the field and its head.
-#[derive(Clone, Copy)]
-pub(crate) struct ContLayer {
-    pub kind: LayerKind,
-}
-
 /// What sits at the innermost peeled position: a path head (a visited type) or a tuple (destructured, each
 /// element lowered recursively).
 pub(crate) enum Head {
@@ -172,7 +167,7 @@ pub(crate) enum Head {
 /// head is reachable; a type with no followed head is a leaf (`None`).
 pub(crate) struct Peeled {
     /// Wrapper levels between the field and the head, OUTER→INNER (empty ⇒ the field *is* the head).
-    pub conts: Vec<ContLayer>,
+    pub conts: Vec<LayerKind>,
     pub head: Head,
     /// The head sits behind a shared reference (`&T`) — visitable on the shared side but a leaf on the
     /// `&mut` side (no `&mut head` through a `&`). (`&mut T` is not flagged.)
@@ -180,7 +175,7 @@ pub(crate) struct Peeled {
 }
 
 fn prepend(kind: LayerKind, mut inner: Peeled) -> Peeled {
-    inner.conts.insert(0, ContLayer { kind });
+    inner.conts.insert(0, kind);
     inner
 }
 
@@ -211,7 +206,6 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
                     shared_ref: false,
                 });
             }
-            // Not a head: a `View` wrapper level iff a head is reachable through its element.
             peel(first_ty_arg(seg)?, user_types).map(|inner| prepend(LayerKind::View, inner))
         }
         // A tuple is a head iff some element is followed; each element is lowered by the caller.
@@ -226,7 +220,7 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
 
 /// The accessor for the head after peeling all `conts`: the field `binding` for a direct head, else the
 /// innermost loop var that `fold_containers` introduces.
-pub(crate) fn innermost_acc(conts: &[ContLayer], binding: &TokenStream) -> TokenStream {
+pub(crate) fn innermost_acc(conts: &[LayerKind], binding: &TokenStream) -> TokenStream {
     if conts.is_empty() {
         binding.clone()
     } else {
@@ -240,7 +234,7 @@ pub(crate) fn innermost_acc(conts: &[ContLayer], binding: &TokenStream) -> Token
 /// `OptView` by the compiler), a `Raw` level a `for` over the slice `iter[_mut]()`. Level `i` binds
 /// `__nc{i+1}`, iterating `__nc{i}` (or `binding` at `i == 0`) — so nested wrappers nest the loops.
 pub(crate) fn fold_containers(
-    conts: &[ContLayer],
+    conts: &[LayerKind],
     binding: &TokenStream,
     mut body: TokenStream,
     mutable: bool,
@@ -253,7 +247,7 @@ pub(crate) fn fold_containers(
             quote!(#e)
         };
         let elem = Ident::new(&format!("__nc{}", i + 1), Span::call_site());
-        let iter = match (layer.kind, mutable) {
+        let iter = match (*layer, mutable) {
             (LayerKind::View, true) => quote!(view_iter_mut),
             (LayerKind::View, false) => quote!(view_iter),
             (LayerKind::Raw, true) => quote!(iter_mut),

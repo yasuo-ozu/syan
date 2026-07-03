@@ -50,6 +50,14 @@ fn last_ident(path: &Path) -> &Ident {
     &path.segments.last().unwrap().ident
 }
 
+/// The `@base { .. }` token payload for a (maybe-present) inheritance base — its path, or empty.
+fn base_tokens(base: &Option<Path>) -> TokenStream {
+    match base {
+        Some(p) => quote!(#p),
+        None => quote!(),
+    }
+}
+
 /// Input to `__visitor_entry`: `@syan { <path> } [base =>] T, U, ...`.
 struct EntryInput {
     syan: Path,
@@ -79,10 +87,7 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
         abort!(Span::call_site(), "visitor!(..) needs at least one AST type");
     }
     let build: Path = parse_quote!(#syan::_imp::syan_macro::__visitor_build);
-    let base_tokens: TokenStream = match &args.base {
-        Some(p) => quote!(#p),
-        None => quote!(),
-    };
+    let base_tokens = base_tokens(&args.base);
     let nonce = nonce.to_string();
     let nonce: TokenStream = nonce.parse().unwrap();
     let all_types = &args.types;
@@ -581,10 +586,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             rest,
             ..
         } = &st;
-        let base_tokens: TokenStream = match base {
-            Some(p) => quote!(#p),
-            None => quote!(),
-        };
+        let base_tokens = base_tokens(base);
         let done_tokens = emit_done(done);
         let anc_tokens = emit_ancestors(base_ancestors);
         return quote! {
@@ -801,6 +803,14 @@ fn field_view(attrs: &[Attribute]) -> Option<Container> {
     }
 }
 
+/// The bare marker word (`"seq"`/`"opt"`) for a view kind, for diagnostics.
+fn marker_word(kind: &Container) -> &'static str {
+    match kind {
+        Container::Seq => "seq",
+        Container::Opt => "opt",
+    }
+}
+
 /// Lowers a visited type's `visit_*` body: a field followed via a *visited/inherited* head becomes a
 /// `this.visit_<head>(..)` method call; a field followed via an *unlisted intermediate* is drilled
 /// through inline (its def destructured, recursing into its `#[subast]` fields); any other field is
@@ -830,19 +840,13 @@ impl<'a> Lower<'a> {
     /// the `(head, kind)` usage so `gen_side` emits the method. `binding` is the `&mut <field>`, whose
     /// type `impl`s `SeqView<head>`/`OptView<head>` (box-transparently), so it is passed as-is.
     fn view_dispatch(&self, head: &Ident, binding: &TokenStream, kind: &Container) -> TokenStream {
-        let snake = to_snake(head);
-        match kind {
-            Container::Seq => {
-                self.seq_used.borrow_mut().insert(head.to_string());
-                let m = Ident::new(&format!("visit_{snake}_seq"), Span::call_site());
-                quote!( this.#m(#binding); )
-            }
-            Container::Opt => {
-                self.opt_used.borrow_mut().insert(head.to_string());
-                let m = Ident::new(&format!("visit_{snake}_opt"), Span::call_site());
-                quote!( this.#m(#binding); )
-            }
-        }
+        let (used, suffix) = match kind {
+            Container::Seq => (self.seq_used, "seq"),
+            Container::Opt => (self.opt_used, "opt"),
+        };
+        used.borrow_mut().insert(head.to_string());
+        let m = Ident::new(&format!("visit_{}_{suffix}", to_snake(head)), Span::call_site());
+        quote!( this.#m(#binding); )
     }
 
     /// Visit a value `access` (a `&head` / `&mut head` expression — the head is reached directly, any
@@ -865,7 +869,7 @@ impl<'a> Lower<'a> {
         let key = norm_path(drill_path);
         if stack.iter().any(|s| s == &key) {
             abort!(
-                Span::call_site(),
+                head,
                 "`#[subast]` cycle through unlisted intermediate `{}`: it cannot be drilled inline. \
                  List one of the cycle's types in `visitor!(..)` so a method call breaks the recursion",
                 head
@@ -874,7 +878,7 @@ impl<'a> Lower<'a> {
         let dt = match self.done_by_path.get(&key) {
             Some(dt) => *dt,
             None => abort!(
-                Span::call_site(),
+                head,
                 "internal: no metadata fetched for drilled type `{}` ({})",
                 head,
                 key
@@ -1006,10 +1010,7 @@ impl<'a> Lower<'a> {
             // field would route nowhere and silently no-op — abort so the mistake is caught here.
             None => {
                 if let Some(kind) = view {
-                    let marker = match kind {
-                        Container::Seq => "seq",
-                        Container::Opt => "opt",
-                    };
+                    let marker = marker_word(&kind);
                     abort!(
                         ty,
                         "a `#[{}]` field's element type is not a visited type — mark only a field whose \
@@ -1050,10 +1051,7 @@ impl<'a> Lower<'a> {
         // `Option` fails the bound). No container name is matched.
         if self.mutable {
             if let Some(kind) = view {
-                let marker = match kind {
-                    Container::Seq => "seq",
-                    Container::Opt => "opt",
-                };
+                let marker = marker_word(&kind);
                 let head = match &resolved {
                     Some((h, _)) if self.method_set.contains(&h.to_string()) => h,
                     _ => abort!(
@@ -1065,7 +1063,7 @@ impl<'a> Lower<'a> {
                     ),
                 };
                 match p.conts.as_slice() {
-                    [layer] if layer.kind == LayerKind::View => {}
+                    [LayerKind::View] => {}
                     [] => abort!(
                         ty,
                         "a `#[{}]` marker needs a container field (e.g. `Vec<{}>` / `Option<{}>`); this is a \
@@ -1384,26 +1382,22 @@ fn gen_side(
             let name = ident.to_string();
             let mname = method_ident_m(&ident, mutable).to_string();
             let tdoc = format!(
-                "Visit an `{name}` node. The default recurses into its children (via the free \
-                 [`{mname}`]); override to act on the node, calling `{mname}(self, i)` to continue \
-                 the descent."
+                "Visit an `{name}` node; the default recurses via [`{mname}`]. Override to act, calling \
+                 `{mname}(self, i)` to keep descending."
             );
             let fdoc = format!(
-                "Recurse into the children of an `{name}` node, dispatching each child to the \
-                 visitor's `visit_*{mut_sfx}` methods. [`{visit_tr}::{mname}`]'s default delegates \
-                 here; call it from an override to keep descending.",
+                "Recurse into an `{name}`'s children, dispatching each to `visit_*{mut_sfx}` \
+                 ([`{visit_tr}::{mname}`]'s default delegates here).",
                 mut_sfx = mt(mutable),
             );
             let seq_doc = format!(
-                "Edit the `{name}` nodes held in a `Vec`-like slot of their parent — given a \
-                 [`SeqView`](::syan::visit::SeqView) over the collection (edit in place via `view_iter_mut`/\
-                 `get_mut`, or restructure via `push`/`insert`/`remove`/`retain_mut`). The default visits \
-                 each element in place via `{mname}`; override to restructure the collection.",
+                "Structurally edit the `{name}` nodes in a `Vec`-like parent slot via a \
+                 [`SeqView`](::syan::visit::SeqView) (`push`/`insert`/`remove`/`retain_mut`/`view_iter_mut`); \
+                 default descends each via `{mname}`."
             );
             let opt_doc = format!(
-                "Edit the `{name}` node held in an `Option`-like slot of their parent — given an \
-                 [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`). The default visits the \
-                 present node via `{mname}`.",
+                "Structurally edit the `{name}` node in an `Option`-like parent slot via an \
+                 [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`); default descends it via `{mname}`."
             );
             let has_seq = mutable && seq_used.contains(&name);
             let has_opt = mutable && opt_used.contains(&name);
@@ -1439,22 +1433,17 @@ fn gen_side(
     // Chain impls) so a visited type like `enum Expr<S> where S: Bound { .. }` stays well-formed.
     let uw = where_clause(union_where);
 
-    // ── generated API docs ────────────────────────────────────────────────────────────────────────
+    // Generated API docs.
     let visited_list = sides.iter().map(|s| format!("`{}`", s.name)).collect::<Vec<_>>().join(", ");
     let entry = visit_method.to_string();
     let trait_doc = format!(
-        "Visitor over the AST node type(s) {visited_list} — generated by `visitor!`.\n\n\
-         Implement this trait on your visitor type and override the `visit_*{mut_sfx}` methods for the \
-         nodes you want to handle; each method's default recurses into that node's children. Start a \
-         traversal by calling `node.{entry}(&mut visitor)` on a root node.{base_note}",
+        "Visitor over {visited_list} (generated by `visitor!`). Override the `visit_*{mut_sfx}` methods \
+         you care about — each default recurses into that node's children; start with \
+         `node.{entry}(&mut visitor)`.{base_note}",
         mut_sfx = mt(mutable),
-        base_note = if mutable { " The by-`&mut`, in-place variant of `Visit`." } else { "" },
+        base_note = if mutable { " The by-`&mut` variant of `Visit`." } else { "" },
     );
-    let inherent_doc = format!(
-        "Visit `self` with `visitor` (any `{visit_tr}` impl) and return `self` so calls can chain. \
-         Entry point for {a} traversal.",
-        a = if mutable { "an in-place" } else { "a" },
-    );
+    let inherent_doc = format!("Visit `self` with any `{visit_tr}`, returning `self` to chain.");
 
     // Inherent `visit` / `visit_mut` per type (replaces the Visitable trait). Each type's own
     // params go on the impl; any extra union params go on the method (so a type that doesn't use
@@ -1531,7 +1520,9 @@ fn gen_side(
                         &mut self,
                         v: &mut #p_vw,
                     ) #{&s.trait_where} {
-                        #{&s.seq_method}(self, v)
+                        for __syan_e in ::syan::visit::SeqView::view_iter_mut(v) {
+                            self.#{&s.method}(__syan_e);
+                        }
                     }
                 }
                 #(if s.has_opt) {
@@ -1540,7 +1531,9 @@ fn gen_side(
                         &mut self,
                         v: &mut #p_ow,
                     ) #{&s.trait_where} {
-                        #{&s.opt_method}(self, v)
+                        if let ::core::option::Option::Some(__syan_e) = ::syan::visit::OptView::get_mut(v) {
+                            self.#{&s.method}(__syan_e);
+                        }
                     }
                 }
             }
@@ -1585,30 +1578,8 @@ fn gen_side(
                 use ::syan::visit::{OptView as _, SeqView as _};
                 #{&s.body}
             }
-            // Default container-edit descent: visit each held node in place via the per-node `visit_*_mut`
-            // (so a `visit_*_mut` override / closure hook still runs for every element).
-            #(if s.has_seq) {
-                #[doc = #{&s.seq_doc}]
-                pub fn #{&s.seq_method}< #(for gp in &s.free_params) { #gp, } #p_vw: ::syan::visit::SeqView< #{&s.ty} >, #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >(
-                    this: &mut #p_v,
-                    v: &mut #p_vw,
-                ) #{&s.free_where} {
-                    for __syan_e in ::syan::visit::SeqView::view_iter_mut(v) {
-                        this.#{&s.method}(__syan_e);
-                    }
-                }
-            }
-            #(if s.has_opt) {
-                #[doc = #{&s.opt_doc}]
-                pub fn #{&s.opt_method}< #(for gp in &s.free_params) { #gp, } #p_ow: ::syan::visit::OptView< #{&s.ty} >, #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >(
-                    this: &mut #p_v,
-                    v: &mut #p_ow,
-                ) #{&s.free_where} {
-                    if let ::core::option::Option::Some(__syan_e) = ::syan::visit::OptView::get_mut(v) {
-                        this.#{&s.method}(__syan_e);
-                    }
-                }
-            }
+            // The `visit_*_seq`/`_opt` container-edit views have no free fn: their default descent is
+            // inlined into the trait-method default (they just iterate the view calling `visit_*_mut`).
         }
     };
 
@@ -1621,7 +1592,7 @@ fn gen_side(
             fn #into_vis_fn(self) -> impl #visit_tr #g_use { self }
         }
 
-        // --- closures: shallow Hook + single-pass Driver ---------------------------------
+        // Closures: shallow Hook + single-pass Driver.
         pub trait #hook_tr #g_def #uw {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { let _ = i; }
@@ -1667,7 +1638,7 @@ fn gen_side(
             }
         }
 
-        // --- multiple closures: a 2-tuple of hooks is itself a hook (calls both), so it is the
+        // Multiple closures: a 2-tuple of hooks is itself a hook (calls both), so it is the
         // tuple-of-closures combinator directly — no `Chain` newtype. `build_chain` nests them right.
         impl< #(#g_params,)* #p_a: #hook_tr #g_use, #p_b: #hook_tr #g_use >
             #hook_tr #g_use for ( #p_a, #p_b ) #uw
@@ -1798,7 +1769,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         if let Some(prev) = seg_seen.insert(seg.clone(), np.clone()) {
             if prev != np {
                 abort!(
-                    Span::call_site(),
+                    p,
                     "two visited types share the last segment `{}` (`{}` vs `{}`); their generated \
                      `visit_*`/`*Hook` names would collide — give them distinct final idents",
                     seg,
@@ -1835,7 +1806,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .filter(|d| item_ident(&d.def).is_some_and(|id| visited.contains(&id.to_string())))
         .collect();
     if targets.is_empty() {
-        abort!(Span::call_site(), "no AST definitions resolved for the visitor");
+        let at = st.visited.first().map_or_else(Span::call_site, |p| last_ident(p).span());
+        abort!(at, "no AST definitions resolved for the visitor");
     }
 
     // The visitor trait is parameterized by the *union* of every visited type's generic params (+ the

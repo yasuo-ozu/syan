@@ -75,7 +75,7 @@ impl<S> visit::VisitMut<S> for ParentEditor {
         b.stmts.retain(|s| s.0 != 0);
         b.stmts.push(Stmt(99, PhantomData));
         b.tail = None;
-        visit::visit_block_mut(self, b); // descend
+        visit::visit_block_mut(self, b);
     }
 }
 
