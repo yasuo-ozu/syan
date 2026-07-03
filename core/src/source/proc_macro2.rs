@@ -1,7 +1,6 @@
 use crate::error::{Error, ParseError};
-use crate::nested::group::{Group, GroupBrace, GroupBracket, GroupParen};
+use crate::nested::group::{Brace, Bracket, Delim, Group, Paren, TClose, TOpen};
 use crate::parse::{unparse::Emitter, IntoParseStream, Parse, ParseStream, Unparse};
-use crate::span::WithSpan;
 use crate::symbol::Symbol;
 
 pub mod literal;
@@ -198,49 +197,69 @@ impl<T: Default + core::fmt::Display> Unparse<proc_macro2::TokenTree> for Symbol
     }
 }
 
-macro_rules! impl_for_group {
-    ($($t0:ident $(:: $t:ident)*, $delim:path),* $(,)?) => {
-        $(
-            impl<T> Parse<proc_macro2::TokenTree> for $t0 $(::$t)*<T, Span>
-            where
-                T: Parse<proc_macro2::TokenTree>,
-            {
-                type Error = ParseError;
-
-                fn parse(
-                    stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
-                ) -> Result<Self, Self::Error> {
-                    let mut stream = stream.into_parse_stream();
-                    match stream.next() {
-                        Some(proc_macro2::TokenTree::Group(group)) if group.delimiter() == $delim => {
-                            let inner_stream = Stream::new(group.stream());
-                            let slot = T::parse(inner_stream).map_err(|e| e.into_parse_error())?;
-                            return Ok(Group {
-                                open: WithSpan {
-                                    span: group.span_open().into(),
-                                    slot: Default::default(),
-                                },
-                                slot,
-                                close: WithSpan {
-                                    span: group.span_close().into(),
-                                    slot: Default::default(),
-                                },
-                            });
-                        }
-                        Some(token) => {
-                            stream.push(token);
-                            Err(ParseError::new(Span::default(), "expected group"))
-                        }
-                        None => Err(ParseError::new(Span::default(), "unexpected end of input")),
-                    }
-                }
-            }
-        )*
-    };
+// `proc_macro2::TokenTree` is the **tree-family** atom: a delimited group is a *single*
+// `TokenTree::Group`, not three delimiter atoms. So the whole `Group` is parsed/unparsed as one atom,
+// keyed on the delimiter marker `D` (in the `TOpen`/`TClose` carriers) rather than on standalone leaf
+// tokens — one delimiter-generic pair of impls in place of the former three hand-written per-delimiter
+// impls. `Pm2Delim` maps each marker to its `proc_macro2::Delimiter`, and — being implemented only for
+// the three concrete markers — restricts these impls to them (a downstream `Delim` marker does not get
+// the tree impls). Coherence with the flat-family `Group` blankets (`nested::group`) holds because the
+// `TOpen`/`TClose` heads never implement `Parse`/`Unparse` for any atom.
+trait Pm2Delim: Delim {
+    const DELIMITER: proc_macro2::Delimiter;
 }
 
-impl_for_group! {
-    GroupParen, proc_macro2::Delimiter::Parenthesis,
-    GroupBrace, proc_macro2::Delimiter::Brace,
-    GroupBracket, proc_macro2::Delimiter::Bracket,
+impl Pm2Delim for Paren {
+    const DELIMITER: proc_macro2::Delimiter = proc_macro2::Delimiter::Parenthesis;
+}
+impl Pm2Delim for Brace {
+    const DELIMITER: proc_macro2::Delimiter = proc_macro2::Delimiter::Brace;
+}
+impl Pm2Delim for Bracket {
+    const DELIMITER: proc_macro2::Delimiter = proc_macro2::Delimiter::Bracket;
+}
+
+impl<D, T> Parse<proc_macro2::TokenTree> for Group<T, TOpen<D, Span>, TClose<D, Span>>
+where
+    D: Pm2Delim,
+    T: Parse<proc_macro2::TokenTree>,
+{
+    type Error = ParseError;
+
+    fn parse(
+        stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
+    ) -> Result<Self, Self::Error> {
+        let mut stream = stream.into_parse_stream();
+        match stream.next() {
+            Some(proc_macro2::TokenTree::Group(group)) if group.delimiter() == D::DELIMITER => {
+                let inner_stream = Stream::new(group.stream());
+                let slot = T::parse(inner_stream).map_err(|e| e.into_parse_error())?;
+                Ok(Group {
+                    open: TOpen::new(group.span_open().into()),
+                    slot,
+                    close: TClose::new(group.span_close().into()),
+                })
+            }
+            Some(token) => {
+                stream.push(token);
+                Err(ParseError::new(Span::default(), "expected group"))
+            }
+            None => Err(ParseError::new(Span::default(), "unexpected end of input")),
+        }
+    }
+}
+
+impl<D, T, S> Unparse<proc_macro2::TokenTree> for Group<T, TOpen<D, S>, TClose<D, S>>
+where
+    D: Pm2Delim,
+    T: Unparse<proc_macro2::TokenTree>,
+{
+    fn unparse<E: Emitter<proc_macro2::TokenTree>>(&self, sink: &mut E) -> Result<(), E::Error> {
+        let mut inner = Vec::<proc_macro2::TokenTree>::new();
+        // The sub-emitter (`&mut Vec`) is `Infallible`, so this never errors.
+        self.slot.unparse(&mut (&mut inner)).unwrap();
+        let stream: proc_macro2::TokenStream = inner.into_iter().collect();
+        let group = proc_macro2::Group::new(D::DELIMITER, stream);
+        sink.write_one(proc_macro2::TokenTree::Group(group))
+    }
 }
