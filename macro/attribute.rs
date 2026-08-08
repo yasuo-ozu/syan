@@ -137,6 +137,20 @@ fn add_type_param_predicates(
     }
 }
 
+/// Append the user-written where-clause predicates (if any) onto the macro-synthesized
+/// `where_predicates`, so the generated impl carries both the synthesized bounds and the user's
+/// own bounds (otherwise a `where`-clause is dropped and the Self type fails well-formedness).
+fn append_user_where_predicates(
+    where_predicates: &mut Punctuated<WherePredicate, Token![,]>,
+    generics: &Generics,
+) {
+    if let Some(where_clause) = &generics.where_clause {
+        for predicate in &where_clause.predicates {
+            where_predicates.push(predicate.clone());
+        }
+    }
+}
+
 impl FindAttribute for Field {
     fn find_attribute<I: ?Sized>(&self, name: &I) -> Option<&Attribute>
     where
@@ -292,7 +306,6 @@ pub(crate) trait Adt {
         nonce: u64,
         trait_path: &Path,
     ) -> TokenStream {
-        assert!(generics.where_clause.is_none());
         let tp_atom: Ident = parse_quote!(__SyanMacro_Atom);
         let trait_path_owned: Path = trait_path.clone();
         let trait_fullpath: Path = parse_quote!(#trait_path_owned<#tp_atom>);
@@ -442,12 +455,15 @@ pub(crate) trait Adt {
                     &substruct.generics,
                     &substruct.ident,
                     nonce,
-                    &trait_path,
+                    trait_path,
                 )
             })
             .collect();
         let substructs_for_emit: Vec<ItemStruct> =
             substructs.iter().map(strip_derive_helper_attrs).collect();
+        // Thread the user's where-clause predicates into the generated impl (merged with the
+        // synthesized bounds) so a Parse-derived type may carry a where-clause.
+        append_user_where_predicates(&mut where_predicates, generics);
         quote! {
             #(for substruct in &substructs_for_emit) {
                 #substruct
@@ -592,6 +608,9 @@ pub(crate) trait Adt {
             .collect();
         let substructs_for_emit: Vec<ItemStruct> =
             substructs.iter().map(strip_derive_helper_attrs).collect();
+        // Thread the user's where-clause predicates into the generated impl (merged with the
+        // synthesized bounds); otherwise the Self type fails WF with "required by a bound in <T>".
+        append_user_where_predicates(&mut where_predicates, generics);
         quote! {
             #(for substruct in &substructs_for_emit) {
                 #substruct
@@ -655,11 +674,18 @@ pub(crate) trait Adt {
         let mut wrapper_counter = 0usize;
 
         let span_impl = self.extract_inner(ident, &v_self, |fields| {
-            for (_, _, Field { attrs, .. }) in fields {
+            for (_, _, field) in fields {
                 // Skip fields with #[default] attribute - they don't contribute to span
-                if attrs.has_default() {
+                if field.has_default() {
                     continue;
                 }
+                // Every folded field must report the impl's span type `__Syan_Span`. Constraining it
+                // here pins the invented span param (fixes E0207 "unconstrained") and makes the
+                // `Span::migrate(acc, Spanned::span(field))` fold type-check (fixes E0308) for
+                // composite / bounded field types like `WithSpan<_, S>`. (For a bare unbounded type
+                // param, add_type_param_predicates already adds the matching bound — harmless dup.)
+                let field_ty = &field.ty;
+                where_predicates.push(parse_quote!(#field_ty: #syan::span::Spanned<Span = #tp_span>));
             }
             let ret = quote! {
                 let __syan_span = <#tp_span as ::core::default::Default>::default();
@@ -678,6 +704,9 @@ pub(crate) trait Adt {
             ret
         });
 
+        // Thread the user's where-clause predicates into the generated impl (merged with the
+        // synthesized bounds); otherwise the Self type fails WF with "required by a bound in <T>".
+        append_user_where_predicates(&mut where_predicates, generics);
         quote! {
             #[automatically_derived]
             impl <#generic_params> #trait_fullpath for #ident #ty_generics

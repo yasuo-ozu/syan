@@ -1,0 +1,7 @@
+error: visitor!() over a `#[recurse]` cycle: acyclic type `Program` has generic param `T` not carried by any cycle root; the depth-generic `VisitRec` impls are keyed on the roots' params, so this param would be unconstrained. Give `Program` only params the roots also have, or visit it from a separate `visitor!()`.
+  --> tests/ui/visitor_recurse_mixed_acyclic_extra_param.rs:34:5
+   |
+34 |     syan::visit::visitor!(crate::Program, crate::ast::Expr);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

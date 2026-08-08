@@ -23,8 +23,8 @@ error[E0308]: mismatched types
    |                                        |
    |                                        arguments to this function are incorrect
    |
-   = note: expected reference `&__ExprRec<_, __ExprRec<_, __ExprRec<_, __ExprRec<_, ExprTerm>>>>`
-              found reference `&__ExprRec<S, __ExprRec<S, __ExprRec<S, ExprTerm>>>`
+   = note: expected reference `&__ExprRec<_, __ExprRec<_, __ExprRec<_, __ExprRec<_, ExprTerm<_>>>>>`
+              found reference `&__ExprRec<S, __ExprRec<S, __ExprRec<S, ExprTerm<S>>>>`
 note: function defined here
   --> tests/ui/problem2_free_fn.rs:22:12
    |

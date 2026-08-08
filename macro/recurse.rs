@@ -1,11 +1,13 @@
+use crate::ast::{cleaned_item, crate_rooted_tokens, parse_subast, subast_tokens};
+use crate::util::{param_tokens, to_snake};
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
-use proc_macro_error::emit_warning;
+use proc_macro_error::{abort, set_dummy};
 use std::collections::{HashMap, HashSet};
 use syn::{
     punctuated::Punctuated, AngleBracketedGenericArguments, Fields, FieldsNamed, FieldsUnnamed,
     FnArg, GenericArgument, GenericParam, Generics, ImplItem, Item, ItemMod, Path, PathArguments,
-    PathSegment, ReturnType, Token, Type, TypeParam, TypePath, Visibility,
+    ReturnType, Token, Type, TypePath, Visibility,
 };
 use template_quote::quote;
 
@@ -18,21 +20,22 @@ struct RecurseArgs {
 
 impl syn::parse::Parse for RecurseArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        if input.is_empty() {
-            return Ok(RecurseArgs {
-                limit: DEFAULT_RECURSION_DEPTH,
-            });
+        let mut limit = DEFAULT_RECURSION_DEPTH;
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            if ident == "limit" {
+                let _: Token![=] = input.parse()?;
+                let lit: syn::LitInt = input.parse()?;
+                limit = lit.base10_parse()?;
+            } else {
+                return Err(syn::Error::new(ident.span(), "expected `limit = <integer>`"));
+            }
+            if input.peek(Token![,]) {
+                let _: Token![,] = input.parse()?;
+            } else {
+                break;
+            }
         }
-        let ident: Ident = input.parse()?;
-        if ident != "limit" {
-            return Err(syn::Error::new(
-                ident.span(),
-                "expected `limit = <integer>`",
-            ));
-        }
-        let _: Token![=] = input.parse()?;
-        let lit: syn::LitInt = input.parse()?;
-        let limit: usize = lit.base10_parse()?;
         Ok(RecurseArgs { limit })
     }
 }
@@ -41,12 +44,22 @@ struct TransformCtx {
     cycle_types: HashSet<String>,
     root_types: HashSet<String>,
     internal_names: HashMap<String, Ident>,
-    rec_param: Ident,
-    default_alias: Ident,
-    /// All type parameters of the root type (in order), used for depth-aliases and defaults.
-    root_type_params: Vec<Ident>,
-    /// Original type-parameter count for each cycle type (before extra root params are added).
-    cycle_orig_param_counts: HashMap<String, usize>,
+    /// Depth parameters, **one per root** of this cycle, in canonical (sorted-root) order: `[__Rec]`
+    /// for a single root, `[__RecA, __RecB, …]` for several. Appended in this order to every renamed
+    /// cycle type and threaded (all of them) through every cross-edge.
+    rec_params: Vec<Ident>,
+    /// Root type name → its own depth parameter. A back-edge to root `X` collapses to `root_rec[X]`
+    /// (so with several roots each self-edge keeps its own depth dimension, unambiguously).
+    root_rec: HashMap<String, Ident>,
+    /// The depth parameters as generic-param **declarations with defaults**, appended to a renamed
+    /// cycle type: `[__Rec = __XDefault<S, …>]` (single) or one per root (`__RecA = __ADefault<S>`, …).
+    rec_decls: Vec<TokenStream>,
+    /// Per root type, its own declared generic params as *use*-form normalized token strings (e.g.
+    /// `["'a", "S", "N"]`). A back-edge to a root collapses to its depth param, so its generic
+    /// arguments must be the *identity* (the root's own params, unchanged) — there is nowhere to
+    /// thread a different param like `Expr<Vec<S>>`. `transform_type` checks a root reference's args
+    /// against this and aborts on a mismatch instead of silently dropping the param.
+    root_ident_args: HashMap<String, Vec<String>>,
 }
 
 fn collect_refs(ty: &Type, known: &HashSet<String>, out: &mut HashSet<String>) {
@@ -126,32 +139,55 @@ fn collect_direct_refs_item(item: &Item, known: &HashSet<String>) -> HashSet<Str
     out
 }
 
-fn can_reach(
-    from: &str,
-    target: &str,
-    graph: &HashMap<String, HashSet<String>>,
-    visited: &mut HashSet<String>,
-) -> bool {
-    for next in graph.get(from).into_iter().flatten() {
-        if next == target {
-            return true;
-        }
-        if visited.insert(next.clone()) && can_reach(next, target, graph, visited) {
-            return true;
+/// The *recursive* strongly-connected components of the reference `graph`, via Tarjan's algorithm
+/// (`safegraph`). Each returned set is one **independent cycle**: a non-trivial SCC (mutual recursion
+/// of size > 1, including longer cycles) or a singleton SCC carrying a self-loop (a directly self-
+/// referential type). Non-recursive singletons are omitted. Two types share a set iff they are
+/// mutually reachable, so independent cycles in one module come back as *separate* sets — each gets
+/// its own recurse machinery. The Vec is sorted by each SCC's least type name for deterministic codegen.
+fn find_cycle_sccs(graph: &HashMap<String, HashSet<String>>) -> Vec<HashSet<String>> {
+    use safegraph::algo::connectivity::tarjan_scc;
+    use safegraph::graph::Graph;
+    use safegraph::BTreeGraph;
+
+    // Build the directed reference graph. `safegraph`'s map-backed graph keys nodes by their value
+    // (which must be `Copy`), so each type name gets a small `u32` id (its position in `names`);
+    // edges carry a bare unique counter (edges are keyed by value too).
+    let names: Vec<&String> = graph.keys().collect();
+    let id_of: HashMap<&str, u32> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i as u32))
+        .collect();
+
+    let mut g = BTreeGraph::<u32, u32>::default();
+    let node_ix: Vec<_> = (0..names.len() as u32)
+        .map(|i| g.insert_node(i).unwrap())
+        .collect();
+    let mut edge_id = 0u32;
+    for (from, tos) in graph {
+        let fi = node_ix[id_of[from.as_str()] as usize];
+        for to in tos {
+            if let Some(&tid) = id_of.get(to.as_str()) {
+                g.push_edge(edge_id, [fi, node_ix[tid as usize]]).unwrap();
+                edge_id += 1;
+            }
         }
     }
-    false
-}
 
-fn find_cycle_types(graph: &HashMap<String, HashSet<String>>) -> HashSet<String> {
-    graph
-        .keys()
-        .filter(|name| {
-            let mut visited = HashSet::new();
-            can_reach(name, name, graph, &mut visited)
-        })
-        .cloned()
-        .collect()
+    let mut sccs: Vec<HashSet<String>> = Vec::new();
+    for scc in tarjan_scc(&g) {
+        if scc.len() > 1 {
+            sccs.push(scc.iter().map(|&n| names[*g.node(n) as usize].clone()).collect());
+        } else {
+            let name = names[*g.node(scc[0]) as usize];
+            if graph.get(name).is_some_and(|refs| refs.contains(name)) {
+                sccs.push(std::iter::once(name.clone()).collect());
+            }
+        }
+    }
+    sccs.sort_by(|a, b| a.iter().min().cmp(&b.iter().min()));
+    sccs
 }
 
 fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
@@ -160,10 +196,41 @@ fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
             if let Some(seg) = path.segments.first() {
                 let name = seg.ident.to_string();
                 if ctx.root_types.contains(&name) {
-                    let p = &ctx.rec_param;
+                    // A back-edge to the root collapses to the single opaque depth param `__Rec`, so
+                    // any generic arguments it supplies must be the root's own params unchanged. A
+                    // non-identity argument (`Expr<Vec<S>>`, `Expr<u8>`, reordered params, …) would be
+                    // silently dropped here and miscompile; reject it instead.
+                    if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+                        if let Some(identity) = ctx.root_ident_args.get(&name) {
+                            let actual: Vec<String> =
+                                ab.args.iter().map(|a| quote!(#a).to_string()).collect();
+                            if &actual != identity {
+                                abort!(
+                                    seg.ident,
+                                    "#[recurse]: the reference to recursion root `{}` carries \
+                                     generic arguments `<{}>` that differ from its declared \
+                                     parameters `<{}>`. A root reference is the cycle's back-edge \
+                                     and collapses to the single depth parameter `__Rec`, so it \
+                                     must repeat the root's parameters verbatim; a non-identity \
+                                     argument (e.g. `{}<Vec<{}>>`) is unsupported. Move the \
+                                     differing part into its own `#[derive(Ast)]` type, or pass the \
+                                     root's parameters unchanged.",
+                                    name,
+                                    actual.join(", "),
+                                    identity.join(", "),
+                                    name,
+                                    identity.first().map(String::as_str).unwrap_or("S"),
+                                );
+                            }
+                        }
+                    }
+                    let p = &ctx.root_rec[&name];
                     return syn::parse_quote!(#p);
                 }
                 if let Some(internal) = ctx.internal_names.get(&name) {
+                    // A cross-edge to another cycle type: keep its generic args as written (a
+                    // back-edge to a root inside them becomes that root's depth param) and append all
+                    // of the cycle's depth params.
                     let existing: Vec<GenericArgument> =
                         if let PathArguments::AngleBracketed(ab) = &seg.arguments {
                             ab.args
@@ -178,40 +245,8 @@ fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
                         } else {
                             vec![]
                         };
-                    // Insert extra root type params (those beyond this type's original count).
-                    let orig_count = ctx
-                        .cycle_orig_param_counts
-                        .get(&name)
-                        .copied()
-                        .unwrap_or(existing.len());
-                    let rec = &ctx.rec_param;
-                    let mut args: Punctuated<GenericArgument, Token![,]> =
-                        existing.into_iter().collect();
-                    for p in ctx.root_type_params.iter().skip(orig_count) {
-                        args.push(syn::parse_quote!(#p));
-                    }
-                    args.push(syn::parse_quote!(#rec));
-                    return Type::Path(TypePath {
-                        qself: None,
-                        path: Path {
-                            leading_colon: None,
-                            segments: {
-                                let mut s = Punctuated::new();
-                                s.push(PathSegment {
-                                    ident: internal.clone(),
-                                    arguments: PathArguments::AngleBracketed(
-                                        AngleBracketedGenericArguments {
-                                            colon2_token: None,
-                                            lt_token: Default::default(),
-                                            args,
-                                            gt_token: Default::default(),
-                                        },
-                                    ),
-                                });
-                                s
-                            },
-                        },
-                    });
+                    let recs = &ctx.rec_params;
+                    return syn::parse_quote!( #internal < #(#existing,)* #(#recs),* > );
                 }
             }
             // Non-cycle path: recurse into generic args
@@ -266,18 +301,31 @@ fn transform_fields(fields: &mut Fields, ctx: &TransformCtx) {
     }
 }
 
-fn all_type_params(generics: &Generics) -> Vec<Ident> {
-    generics
-        .params
-        .iter()
-        .filter_map(|p| {
-            if let GenericParam::Type(TypeParam { ident, .. }) = p {
-                Some(ident.clone())
-            } else {
-                None
-            }
-        })
-        .collect()
+/// A stable identity for a generic param (kind + name + const type), used to compare a cycle type's
+/// params against the root's.
+fn param_key(p: &GenericParam) -> String {
+    match p {
+        GenericParam::Lifetime(lt) => format!("lifetime {}", lt.lifetime.ident),
+        GenericParam::Type(t) => format!("type {}", t.ident),
+        GenericParam::Const(c) => {
+            let ty = &c.ty;
+            format!("const {}: {}", c.ident, quote!(#ty))
+        }
+    }
+}
+
+/// A type's generic params as `(declaration, use)` token lists, in declaration order. Used both for
+/// the root (the depth chain) and per cycle type (its own alias / node type), so a recurse cycle may
+/// carry lifetimes / type params / const params alongside the depth `__Rec`.
+fn generic_tokens(generics: &Generics) -> (Vec<TokenStream>, Vec<TokenStream>) {
+    let mut decl = Vec::new();
+    let mut us = Vec::new();
+    for p in &generics.params {
+        let (d, u) = param_tokens(p);
+        decl.push(d);
+        us.push(u);
+    }
+    (decl, us)
 }
 
 fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
@@ -287,22 +335,12 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
                 && ctx.cycle_types.contains(&e.ident.to_string()) =>
         {
             let orig_name = e.ident.to_string();
-            let orig_count = ctx
-                .cycle_orig_param_counts
-                .get(&orig_name)
-                .copied()
-                .unwrap_or(0);
             e.ident = ctx.internal_names[&orig_name].clone();
-            let rec = &ctx.rec_param;
-            let default_alias = &ctx.default_alias;
-            // Append extra root params (those not in this type's original generics).
-            for p in ctx.root_type_params.iter().skip(orig_count) {
-                e.generics.params.push(syn::parse_quote!(#p));
+            // Keep this type's own params and append one depth param per root (each defaulting to
+            // that root's depth chain, spelled with the root's params — which every cycle type shares).
+            for d in &ctx.rec_decls {
+                e.generics.params.push(syn::parse_quote!(#d));
             }
-            let root_params = &ctx.root_type_params;
-            e.generics
-                .params
-                .push(syn::parse_quote!(#rec = #default_alias<#(#root_params),*>));
             for variant in &mut e.variants {
                 transform_fields(&mut variant.fields, ctx);
             }
@@ -313,21 +351,10 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
                 && ctx.cycle_types.contains(&s.ident.to_string()) =>
         {
             let orig_name = s.ident.to_string();
-            let orig_count = ctx
-                .cycle_orig_param_counts
-                .get(&orig_name)
-                .copied()
-                .unwrap_or(0);
             s.ident = ctx.internal_names[&orig_name].clone();
-            let rec = &ctx.rec_param;
-            let default_alias = &ctx.default_alias;
-            for p in ctx.root_type_params.iter().skip(orig_count) {
-                s.generics.params.push(syn::parse_quote!(#p));
+            for d in &ctx.rec_decls {
+                s.generics.params.push(syn::parse_quote!(#d));
             }
-            let root_params = &ctx.root_type_params;
-            s.generics
-                .params
-                .push(syn::parse_quote!(#rec = #default_alias<#(#root_params),*>));
             transform_fields(&mut s.fields, ctx);
             Item::Struct(s)
         }
@@ -345,14 +372,9 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
 
             if let Some(name) = cycle_name {
                 let internal = ctx.internal_names[&name].clone();
-                let rec = &ctx.rec_param;
-                let orig_count = ctx.cycle_orig_param_counts.get(&name).copied().unwrap_or(0);
+                let recs = &ctx.rec_params;
 
-                // Extra root params to thread into this impl block.
-                let extra_root_params: Vec<&Ident> =
-                    ctx.root_type_params.iter().skip(orig_count).collect();
-
-                // Rename self_ty, add extra root params, and append __Rec type argument.
+                // Rename self_ty (keeping its own generic args) and append one depth type-arg per root.
                 if let Type::Path(TypePath { path, .. }) = impl_block.self_ty.as_mut() {
                     if let Some(seg) = path.segments.first_mut() {
                         seg.ident = internal;
@@ -363,18 +385,16 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
                                         *t = transform_type(t, ctx);
                                     }
                                 }
-                                for p in &extra_root_params {
-                                    ab.args.push(syn::parse_quote!(#p));
+                                for r in recs {
+                                    ab.args.push(syn::parse_quote!(#r));
                                 }
-                                ab.args.push(syn::parse_quote!(#rec));
                             }
                             PathArguments::None => {
                                 let mut args: Punctuated<GenericArgument, Token![,]> =
                                     Punctuated::new();
-                                for p in &extra_root_params {
-                                    args.push(syn::parse_quote!(#p));
+                                for r in recs {
+                                    args.push(syn::parse_quote!(#r));
                                 }
-                                args.push(syn::parse_quote!(#rec));
                                 seg.arguments =
                                     PathArguments::AngleBracketed(AngleBracketedGenericArguments {
                                         colon2_token: None,
@@ -388,11 +408,10 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
                     }
                 }
 
-                // Add extra root params + __Rec to impl generics (no defaults — not allowed).
-                for p in &extra_root_params {
-                    impl_block.generics.params.push(syn::parse_quote!(#p));
+                // Add the depth params to the impl generics (no defaults — not allowed on an impl).
+                for r in recs {
+                    impl_block.generics.params.push(syn::parse_quote!(#r));
                 }
-                impl_block.generics.params.push(syn::parse_quote!(#rec));
 
                 // Transform types in method signatures (params + return type)
                 for item in &mut impl_block.items {
@@ -415,7 +434,737 @@ fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
     }
 }
 
-pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
+// ---------------------------------------------------------------------------
+// Multi-root soundness guard.
+//
+// `#[recurse]` only emits the depth-limited *types* + `@recurse` metadata; the depth-generic visitor
+// is built by `visitor!(<cycle types>)` (see `macro/visitor.rs`). The depth decrements only at a
+// self-referential root, so a multi-root cycle whose roots are not a feedback vertex set would not
+// terminate — `subgraph_is_cyclic` rejects that at the type level.
+// ---------------------------------------------------------------------------
+
+/// Is the subgraph induced by the cycle's **non-root** types cyclic? Used as the multi-root soundness
+/// guard: the depth only decrements at a self-referential root, so a cycle running entirely through
+/// non-root types would never terminate. Built and tested with `safegraph` (same `u32`-keyed graph as
+/// `find_cycle_sccs`, restricted to `scc \ root_types`).
+fn subgraph_is_cyclic(
+    scc: &HashSet<String>,
+    root_types: &HashSet<String>,
+    type_refs: &HashMap<String, HashSet<String>>,
+) -> bool {
+    use safegraph::algo::connectivity::is_cyclic_directed;
+    use safegraph::graph::Graph;
+    use safegraph::BTreeGraph;
+
+    let nodes: Vec<&String> = scc.iter().filter(|n| !root_types.contains(*n)).collect();
+    let id_of: HashMap<&str, u32> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i as u32))
+        .collect();
+    let mut g = BTreeGraph::<u32, u32>::default();
+    let node_ix: Vec<_> = (0..nodes.len() as u32)
+        .map(|i| g.insert_node(i).unwrap())
+        .collect();
+    let mut edge_id = 0u32;
+    for n in &nodes {
+        let fi = node_ix[id_of[n.as_str()] as usize];
+        for to in type_refs.get(n.as_str()).into_iter().flatten() {
+            if let Some(&tid) = id_of.get(to.as_str()) {
+                g.push_edge(edge_id, [fi, node_ix[tid as usize]]).unwrap();
+                edge_id += 1;
+            }
+        }
+    }
+    is_cyclic_directed(&g)
+}
+
+/// A `$crate::<mod>::<ident>` path, `$crate`-rooted via `crate_rooted_tokens` so it resolves to the
+/// defining crate even when the metadata macro is expanded downstream (mirrors `#[derive(Ast)]`'s
+/// `crate::`-rooted `#[subast]` paths). Used to spell `@node`/`@terms` in the recurse metadata.
+fn mod_local_path(mod_ident: &Ident, item: &Ident) -> TokenStream {
+    let path: Path = syn::parse_quote!(crate::#mod_ident::#item);
+    crate_rooted_tokens(&path)
+}
+
+/// Emit, for **each cycle type** of an SCC, a `#[macro_export]` muncher metadata macro re-exported
+/// under the type's *original* name (so it is reachable as `path::to::X! { .. }`, coexisting with the
+/// `pub type X = …` alias — the macro and type namespaces don't clash, exactly as `#[derive(Ast)]`
+/// places a macro and a type under one ident). The macro answers the visitor's fetch
+/// `X! { @ast $cb { $pre } }` by appending this type's ORIGINAL (pre-transform) cleaned definition,
+/// its `#[subast]` allowlist, and a `@recurse { … }` section keyed on by `visitor!()`:
+///
+/// ```text
+/// @recurse {
+///     @node  { $crate::ast::__XRec }   // depth-generic node type for X (per type)
+///     @roots { A B }                   // root idents of the SCC      (SCC-level)
+///     @depth { __RecA __RecB }         // depth-param idents, parallel to @roots
+///     @terms { $crate::ast::ATerm $crate::ast::BTerm }  // terminator paths, parallel to @roots
+///     @cycle { A B C }                 // all cycle-type idents in the SCC
+/// }
+/// ```
+///
+/// The muncher shape (the `@ast`/`@subast` prefix) mirrors `#[derive(Ast)]`'s metadata macro so the
+/// consumer parses a `#[recurse]`-supplied def identically; `@recurse` is the only addition. Purely
+/// additive: the renamed `__XRec` keeps its own `#[derive(Ast)]` metadata macro; this is a *new* macro
+/// under the original name. `roots_sorted` fixes the parallel order of `@roots`/`@depth`/`@terms`;
+/// `rec_for_root` maps a root to its depth param (`__Rec` single-root, `__Rec<Root>` multi-root); each
+/// root's terminator is `<Root>Term`.
+fn recurse_metadata_macros(
+    scc: &HashSet<String>,
+    items: &[Item],
+    internal_names: &HashMap<String, Ident>,
+    roots_sorted: &[String],
+    rec_for_root: &HashMap<String, Ident>,
+    mod_ident: &Ident,
+    nonce: u64,
+) -> TokenStream {
+    // SCC-level `@recurse` rows (identical for every cycle type): roots, their depth params, their
+    // terminator paths (all parallel in `roots_sorted` order), and every cycle-type ident.
+    let root_idents: Vec<Ident> = roots_sorted
+        .iter()
+        .map(|r| Ident::new(r, Span::call_site()))
+        .collect();
+    let depth_idents: Vec<&Ident> = roots_sorted.iter().map(|r| &rec_for_root[r]).collect();
+    let term_paths: Vec<TokenStream> = roots_sorted
+        .iter()
+        .map(|r| mod_local_path(mod_ident, &Ident::new(&format!("{r}Term"), Span::call_site())))
+        .collect();
+    let mut cycle_names: Vec<String> = scc.iter().cloned().collect();
+    cycle_names.sort();
+    let cycle_idents: Vec<Ident> = cycle_names
+        .iter()
+        .map(|n| Ident::new(n, Span::call_site()))
+        .collect();
+
+    // One metadata macro per cycle type, in deterministic (sorted) order.
+    let macros: Vec<TokenStream> = items
+        .iter()
+        .filter_map(|item| {
+            let (orig_ident, attrs): (&Ident, &[syn::Attribute]) = match item {
+                Item::Enum(e)
+                    if matches!(e.vis, Visibility::Public(_))
+                        && scc.contains(&e.ident.to_string()) =>
+                {
+                    (&e.ident, &e.attrs)
+                }
+                Item::Struct(s)
+                    if matches!(s.vis, Visibility::Public(_))
+                        && scc.contains(&s.ident.to_string()) =>
+                {
+                    (&s.ident, &s.attrs)
+                }
+                _ => return None,
+            };
+            // ORIGINAL definition (pre-transform): the field types stay `Box<Stmt<S>>` etc., NOT the
+            // renamed `__Rec` form. Cleaned so it re-parses as a `syn::Item` downstream.
+            let cleaned = cleaned_item(item);
+            let sub_tokens = subast_tokens(&parse_subast(attrs));
+            let node_path = mod_local_path(mod_ident, &internal_names[&orig_ident.to_string()]);
+            let macro_name = Ident::new(
+                &format!("__recurse_meta_{}_{}", to_snake(orig_ident), nonce),
+                Span::call_site(),
+            );
+            Some(quote! {
+                #[macro_export]
+                #[doc(hidden)]
+                macro_rules! #macro_name {
+                    // Callback muncher: append this cycle type's metadata (def + subast + recurse
+                    // section), then re-invoke the continuation `$cb`.
+                    (@ast $cb:path { $($pre:tt)* }) => {
+                        $cb ! {
+                            $($pre)*
+                            @ast { #cleaned }
+                            @subast { #(#sub_tokens),* }
+                            @recurse {
+                                @node { #node_path }
+                                @roots { #(#root_idents)* }
+                                @depth { #(#depth_idents)* }
+                                @terms { #(#term_paths)* }
+                                @cycle { #(#cycle_idents)* }
+                            }
+                        }
+                    };
+                }
+
+                #[doc(hidden)]
+                pub use #macro_name as #orig_ident;
+            })
+        })
+        .collect();
+
+    quote!( #(#macros)* )
+}
+
+/// Build the recurse machinery for ONE independent cycle (`scc`): pick its root, rename its types,
+/// and produce (a) the `TransformCtx` that rewrites the cycle's items and (b) the *tail* tokens
+/// appended to the module (terminator + its `Parse`/`Unparse` impls, the depth-default alias, the
+/// public type aliases, and the per-cycle-type `@recurse` metadata macros that `visitor!()` consumes
+/// to build a depth-generic visitor). Each cycle is handled independently, so a module may hold
+/// several (see `find_cycle_sccs`).
+#[allow(clippy::too_many_arguments)]
+fn build_scc(
+    scc: &HashSet<String>,
+    items: &[Item],
+    type_refs: &HashMap<String, HashSet<String>>,
+    direct_type_refs: &HashMap<String, HashSet<String>>,
+    recursion_depth: usize,
+    mod_ident: &Ident,
+    nonce: u64,
+) -> (TransformCtx, TokenStream) {
+    // Root types: this cycle's types that directly reference themselves.
+    let root_types: HashSet<String> = scc
+        .iter()
+        .filter(|name| {
+            type_refs
+                .get(*name)
+                .is_some_and(|refs| refs.contains(*name))
+        })
+        .cloned()
+        .collect();
+
+    // Direct-reference counts within this cycle: how many of its types reference each as a bare field.
+    let mut direct_ref_counts: HashMap<&str, usize> = HashMap::new();
+    for (from, refs) in direct_type_refs {
+        if !scc.contains(from) {
+            continue;
+        }
+        for r in refs {
+            if scc.contains(r) {
+                *direct_ref_counts.entry(r.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Root type: the one that controls recursion depth.
+    // Priority: (1) self-referential types, (2) most directly referenced by other cycle types
+    // (so that destructuring a non-root gives back root type directly), (3) most referenced
+    // overall, (4) alphabetically smallest for determinism.
+    let root_name: String = if !root_types.is_empty() {
+        root_types.iter().min().cloned().unwrap()
+    } else {
+        let mut ref_counts: HashMap<&str, usize> = HashMap::new();
+        for (from, refs) in type_refs {
+            if !scc.contains(from) {
+                continue;
+            }
+            for r in refs {
+                if scc.contains(r) {
+                    *ref_counts.entry(r.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut candidates: Vec<&String> = scc.iter().collect();
+        candidates.sort_by(|a, b| {
+            let da = direct_ref_counts.get(a.as_str()).copied().unwrap_or(0);
+            let db = direct_ref_counts.get(b.as_str()).copied().unwrap_or(0);
+            db.cmp(&da)
+                .then_with(|| {
+                    let ra = ref_counts.get(a.as_str()).copied().unwrap_or(0);
+                    let rb = ref_counts.get(b.as_str()).copied().unwrap_or(0);
+                    rb.cmp(&ra)
+                })
+                .then_with(|| a.as_str().cmp(b.as_str()))
+        });
+        candidates[0].clone()
+    };
+
+    let root_ident = Ident::new(&root_name, Span::call_site());
+    let term_ident = Ident::new(&format!("{root_name}Term"), Span::call_site());
+    let default_alias = Ident::new(&format!("__{root_name}Default"), Span::call_site());
+
+    // Internal (renamed) idents: "Expr" → "__ExprRec"
+    let internal_names: HashMap<String, Ident> = scc
+        .iter()
+        .map(|n| {
+            (
+                n.clone(),
+                Ident::new(&format!("__{n}Rec"), Span::call_site()),
+            )
+        })
+        .collect();
+
+    // The root's full generics drive the depth aliases. (The root is always one of the cycle types,
+    // so the fallback is unreachable.)
+    let root_generics: Generics = items
+        .iter()
+        .find_map(|item| match item {
+            Item::Enum(e)
+                if matches!(e.vis, Visibility::Public(_)) && e.ident == root_name =>
+            {
+                Some(e.generics.clone())
+            }
+            Item::Struct(s)
+                if matches!(s.vis, Visibility::Public(_)) && s.ident == root_name =>
+            {
+                Some(s.generics.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    // Root generics as (declaration, use) token forms. The `__Rec` default `__RootDefault<root
+    // params>` is referenced by every cycle type, so each must declare all of the root's params; a
+    // cycle type may additionally carry its own extra params (threaded into its node type, and — for
+    // the visitor — made generic on its `visit_*` method).
+    let (gen_decl, gen_use) = generic_tokens(&root_generics);
+    let gen_decl = &gen_decl;
+    let gen_use = &gen_use;
+    let root_keys: HashSet<String> = root_generics.params.iter().map(param_key).collect();
+
+    // The terminator struct must be generic over the root's params when the cycle is generic, so the
+    // depth-default alias `type __RootDefault<S> = …Term<S>` actually *uses* every param (otherwise an
+    // unused-param E0091 fires on the user's own definition — notably at `limit = 1`, where the depth
+    // chain bottoms out directly at the terminator). When the cycle has no params the terminator stays
+    // the byte-identical unit struct `pub struct RootTerm;`.
+    let has_gen = !gen_decl.is_empty();
+    // Self-type arguments for the terminator (`RootTerm<S, …>`), empty when non-generic.
+    let term_args: TokenStream = if has_gen {
+        quote!( < #(#gen_use),* > )
+    } else {
+        quote!()
+    };
+    // One PhantomData element per lifetime / type root param: lifetime `'a` -> `&'a ()`; type
+    // `T` -> `T`. Const params are *omitted*: only lifetime and type params trigger the unused-
+    // parameter error (E0392), so a const param can stay unused in `PhantomData` — which also frees
+    // us from the `[(); N]` encoding that only works for `const N: usize` (now any const type, e.g.
+    // `const C: char`, is supported).
+    let phantom_elems: Vec<TokenStream> = root_generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            GenericParam::Lifetime(l) => {
+                let lt = &l.lifetime;
+                Some(quote!(& #lt ()))
+            }
+            GenericParam::Type(t) => {
+                let i = &t.ident;
+                Some(quote!(#i))
+            }
+            GenericParam::Const(_) => None,
+        })
+        .collect();
+    let term_decl: TokenStream = if has_gen {
+        quote!( pub struct #term_ident < #(#gen_decl),* > ( ::core::marker::PhantomData<( #(#phantom_elems,)* )> ); )
+    } else {
+        quote!( pub struct #term_ident; )
+    };
+    for item in items {
+        let (id, generics): (&Ident, &Generics) = match item {
+            Item::Enum(e)
+                if matches!(e.vis, Visibility::Public(_)) && scc.contains(&e.ident.to_string()) =>
+            {
+                (&e.ident, &e.generics)
+            }
+            Item::Struct(s)
+                if matches!(s.vis, Visibility::Public(_)) && scc.contains(&s.ident.to_string()) =>
+            {
+                (&s.ident, &s.generics)
+            }
+            _ => continue,
+        };
+        // `param_key` encodes the *kind* alongside the name (`"type S"` / `"lifetime a"` /
+        // `"const N: usize"`), so the kinds must match too: a root `type S` is not satisfied by a
+        // child's `const S: usize` — they yield different keys and the root's key is reported missing.
+        let have: HashSet<String> = generics.params.iter().map(param_key).collect();
+        if let Some(missing) = root_keys.iter().find(|k| !have.contains(*k)) {
+            abort!(
+                id,
+                "#[recurse]: cycle type `{}` is missing the recursion root `{}`'s generic parameter \
+                 ({}); every cycle type must declare all of the root's parameters (it may add its \
+                 own extras) so the depth machinery can thread them through",
+                id,
+                root_name,
+                missing
+            );
+        }
+    }
+
+    // For root detection in the transformer: we treat the ROOT type as "replaced by __Rec"
+    // and all other cycle types as "renamed + get __Rec appended".
+    // The root type's direct references also become __Rec, so we add it to root_types set.
+    let mut effective_roots = root_types.clone();
+    effective_roots.insert(root_name.clone());
+    // A visitor is only sound for a single effective root (else back-edges collapse ambiguously).
+    let single_root = effective_roots.len() == 1;
+
+    // Identity generic arguments per effective root, as use-form normalized token strings: a
+    // back-edge to a root must repeat these verbatim (see `TransformCtx::root_ident_args`).
+    let root_ident_args: HashMap<String, Vec<String>> = items
+        .iter()
+        .filter_map(|item| {
+            let (id, generics): (&Ident, &Generics) = match item {
+                Item::Enum(e)
+                    if matches!(e.vis, Visibility::Public(_))
+                        && effective_roots.contains(&e.ident.to_string()) =>
+                {
+                    (&e.ident, &e.generics)
+                }
+                Item::Struct(s)
+                    if matches!(s.vis, Visibility::Public(_))
+                        && effective_roots.contains(&s.ident.to_string()) =>
+                {
+                    (&s.ident, &s.generics)
+                }
+                _ => return None,
+            };
+            let (_, us) = generic_tokens(generics);
+            Some((id.to_string(), us.iter().map(|t| t.to_string()).collect()))
+        })
+        .collect();
+
+    // Depth parameters, one per root (canonical sorted order). A lone root keeps the legacy name
+    // `__Rec`; several roots get one named `__Rec<Root>` each, so each self-edge stays an independent,
+    // unambiguous depth dimension. Each defaults to that root's depth-chain alias `__<Root>Default`.
+    let mut roots_sorted: Vec<String> = effective_roots.iter().cloned().collect();
+    roots_sorted.sort();
+    let rec_for_root: HashMap<String, Ident> = roots_sorted
+        .iter()
+        .map(|r| {
+            let id = if single_root {
+                Ident::new("__Rec", Span::call_site())
+            } else {
+                Ident::new(&format!("__Rec{r}"), Span::call_site())
+            };
+            (r.clone(), id)
+        })
+        .collect();
+    let default_for_root: HashMap<String, Ident> = roots_sorted
+        .iter()
+        .map(|r| {
+            (
+                r.clone(),
+                Ident::new(&format!("__{r}Default"), Span::call_site()),
+            )
+        })
+        .collect();
+    let rec_params: Vec<Ident> = roots_sorted.iter().map(|r| rec_for_root[r].clone()).collect();
+    let rec_decls: Vec<TokenStream> = roots_sorted
+        .iter()
+        .map(|r| {
+            let p = &rec_for_root[r];
+            let d = &default_for_root[r];
+            quote!(#p = #d<#(#gen_use),*>)
+        })
+        .collect();
+
+    let ctx = TransformCtx {
+        cycle_types: scc.clone(),
+        root_types: effective_roots,
+        internal_names: internal_names.clone(),
+        rec_params,
+        root_rec: rec_for_root.clone(),
+        rec_decls,
+        root_ident_args,
+    };
+
+    let tail = if single_root {
+        // ── single root: the original depth machinery ───────────────────────────────────────────
+        // Soundness: the depth decrements only at the root's back-edge, so a sub-cycle that never
+        // touches the root would never terminate. The multi-root path checks this; do it here too
+        // (it was previously skipped whenever ≤1 cycle type self-references, silently leaving such a
+        // sub-cycle un-depth-limited).
+        let root_set: HashSet<String> = ::std::iter::once(root_name.clone()).collect();
+        if subgraph_is_cyclic(scc, &root_set, type_refs) {
+            abort!(
+                mod_ident,
+                "#[recurse]: this cycle has a sub-cycle running entirely through non-root types, so \
+                 the depth recursion (which only decrements at the root `{}`) would not terminate. \
+                 Make a type on that sub-cycle directly self-referential, or split it into its own \
+                 `#[derive(Ast)]` type.",
+                root_name
+            );
+        }
+
+        // Inner default: (recursion_depth - 1) levels of __ExprRec<P0, P1, …, depth_ty>. The public
+        // Expr<…> alias adds one more layer so that matching Expr::Block { stmts } leaves
+        // stmts: Vec<__StmtRec<…, __ExprDefault<…>>> which equals Vec<Stmt<…>>.
+        let root_internal = &internal_names[&root_name];
+        let mut depth_ty: TokenStream = quote!(#term_ident #term_args);
+        for _ in 0..(recursion_depth - 1) {
+            depth_ty = quote!(#root_internal<#(#gen_use,)* #depth_ty>);
+        }
+
+        // Public alias per non-root cycle type, using *its own* generic params (a type may carry
+        // extras beyond the root's): `pub type Stmt<S, T> = __StmtRec<S, T, __RootDefault<root>>`.
+        let non_root_aliases: Vec<TokenStream> = items
+            .iter()
+            .filter_map(|item| {
+                let (id, generics): (&Ident, &Generics) = match item {
+                    Item::Enum(e)
+                        if matches!(e.vis, Visibility::Public(_))
+                            && scc.contains(&e.ident.to_string())
+                            && e.ident != root_name =>
+                    {
+                        (&e.ident, &e.generics)
+                    }
+                    Item::Struct(s)
+                        if matches!(s.vis, Visibility::Public(_))
+                            && scc.contains(&s.ident.to_string())
+                            && s.ident != root_name =>
+                    {
+                        (&s.ident, &s.generics)
+                    }
+                    _ => return None,
+                };
+                let internal = &internal_names[&id.to_string()];
+                let (decl, us) = generic_tokens(generics);
+                Some(quote! {
+                    pub type #id<#(#decl),*> =
+                        #internal<#(#us,)* #default_alias<#(#gen_use),*>>;
+                })
+            })
+            .collect();
+
+        quote! {
+            #term_decl
+
+            impl< #(#gen_decl,)* __Atom: ::syan::span::Spanned > ::syan::parse::Parse<__Atom> for #term_ident #term_args {
+                type Error = ::syan::error::ParseError;
+                fn parse(
+                    _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
+                ) -> ::core::result::Result<Self, Self::Error> {
+                    Err(::syan::error::ParseError::new((), "recursion depth limit reached"))
+                }
+            }
+
+            impl< #(#gen_decl,)* __Atom > ::syan::parse::Unparse<__Atom> for #term_ident #term_args {
+                fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                    &self,
+                    _sink: &mut __E,
+                ) -> ::core::result::Result<(), __E::Error> {
+                    ::core::panic!("recursion depth limit reached")
+                }
+            }
+
+            type #default_alias<#(#gen_decl),*> = #depth_ty;
+            pub type #root_ident<#(#gen_decl),*> =
+                #root_internal<#(#gen_use,)* #default_alias<#(#gen_use),*>>;
+
+            #(#non_root_aliases)*
+        }
+    } else {
+        // ── several self-referential roots in one cycle ─────────────────────────────────────────
+        build_multiroot_tail(
+            scc,
+            items,
+            &root_types,
+            &roots_sorted,
+            &internal_names,
+            &default_for_root,
+            &root_generics,
+            gen_decl,
+            gen_use,
+            &root_keys,
+            &term_args,
+            recursion_depth,
+            type_refs,
+            mod_ident,
+        )
+    };
+
+    // Per cycle type: a `visitor!()`-consumable metadata macro under the type's original name (additive
+    // — the renamed `__XRec` keeps its own `#[derive(Ast)]` macro). Emitted for both the single-root
+    // and multi-root tails; `roots_sorted` / `rec_for_root` give the parallel `@roots`/`@depth` order.
+    let meta = recurse_metadata_macros(
+        scc,
+        items,
+        &internal_names,
+        &roots_sorted,
+        &rec_for_root,
+        mod_ident,
+        nonce,
+    );
+
+    (ctx, quote!( #tail #meta ))
+}
+
+/// Emit the tail (terminators, depth-chain aliases, public aliases) for a cycle with **several
+/// self-referential roots**. Each root keeps its own depth dimension: every cycle type carries one
+/// depth param per root, a back-edge to root `X` is that root's param, and the per-root depth chains
+/// are built mutually (level `k` of each root embeds level `k-1` of *all* roots). The depth only
+/// decrements at a root back-edge, so every cycle in the SCC must pass through a root — checked via
+/// `safegraph` (the SCC minus the roots must be acyclic).
+#[allow(clippy::too_many_arguments)]
+fn build_multiroot_tail(
+    scc: &HashSet<String>,
+    items: &[Item],
+    root_types: &HashSet<String>,
+    roots_sorted: &[String],
+    internal_names: &HashMap<String, Ident>,
+    default_for_root: &HashMap<String, Ident>,
+    root_generics: &Generics,
+    gen_decl: &[TokenStream],
+    gen_use: &[TokenStream],
+    root_keys: &HashSet<String>,
+    term_args: &TokenStream,
+    recursion_depth: usize,
+    type_refs: &HashMap<String, HashSet<String>>,
+    mod_ident: &Ident,
+) -> TokenStream {
+    // The depth decrements only at a root (self-referential) back-edge, so every cycle in the SCC
+    // must pass through a root. If the SCC with all roots removed is still cyclic, the generated
+    // types would not terminate — reject cleanly rather than emit an infinitely-recursive type.
+    if subgraph_is_cyclic(scc, root_types, type_refs) {
+        abort!(
+            mod_ident,
+            "#[recurse]: this multi-root cycle has a sub-cycle running entirely through \
+             non-self-referential types, so the depth recursion (which only decrements at a \
+             self-referential type) would not terminate. Make one type on that sub-cycle directly \
+             self-referential, or split it into its own `#[derive(Ast)]` type."
+        );
+    }
+
+    // Every root must declare *exactly* the canonical generic params (the depth chain instantiates
+    // each root as `__XRec<gen_use, depth args…>`, spelled with the shared params). A root carrying
+    // extra params can't be placed in the chain. (Non-root cycle types may still carry extras.)
+    for r in roots_sorted {
+        let g = items.iter().find_map(|it| match it {
+            Item::Enum(e) if &e.ident.to_string() == r => Some(&e.generics),
+            Item::Struct(s) if &s.ident.to_string() == r => Some(&s.generics),
+            _ => None,
+        });
+        if let Some(g) = g {
+            let keys: HashSet<String> = g.params.iter().map(param_key).collect();
+            if keys != *root_keys {
+                abort!(
+                    g.params,
+                    "#[recurse]: in a multi-root cycle every self-referential root must declare \
+                     exactly the same generic parameters; `{}` differs. (Non-root cycle types may \
+                     carry extra parameters, but roots may not.)",
+                    r
+                );
+            }
+        }
+    }
+
+    let term_for_root: HashMap<String, Ident> = roots_sorted
+        .iter()
+        .map(|r| (r.clone(), Ident::new(&format!("{r}Term"), Span::call_site())))
+        .collect();
+
+    let has_gen = !gen_decl.is_empty();
+    let phantom_elems: Vec<TokenStream> = root_generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            GenericParam::Lifetime(l) => {
+                let lt = &l.lifetime;
+                Some(quote!(& #lt ()))
+            }
+            GenericParam::Type(t) => {
+                let i = &t.ident;
+                Some(quote!(#i))
+            }
+            GenericParam::Const(_) => None,
+        })
+        .collect();
+
+    // One terminator per root (+ its Parse/Unparse impls).
+    let term_items: Vec<TokenStream> = roots_sorted
+        .iter()
+        .map(|r| {
+            let term = &term_for_root[r];
+            let decl = if has_gen {
+                quote!( pub struct #term < #(#gen_decl),* > ( ::core::marker::PhantomData<( #(#phantom_elems,)* )> ); )
+            } else {
+                quote!( pub struct #term; )
+            };
+            quote! {
+                #decl
+                impl< #(#gen_decl,)* __Atom: ::syan::span::Spanned > ::syan::parse::Parse<__Atom> for #term #term_args {
+                    type Error = ::syan::error::ParseError;
+                    fn parse(
+                        _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
+                    ) -> ::core::result::Result<Self, Self::Error> {
+                        Err(::syan::error::ParseError::new((), "recursion depth limit reached"))
+                    }
+                }
+                impl< #(#gen_decl,)* __Atom > ::syan::parse::Unparse<__Atom> for #term #term_args {
+                    fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                        &self,
+                        _sink: &mut __E,
+                    ) -> ::core::result::Result<(), __E::Error> {
+                        ::core::panic!("recursion depth limit reached")
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Mutual depth chain: level 0 is each root's terminator; level k of every root embeds level k-1
+    // of *all* roots. After (recursion_depth - 1) steps, `level[r]` is `__<r>Default`'s body (the
+    // public alias adds one final `__rRec` layer, mirroring the single-root case).
+    let mut level: HashMap<String, TokenStream> = roots_sorted
+        .iter()
+        .map(|r| {
+            let t = &term_for_root[r];
+            (r.clone(), quote!(#t #term_args))
+        })
+        .collect();
+    for _ in 0..(recursion_depth - 1) {
+        let args: Vec<TokenStream> = roots_sorted.iter().map(|r| level[r].clone()).collect();
+        level = roots_sorted
+            .iter()
+            .map(|r| {
+                let internal = &internal_names[r];
+                (r.clone(), quote!( #internal< #(#gen_use,)* #(#args,)* > ))
+            })
+            .collect();
+    }
+    let default_decls: Vec<TokenStream> = roots_sorted
+        .iter()
+        .map(|r| {
+            let d = &default_for_root[r];
+            let body = &level[r];
+            quote!( type #d<#(#gen_decl),*> = #body; )
+        })
+        .collect();
+
+    // Public alias for EVERY cycle type: `pub type X<own> = __XRec<own, __ADefault<gen>, …>` — its
+    // own params, then one root-default per root (in canonical order).
+    let default_args: Vec<TokenStream> = roots_sorted
+        .iter()
+        .map(|r| {
+            let d = &default_for_root[r];
+            quote!( #d<#(#gen_use),*> )
+        })
+        .collect();
+    let aliases: Vec<TokenStream> = items
+        .iter()
+        .filter_map(|item| {
+            let (id, generics): (&Ident, &Generics) = match item {
+                Item::Enum(e)
+                    if matches!(e.vis, Visibility::Public(_))
+                        && scc.contains(&e.ident.to_string()) =>
+                {
+                    (&e.ident, &e.generics)
+                }
+                Item::Struct(s)
+                    if matches!(s.vis, Visibility::Public(_))
+                        && scc.contains(&s.ident.to_string()) =>
+                {
+                    (&s.ident, &s.generics)
+                }
+                _ => return None,
+            };
+            let internal = &internal_names[&id.to_string()];
+            let (decl, us) = generic_tokens(generics);
+            Some(quote! {
+                pub type #id<#(#decl),*> =
+                    #internal< #(#us,)* #(#default_args,)* >;
+            })
+        })
+        .collect();
+
+    quote! {
+        #(#term_items)*
+        #(#default_decls)*
+        #(#aliases)*
+    }
+}
+
+pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStream1 {
     let args: RecurseArgs = match syn::parse(attr) {
         Ok(a) => a,
         Err(e) => return e.to_compile_error().into(),
@@ -426,6 +1175,12 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         Ok(m) => m,
         Err(e) => return e.to_compile_error().into(),
     };
+
+    // On any later `abort!` (missing root param, non-identity root arg, multi-root + visit, …) emit
+    // the *original* module unchanged instead of nothing. The user's definitions are valid Rust on
+    // their own, so downstream `mod::Type` references still resolve — the diagnostic stands alone
+    // rather than triggering a cascade of "cannot find type/module" errors.
+    set_dummy(quote!(#module));
 
     let Some((_, items)) = module.content else {
         return quote!(#module).into();
@@ -445,251 +1200,73 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
         })
         .collect();
 
-    // Build reference graph
-    let type_refs: HashMap<String, HashSet<String>> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => {
-                Some((e.ident.to_string(), collect_refs_item(item, &pub_types)))
-            }
-            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => {
-                Some((s.ident.to_string(), collect_refs_item(item, &pub_types)))
-            }
-            _ => None,
-        })
-        .collect();
+    // Build both reference maps in a single pass over the items:
+    //   * `type_refs`        — *all* references (nested too, via `collect_refs_item`); this is the
+    //                          adjacency that drives cycle detection.
+    //   * `direct_type_refs` — only outermost-constructor references (`collect_direct_refs_item`);
+    //                          the primary signal for root selection (a bare field, not `Vec`/`Box`).
+    // `type_refs` is kept a plain adjacency `HashMap` rather than a `safegraph` graph: it is built
+    // straight from the AST and is also queried as a map for self-reference and degree counting;
+    // `find_cycle_types` lifts it into a `safegraph` graph for the one operation that needs graph
+    // algorithms (Tarjan SCC). A `Copy`-keyed graph here would just push name<->id bookkeeping outward.
+    let mut type_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut direct_type_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    for item in &items {
+        let name = match item {
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => e.ident.to_string(),
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => s.ident.to_string(),
+            _ => continue,
+        };
+        type_refs.insert(name.clone(), collect_refs_item(item, &pub_types));
+        direct_type_refs.insert(name, collect_direct_refs_item(item, &pub_types));
+    }
 
-    // Find all types in cycles using DFS back-edge detection
-    let cycle_types = find_cycle_types(&type_refs);
+    // Partition the cycle types into independent cycles (SCCs). A module may hold several cycles
+    // that don't reference one another; each is handled on its own.
+    let sccs = find_cycle_sccs(&type_refs);
 
-    if cycle_types.is_empty() {
+    if sccs.is_empty() {
         return quote!(
             #(#mod_attrs)* #mod_vis mod #mod_ident { #(#items)* }
         )
         .into();
     }
 
-    // Root types: those that directly reference themselves
-    let root_types: HashSet<String> = cycle_types
+    // Build every cycle's `(transform ctx, tail tokens)` up front from the ORIGINAL items (the
+    // visitor and aliases read the un-renamed defs), then rewrite the module's items by applying each
+    // cycle's transform in turn. A transform only matches the types named in its own cycle, and once
+    // a type is renamed to `__XxxRec` no later cycle's transform matches it — so the passes compose.
+    // A field referencing another cycle's type is left as-is and resolves to that cycle's public
+    // alias.
+    let plans: Vec<(TransformCtx, TokenStream)> = sccs
         .iter()
-        .filter(|name| {
-            type_refs
-                .get(*name)
-                .map_or(false, |refs| refs.contains(*name))
-        })
-        .cloned()
-        .collect();
-
-    // Build direct-reference counts: how many cycle types reference each type as a bare field
-    // (not wrapped in Vec, Box, etc.). This is the primary criterion for root selection.
-    let direct_type_refs: HashMap<String, HashSet<String>> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => Some((
-                e.ident.to_string(),
-                collect_direct_refs_item(item, &pub_types),
-            )),
-            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => Some((
-                s.ident.to_string(),
-                collect_direct_refs_item(item, &pub_types),
-            )),
-            _ => None,
-        })
-        .collect();
-
-    let mut direct_ref_counts: HashMap<&str, usize> = HashMap::new();
-    for refs in direct_type_refs.values() {
-        for r in refs {
-            if cycle_types.contains(r) {
-                *direct_ref_counts.entry(r.as_str()).or_insert(0) += 1;
-            }
-        }
-    }
-
-    // Root type: the one that controls recursion depth.
-    // Priority: (1) self-referential types, (2) most directly referenced by other cycle types
-    // (so that destructuring a non-root gives back root type directly), (3) most referenced
-    // overall, (4) alphabetically smallest for determinism.
-    let root_name: String = if !root_types.is_empty() {
-        root_types.iter().min().cloned().unwrap()
-    } else {
-        let mut ref_counts: HashMap<&str, usize> = HashMap::new();
-        for refs in type_refs.values() {
-            for r in refs {
-                if cycle_types.contains(r) {
-                    *ref_counts.entry(r.as_str()).or_insert(0) += 1;
-                }
-            }
-        }
-        let mut candidates: Vec<&String> = cycle_types.iter().collect();
-        candidates.sort_by(|a, b| {
-            let da = direct_ref_counts.get(a.as_str()).copied().unwrap_or(0);
-            let db = direct_ref_counts.get(b.as_str()).copied().unwrap_or(0);
-            db.cmp(&da)
-                .then_with(|| {
-                    let ra = ref_counts.get(a.as_str()).copied().unwrap_or(0);
-                    let rb = ref_counts.get(b.as_str()).copied().unwrap_or(0);
-                    rb.cmp(&ra)
-                })
-                .then_with(|| a.as_str().cmp(b.as_str()))
-        });
-        candidates[0].clone()
-    };
-
-    let root_ident = Ident::new(&root_name, Span::call_site());
-    let term_ident = Ident::new(&format!("{root_name}Term"), Span::call_site());
-    let default_alias = Ident::new(&format!("__{root_name}Default"), Span::call_site());
-    let rec_param = Ident::new("__Rec", Span::call_site());
-
-    // Internal (renamed) idents: "Expr" → "__ExprRec"
-    let internal_names: HashMap<String, Ident> = cycle_types
-        .iter()
-        .map(|n| {
-            (
-                n.clone(),
-                Ident::new(&format!("__{n}Rec"), Span::call_site()),
+        .map(|scc| {
+            build_scc(
+                scc,
+                &items,
+                &type_refs,
+                &direct_type_refs,
+                recursion_depth,
+                mod_ident,
+                nonce,
             )
         })
         .collect();
 
-    // Warn if the first type parameter of a cycle type is not named `S` or `Span`.
-    // The macro unconditionally uses the first param as the span type in depth aliases;
-    // any other name likely means the assumption is wrong.
-    for item in &items {
-        let (type_ident, generics): (&Ident, &Generics) = match item {
-            Item::Enum(e)
-                if matches!(e.vis, Visibility::Public(_))
-                    && cycle_types.contains(&e.ident.to_string()) =>
-            {
-                (&e.ident, &e.generics)
-            }
-            Item::Struct(s)
-                if matches!(s.vis, Visibility::Public(_))
-                    && cycle_types.contains(&s.ident.to_string()) =>
-            {
-                (&s.ident, &s.generics)
-            }
-            _ => continue,
-        };
-        let first_ty_param = generics.params.iter().find_map(|p| {
-            if let GenericParam::Type(tp) = p {
-                Some(&tp.ident)
-            } else {
-                None
-            }
-        });
-        if let Some(param_ident) = first_ty_param {
-            let name = param_ident.to_string();
-            if name != "S" && name != "Span" {
-                emit_warning!(
-                    param_ident.span(),
-                    "`#[recurse]` uses the first type parameter `{}` of `{}` as the span type \
-                     for depth-alias generation; rename it to `S` or `Span` to make this \
-                     explicit, or reorder generics so the span type comes first",
-                    name,
-                    type_ident
-                );
-            }
-        }
+    let mut items = items;
+    for (ctx, _) in &plans {
+        items = items
+            .into_iter()
+            .map(|item| transform_item(item, ctx))
+            .collect();
     }
-
-    // Collect original type-param counts for every cycle type (before any macro transforms).
-    let cycle_orig_param_counts: HashMap<String, usize> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Enum(e)
-                if matches!(e.vis, Visibility::Public(_))
-                    && cycle_types.contains(&e.ident.to_string()) =>
-            {
-                Some((e.ident.to_string(), all_type_params(&e.generics).len()))
-            }
-            Item::Struct(s)
-                if matches!(s.vis, Visibility::Public(_))
-                    && cycle_types.contains(&s.ident.to_string()) =>
-            {
-                Some((s.ident.to_string(), all_type_params(&s.generics).len()))
-            }
-            _ => None,
-        })
-        .collect();
-
-    // All type params of the root type — threaded through depth aliases and all cycle types.
-    let root_type_params: Vec<Ident> = items
-        .iter()
-        .find_map(|item| match item {
-            Item::Enum(e)
-                if matches!(e.vis, Visibility::Public(_)) && e.ident.to_string() == root_name =>
-            {
-                Some(all_type_params(&e.generics))
-            }
-            Item::Struct(s)
-                if matches!(s.vis, Visibility::Public(_)) && s.ident.to_string() == root_name =>
-            {
-                Some(all_type_params(&s.generics))
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| vec![Ident::new("S", Span::call_site())]);
-
-    // For root detection in the transformer: we treat the ROOT type as "replaced by __Rec"
-    // and all other cycle types as "renamed + get __Rec appended".
-    // The root type's direct references also become __Rec, so we add it to root_types set.
-    let mut effective_roots = root_types.clone();
-    effective_roots.insert(root_name.clone());
-
-    let ctx = TransformCtx {
-        cycle_types: cycle_types.clone(),
-        root_types: effective_roots,
-        internal_names: internal_names.clone(),
-        rec_param: rec_param.clone(),
-        default_alias: default_alias.clone(),
-        root_type_params: root_type_params.clone(),
-        cycle_orig_param_counts: cycle_orig_param_counts.clone(),
-    };
-
-    let root_params = &root_type_params;
-
-    // Inner default: (recursion_depth - 1) levels of __ExprRec<P0, P1, …, depth_ty>.
-    // The public Expr<…> alias adds one more layer so that matching Expr::Block { stmts }
-    // leaves stmts: Vec<__StmtRec<…, __ExprDefault<…>>> which equals Vec<Stmt<…>>.
-    let root_internal = &internal_names[&root_name];
-    let mut depth_ty: TokenStream = quote!(#term_ident);
-    for _ in 0..(recursion_depth - 1) {
-        depth_ty = quote!(#root_internal<#(#root_params,)* #depth_ty>);
-    }
+    let tails: Vec<TokenStream> = plans.into_iter().map(|(_, tail)| tail).collect();
 
     quote! {
         #(#mod_attrs)* #mod_vis mod #mod_ident {
-            #(for item in items.into_iter().map(|item| transform_item(item, &ctx))) { #item }
+            #(#items)*
 
-            pub struct #term_ident;
-
-            impl<__Atom: ::syan::span::Spanned> ::syan::parse::Parse<__Atom> for #term_ident {
-                type Error = ::syan::error::ParseError;
-                fn parse(
-                    _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
-                ) -> ::core::result::Result<Self, Self::Error> {
-                    Err(::syan::error::ParseError::new((), "recursion depth limit reached"))
-                }
-            }
-
-            impl<__Atom> ::syan::parse::Unparse<__Atom> for #term_ident {
-                fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
-                    &self,
-                    _sink: &mut __E,
-                ) -> ::core::result::Result<(), __E::Error> {
-                    ::core::panic!("recursion depth limit reached")
-                }
-            }
-
-            type #default_alias<#(#root_params),*> = #depth_ty;
-            pub type #root_ident<#(#root_params),*> =
-                #root_internal<#(#root_params,)* #default_alias<#(#root_params),*>>;
-
-            #(for (orig_name, non_root_internal) in cycle_types.iter().filter(|n| *n != &root_name).map(|n| (n, &internal_names[n]))) {
-                pub type #{Ident::new(orig_name, Span::call_site())}<#(#root_params),*> =
-                    #non_root_internal<#(#root_params,)* #default_alias<#(#root_params),*>>;
-            }
+            #(#tails)*
         }
     }
     .into()

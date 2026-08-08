@@ -1,0 +1,7 @@
+error: visitor!(...): visited type `Plain` does not declare the `where`-bounded generic param `S` (bound `S : Bound`). The visitor trait is keyed on the param union and applies the bound to items quantified over it, so `Plain` would carry an undischargeable bound. Give every visited type the param `S`, or visit `Plain` from a separate `visitor!()`.
+  --> tests/ui/visitor_union_where_unshared_param.rs:29:5
+   |
+29 |     syan::visit::visitor!(crate::Bounded, crate::Plain);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

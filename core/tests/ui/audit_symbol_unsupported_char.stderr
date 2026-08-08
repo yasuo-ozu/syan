@@ -1,0 +1,5 @@
+error: symbol! does not support the character 'é' (U+00E9)
+ --> tests/ui/audit_symbol_unsupported_char.rs:9:22
+  |
+9 |     let _ = <Symbol![café]>::default();
+  |                      ^^^^

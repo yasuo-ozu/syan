@@ -1,0 +1,161 @@
+warning: unused import: `#[recurse]`
+  --> tests/ui/audit_recurse_where_clause.rs:9:1
+   |
+ 9 | #[recurse]
+   | ^^^^^^^^^^
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   |
+   = note: `#[warn(unused_imports)]` on by default
+   = note: this warning originates in the macro `crate::m::Expr` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `S: Clone` is not satisfied
+  --> tests/ui/audit_recurse_where_clause.rs:9:1
+   |
+ 9 | #[recurse]
+   | ^^^^^^^^^^ the trait `Clone` is not implemented for `S`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   |
+note: required by a bound in `Visit`
+  --> tests/ui/audit_recurse_where_clause.rs:18:12
+   |
+ 9 | #[recurse]
+   | ---------- required by a bound in this trait
+...
+18 |         S: Clone,
+   |            ^^^^^ required by this bound in `Visit`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider restricting type parameter `S` with trait `Clone`
+   |
+16 |     pub enum Expr<S: std::clone::Clone>
+   |                    +++++++++++++++++++
+
+error[E0277]: the trait bound `S: Clone` is not satisfied
+  --> tests/ui/audit_recurse_where_clause.rs:9:1
+   |
+ 9 | #[recurse]
+   | ^^^^^^^^^^ the trait `Clone` is not implemented for `S`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   |
+note: required by a bound in `__ExprRec`
+  --> tests/ui/audit_recurse_where_clause.rs:18:12
+   |
+ 9 | #[recurse]
+   | ---------- required by a bound in this enum
+...
+18 |         S: Clone,
+   |            ^^^^^ required by this bound in `__ExprRec`
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider restricting type parameter `S` with trait `Clone`
+   |
+16 |     pub enum Expr<S: std::clone::Clone>
+   |                    +++++++++++++++++++
+
+error[E0277]: the trait bound `S: Clone` is not satisfied
+  --> tests/ui/audit_recurse_where_clause.rs:9:1
+   |
+ 9 | #[recurse]
+   | ^^^^^^^^^^ the trait `Clone` is not implemented for `S`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   |
+note: required by a bound in `VisitMut`
+  --> tests/ui/audit_recurse_where_clause.rs:18:12
+   |
+ 9 | #[recurse]
+   | ---------- required by a bound in this trait
+...
+18 |         S: Clone,
+   |            ^^^^^ required by this bound in `VisitMut`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider restricting type parameter `S` with trait `Clone`
+   |
+16 |     pub enum Expr<S: std::clone::Clone>
+   |                    +++++++++++++++++++
+
+error[E0277]: the trait bound `S: Clone` is not satisfied
+  --> tests/ui/audit_recurse_where_clause.rs:9:1
+   |
+ 9 | #[recurse]
+   | ^^^^^^^^^^ the trait `Clone` is not implemented for `S`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   |
+note: required by a bound in `__ExprRec::Nest`
+  --> tests/ui/audit_recurse_where_clause.rs:18:12
+   |
+18 |         S: Clone,
+   |            ^^^^^ required by this bound in `__ExprRec::Nest`
+19 |     {
+20 |         Nest(Box<Expr<S>>),
+   |         ---- required by a bound in this tuple variant
+   = note: this error originates in the macro `crate::m::Expr` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider restricting type parameter `S` with trait `Clone`
+   |
+16 |     pub enum Expr<S: std::clone::Clone>
+   |                    +++++++++++++++++++
+
+error[E0277]: the trait bound `S: Clone` is not satisfied
+  --> tests/ui/audit_recurse_where_clause.rs:16:19
+   |
+16 |     pub enum Expr<S>
+   |                   ^ the trait `Clone` is not implemented for `S`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   |
+note: required by a bound in `Visit::visit_expr`
+  --> tests/ui/audit_recurse_where_clause.rs:18:12
+   |
+ 9 | #[recurse]
+   | ---------- required by a bound in this associated function
+...
+18 |         S: Clone,
+   |            ^^^^^ required by this bound in `Visit::visit_expr`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   = note: this error originates in the macro `crate::m::Expr` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider restricting type parameter `S` with trait `Clone`
+   |
+16 |     pub enum Expr<S: std::clone::Clone>
+   |                    +++++++++++++++++++
+
+error[E0277]: the trait bound `S: Clone` is not satisfied
+  --> tests/ui/audit_recurse_where_clause.rs:16:19
+   |
+16 |     pub enum Expr<S>
+   |                   ^ the trait `Clone` is not implemented for `S`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   |
+note: required by a bound in `VisitMut::visit_expr_mut`
+  --> tests/ui/audit_recurse_where_clause.rs:18:12
+   |
+ 9 | #[recurse]
+   | ---------- required by a bound in this associated function
+...
+18 |         S: Clone,
+   |            ^^^^^ required by this bound in `VisitMut::visit_expr_mut`
+...
+26 |     syan::visit::visitor!(crate::m::Expr);
+   |     ------------------------------------- in this macro invocation
+   = note: this error originates in the macro `crate::m::Expr` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider restricting type parameter `S` with trait `Clone`
+   |
+16 |     pub enum Expr<S: std::clone::Clone>
+   |                    +++++++++++++++++++

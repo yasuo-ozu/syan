@@ -1,0 +1,5 @@
+error: #[recurse]: the reference to recursion root `Expr` carries generic arguments `<Vec < S >>` that differ from its declared parameters `<S>`. A root reference is the cycle's back-edge and collapses to the single depth parameter `__Rec`, so it must repeat the root's parameters verbatim; a non-identity argument (e.g. `Expr<Vec<S>>`) is unsupported. Move the differing part into its own `#[derive(Ast)]` type, or pass the root's parameters unchanged.
+  --> tests/ui/recurse_complex_root_param.rs:19:18
+   |
+19 |         Wrap(Box<Expr<Vec<S>>>), // non-identity back-edge — REJECTED
+   |                  ^^^^

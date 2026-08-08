@@ -1,0 +1,7 @@
+error: visitor!() over a multi-root `#[recurse]` cycle: root `B` of the cycle containing `A` is not listed. Every root of a multi-root cycle defines its own depth dimension and cannot be drilled, so all roots must be listed in `visitor!(...)`. Add `B` to the visitor.
+  --> tests/ui/visitor_recurse_unlisted_coroot.rs:33:5
+   |
+33 |     syan::visit::visitor!(crate::ast::A); // omits co-root B
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
