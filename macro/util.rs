@@ -53,24 +53,6 @@ pub(crate) fn param_use(p: &GenericParam) -> TokenStream {
 /// One generic param's `(declaration, use)` token forms. They coincide for lifetimes (`'a`) and type
 /// params (`T`) but differ for const params (`const N: usize` vs `N`). The declaration form is bare
 /// (no bounds/defaults), so it suits a method generic too.
-pub(crate) fn param_tokens(p: &GenericParam) -> (TokenStream, TokenStream) {
-    let decl = match p {
-        GenericParam::Lifetime(lt) => {
-            let l = &lt.lifetime;
-            quote!(#l)
-        }
-        GenericParam::Type(t) => {
-            let i = &t.ident;
-            quote!(#i)
-        }
-        GenericParam::Const(c) => {
-            let (i, ty) = (&c.ident, &c.ty);
-            quote!(const #i: #ty)
-        }
-    };
-    (decl, param_use(p))
-}
-
 /// Generic params with defaults stripped (for `impl<...>` / `trait<...>` / `struct<...>` headers).
 pub(crate) fn gparams(g: &Generics) -> Vec<GenericParam> {
     g.params

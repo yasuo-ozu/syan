@@ -37,7 +37,7 @@ mod unparse_spanned {
     #[test]
     fn parse_unbounded_depth() {
         use pu::Expr;
-        // `Parse` re-enters the top-level parser at runtime past the fixed engine depth, so a stream of
+        // Recursion re-enters through decycle's un-ranked delegating impl at full height, so a stream of
         // 200 integers parses into a 200-deep `Cons` list with no truncation.
         let mut ts = proc_macro2::TokenStream::new();
         for _ in 0..200 {
@@ -49,14 +49,14 @@ mod unparse_spanned {
             depth += 1;
             e = *tail;
         }
-        assert_eq!(depth, 200, "all 200 levels parsed (re-entry past the fixed engine depth)");
+        assert_eq!(depth, 200, "all 200 levels parsed — `recurse_level` is not a depth ceiling");
     }
 
     #[test]
     fn unparse_unbounded_depth() {
         use pu::Expr;
         use syan::source::proc_macro2::literal::Integer;
-        // `Unparse` is DIRECT on the natural type (not engine-delegated), so a depth-5000 list unparses.
+        // `Unparse` has no backtracking and re-enters un-ranked, so a depth-5000 list unparses.
         let mut e: Expr<()> = Expr::Nil(PhantomData);
         for _ in 0..5000 {
             e = Expr::Cons {
@@ -135,7 +135,7 @@ mod unparse_spanned {
         assert_eq!(out.len(), 1, "the `7` literal (Stmt::Wrap/Nil emit nothing)");
         let _n: Stmt<()> = Stmt::Nil(PhantomData);
 
-        // Being DIRECT (not engine-delegated), a depth-2000 alternating tree unparses.
+        // A depth-2000 alternating tree unparses.
         let mut e: Expr<()> = Expr::Lit(Integer { value: "1".into(), suffix: None }, PhantomData);
         for _ in 0..2000 {
             e = Expr::Wrap(Box::new(Stmt::Wrap(Box::new(e))));
@@ -178,7 +178,8 @@ mod unparse_spanned {
     }
 }
 
-// Group-ful `#[recurse]` cycles: Unparse/Spanned delegate through a depth-1 borrow engine, unbounded.
+// Group-ful `#[recurse]` cycles: the group is entered via `GroupShape`/`GroupUnparse`, whose content
+// type is a METHOD generic, so the obligation is projection-free and the cycle breaks normally.
 mod group_ful {
     use syan::parse::{recurse, Parse, Unparse};
     use template_quote::quote;
@@ -214,7 +215,7 @@ mod group_ful {
 
     #[test]
     fn group_ful_unparse_is_unbounded() {
-        // A 60-deep `{ { … 1 … } }` — far past the fixed engine depth — round-trips in full.
+        // A 60-deep `{ { … 1 … } }` round-trips in full.
         let mut src = quote! { 1 };
         for _ in 0..60 {
             src = quote! { { #src } };
@@ -261,7 +262,7 @@ mod group_ful {
         };
         let _s: () = tree.span();
 
-        // Unbounded: a depth-2000 hand-built tree still folds its span (depth-1 borrow engine re-enters
+        // Unbounded: a depth-2000 hand-built tree still folds its span (re-entry is through the
         // per level; no `Root: Clone`).
         let mut deep: Expr<()> = Expr::Atom(WithSpan { slot: 7, span: () });
         for _ in 0..2000 {
@@ -271,10 +272,10 @@ mod group_ful {
         let _s: () = deep.span();
     }
 
-    // `Parse` is ALWAYS engine-delegated (group-ful or not), so its runtime re-entry must correctly
-    // rewind past MANY re-entry boundaries when a LATE failure forces backtracking, not just recurse
-    // forward. Two outer variants share the identical deep `( … )` spine (parsed through the group-ful
-    // engine, well past `DEFAULT_RECURSION_DEPTH`) and differ only in a trailing token; the input is
+    // Backtracking must rewind a DEEP recursive parse, not just recurse forward. Because every level
+    // re-enters through the delegating impl, a late failure has many nested `dup()` frames to unwind.
+    // Two outer variants share the identical deep `( … )` spine and differ only in a trailing token;
+    // the input is
     // crafted so the first variant's spine parses in full and only THEN fails on the trailing token,
     // forcing the outer `dup()` to rewind the entire re-entered parse before the second variant retries.
     #[recurse]

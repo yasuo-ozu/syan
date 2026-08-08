@@ -10,9 +10,11 @@ error[E0277]: the trait bound `syan::source::proc_macro2::literal::Integer: Pars
              syan::source::proc_macro2::Stream
              syan::source::string::Stream
    = note: required for `&mut syan::source::proc_macro2::literal::Integer` to implement `ParseStream`
-note: required by a bound in `parse`
-  --> src/parse/parse.rs
+note: required by a bound in `syan::parse::Parse::parse`
+  --> src/decycle_traits.rs
    |
-   |     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error>;
-   |                                           ^^^^^^^^^^^ required by this bound in `Parse::parse`
+   |     fn parse(
+   |        ----- required by a bound in this associated function
+   |         stream: impl ::syan::parse::into_parse_stream::IntoParseStream<Atom = Atom>,
+   |                                                                        ^^^^^^^^^^^ required by this bound in `Parse::parse`
    = note: this error originates in the derive macro `Parse` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -2,20 +2,9 @@ use super::{IntoParseStream, ParseStream};
 
 pub use syan_macro::Parse;
 
-pub trait Parse<Atom>: Sized {
-    type Error: crate::error::Error;
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error>;
-
-    /// Wrap this value in [`Attempt`](crate::nested::Attempt), the **atomic-parse** marker: parsing an
-    /// `Attempt<Self>` parses `Self` but rewinds the stream on failure (it requires `Atom: Clone`) — see
-    /// [`Attempt`](crate::nested::Attempt). This is the value constructor; `value.attempt()` is sugar for
-    /// `Attempt(value)`.
-    fn attempt(self) -> crate::nested::Attempt<Self> {
-        crate::nested::Attempt(self)
-    }
-
-    // TODO: add rollback_subsequent_error()
-}
+// The trait itself is defined (and `#[decycle]`-annotated) in `crate::decycle_traits` — see that
+// module's docs: its alter macro would otherwise collide with the derive re-export just above.
+pub use crate::decycle_traits::Parse;
 
 impl<Atom, Item> Parse<Atom> for Box<Item>
 where

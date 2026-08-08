@@ -1,5 +1,5 @@
 use crate::error::{Error, ParseError};
-use crate::nested::group::{Group, GroupBrace, GroupBracket, GroupParen};
+use crate::nested::group::{Group, GroupBrace, GroupBracket, GroupParen, GroupShape};
 use crate::parse::{unparse::Emitter, IntoParseStream, Parse, ParseStream, Unparse};
 use crate::span::WithSpan;
 use crate::symbol::Symbol;
@@ -198,6 +198,36 @@ impl<T: Default + core::fmt::Display> Unparse<proc_macro2::TokenTree> for Symbol
 macro_rules! impl_for_group {
     ($($t0:ident $(:: $t:ident)*, $delim:path),* $(,)?) => {
         $(
+            // The `GroupShape` form: same single-`TokenTree::Group` consumption, but the content
+            // type is a METHOD generic, so the resulting obligation never mentions it. This is what
+            // `#[derive(Parse)]` uses for a `#[group]` field — see `nested::group::GroupShape`.
+            impl GroupShape<proc_macro2::TokenTree> for $t0 $(::$t)*<(), Span> {
+                fn parse_group<Slot>(
+                    stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
+                ) -> Result<(Slot, Self), ParseError>
+                where
+                    Slot: Parse<proc_macro2::TokenTree>,
+                {
+                    let mut stream = stream.into_parse_stream();
+                    match stream.next() {
+                        Some(proc_macro2::TokenTree::Group(group)) if group.delimiter() == $delim => {
+                            let inner_stream = Stream::new(group.stream());
+                            let slot = Slot::parse(inner_stream).map_err(|e| e.into_parse_error())?;
+                            Ok((slot, Group {
+                                open: WithSpan { span: group.span_open().into(), slot: Default::default() },
+                                slot: (),
+                                close: WithSpan { span: group.span_close().into(), slot: Default::default() },
+                            }))
+                        }
+                        Some(token) => {
+                            stream.push(token);
+                            Err(ParseError::new(Span::default(), "expected group"))
+                        }
+                        None => Err(ParseError::new(Span::default(), "unexpected end of input")),
+                    }
+                }
+            }
+
             impl<T> Parse<proc_macro2::TokenTree> for $t0 $(::$t)*<T, Span>
             where
                 T: Parse<proc_macro2::TokenTree>,

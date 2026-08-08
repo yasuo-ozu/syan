@@ -1,6 +1,6 @@
-// `#[recurse]` no longer takes any arguments — the former `limit = N` was removed (`Unparse`/`Spanned`
-// are now unbounded for group-free cycles, and the `Parse` engine uses a fixed internal depth). Passing
-// any argument is a clean compile error, not a proc-macro panic.
+// The only argument `#[recurse]` accepts is `structural` (choosing decycle's unroll engine over the
+// default ranked one). The former `limit = N` was removed — depth is not a compile-time parameter any
+// more. Anything else is a clean compile error naming what IS allowed, not a proc-macro panic.
 
 use syan::parse::recurse;
 

@@ -1,8 +1,2 @@
 /target
 Cargo.lock
-
-# Claude Code agent worktrees (transient)
-.claude/worktrees/
-
-# stray compiler probe artifacts
-*.rlib

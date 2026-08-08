@@ -1,0 +1,8 @@
+error: decycle: the cyclic where-bounds reachable from this impl never close — after 1000 distinct obligations the walk is still growing (currently proving `__DecycleNat_Expr_ast < Vec < Vec < Vec < Vec < Vec < Vec < …: Parse<…>`); a bound's type argument grows along a cycle edge (a non-regular bound such as `A<Vec<X>>: Tr` on `impl<X> Tr for A<X>`), which no engine can break — rustc itself cannot monomorphize it
+
+         = help: make every cycle edge re-state the same instantiation (only the impl's own type parameters, unchanged, in the bound's arguments), or erase the growing argument behind one fixed type (e.g. a `&mut dyn …` stream) at the recursion boundary
+
+  --> tests/ui/recurse_nonregular_arg.rs:25:14
+   |
+25 |     pub enum Expr<S> {
+   |              ^^^^^^^

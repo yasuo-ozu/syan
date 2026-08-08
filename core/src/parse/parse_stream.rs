@@ -89,6 +89,26 @@ pub trait ParseStream {
     }
 }
 
+/// Type-erase a concrete stream to **one fixed `&mut dyn ParseStream` layer**.
+///
+/// `#[recurse]` wraps every field-parse call of a cycle member's derived `Parse` in this. Without it
+/// each backtracking `dup(…)` inside a recursive descent adds a `Dup<…>` wrapper to the *stream type*,
+/// so `Expr::parse::<S>` would call `Expr::parse::<Dup<&mut S>>` — an infinite monomorphization chain
+/// (E0275) that no trait-obligation engine can break. Erasing at the call site pins the callee's stream
+/// type to `&mut dyn ParseStream<…>`, whose own `dup` erases back to the same type — a fixed point, so
+/// the instantiation set is finite while recursion depth stays bounded only by the call stack.
+///
+/// The blanket `impl<T: ?Sized + ParseStream> ParseStream for &mut T` (plus the blanket
+/// `T: ParseStream ⇒ T: IntoParseStream`) is what makes the erased stream usable as a parser input.
+pub fn erase<'a, Atom, S>(
+    stream: &'a mut S,
+) -> &'a mut (dyn ParseStream<Atom = Atom, Error = S::Error> + 'a)
+where
+    S: ParseStream<Atom = Atom>,
+{
+    stream
+}
+
 pub struct Dup<Slot, Atom> {
     slot: Slot,
     take_buf: Vec<Atom>,

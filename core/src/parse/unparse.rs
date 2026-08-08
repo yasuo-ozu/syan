@@ -1,8 +1,7 @@
 pub use syan_macro::Unparse;
 
-pub trait Unparse<Atom> {
-    fn unparse<S: Emitter<Atom>>(&self, sink: &mut S) -> Result<(), S::Error>;
-}
+// Defined (and `#[decycle]`-annotated) in `crate::decycle_traits` — see that module's docs.
+pub use crate::decycle_traits::Unparse;
 
 impl<Atom, T> Unparse<Atom> for &'_ T
 where

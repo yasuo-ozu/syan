@@ -1,4 +1,4 @@
-error: `#[recurse]` takes no arguments (the `limit = N` argument was removed)
+error: `#[recurse]` takes no arguments, or the single argument `structural` (the `limit = N` argument was removed)
  --> tests/ui/recurse_takes_no_args.rs:7:11
   |
 7 | #[recurse(limit = 0)]

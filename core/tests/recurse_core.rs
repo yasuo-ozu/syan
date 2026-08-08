@@ -1,5 +1,5 @@
-//! `#[recurse]` engine + Parse behavior: natural types, fixes, no-engine SCCs,
-//! where-clauses, problem regressions.
+//! `#[recurse]` end-to-end behaviour: natural types, generic/non-generic cycles, cycles deriving no
+//! routed trait, where-clause threading, and the cycle-detection scoping rules.
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
@@ -147,9 +147,8 @@ mod basic {
         assert!(stmts[1].get_expr().unwrap().is_literal());
     }
 
-    // Two type params: S is the span, T is the Lit payload. The macro must thread T
-    // through the depth chain so __ExprRec<S, T, __Rec> / __ExprDefault<S, T> are
-    // parameterised — no E0391 cycle.
+    // Two type params: `S` is the span, `T` the `Lit` payload. Both must be threaded through the
+    // generated impls; `T` is a leaf payload, not a cycle edge.
     #[recurse]
     mod multi_param {
         use syan::nested::group::GroupBrace;
@@ -193,7 +192,7 @@ mod basic {
     }
 }
 
-// Audit fixes: generic terminator compiles; a foreign field sharing a cycle type's
+// Audit fixes: generic and non-generic cycles compile; a foreign field sharing a cycle type's
 // last segment is a leaf (membership keys on the FIRST path segment).
 mod fixes {
     use syan::parse::recurse;
@@ -215,7 +214,7 @@ mod fixes {
         }
     }
 
-    // Non-generic cycle: the terminator stays the unit struct; must still compile.
+    // Non-generic cycle: no type parameters to thread anywhere; must still compile.
     #[recurse]
     mod nongeneric_limit1 {
         use syan::parse::{Parse, Unparse};
@@ -229,9 +228,9 @@ mod fixes {
     }
 
     #[test]
-    fn bug6_generic_limit1_compiles() {
+    fn generic_and_non_generic_cycles_compile() {
         use syan::source::proc_macro2::literal::Integer;
-        // Naming the instantiated aliases is the regression check (they failed to compile before).
+        // Constructing a value of each is the check: both shapes must survive expansion.
         let _e: generic_limit1::Expr<()> =
             generic_limit1::Expr::Lit(Integer { value: "1".to_string(), suffix: None });
         let _n: nongeneric_limit1::E =
@@ -277,15 +276,18 @@ mod fixes {
     }
 }
 
-// Name hygiene: an Ast-only cycle needs no engine; nonce-stamped internal names never
-// collide with a user type named like the terminator.
-mod no_engine {
+// A cycle deriving NO routed trait (`Ast` only) has no obligation for decycle to break, so
+// `#[recurse]` emits the module directly instead of handing it over — the `used_traits.is_empty()`
+// path in `emit`. A `where`-clause on the cycle type must survive that path intact.
+//
+// (This module previously also asserted that a user type named `ExprTerm` did not collide with the
+// generated terminator. The depth engine and its terminators are gone, so `ExprTerm` is now an
+// ordinary name with no special meaning and there is nothing left to collide with.)
+mod no_routed_trait {
     use core::marker::PhantomData;
-    use syan::parse::{recurse, Parse};
+    use syan::parse::recurse;
     use syan::visit::Ast;
-    use template_quote::quote;
 
-    // Engine-free cycle: where-clause + user `ExprTerm` both fine.
     #[recurse]
     mod ast_only {
         use core::marker::PhantomData;
@@ -300,46 +302,16 @@ mod no_engine {
             Nest(Box<Expr<S>>),
             Lit(PhantomData<S>),
         }
-
-        pub struct ExprTerm;
-    }
-
-    // Engine-needing cycle: `ExprTerm` would have clashed with the old unstamped terminator.
-    #[recurse]
-    mod engine {
-        use core::marker::PhantomData;
-        use syan::parse::{Parse, Unparse};
-
-        // `Lit` is tried first: a `Nest`-first grammar is left-recursive, which the now-unbounded
-        // `Parse` re-entry would recurse on forever (a recursive-descent limitation the old depth
-        // cap masked by truncating).
-        #[derive(Parse, Unparse)]
-        pub enum Expr<S> {
-            Lit(::syan::source::proc_macro2::literal::Integer, PhantomData<S>),
-            Nest(Box<Expr<S>>),
-        }
-
-        pub struct ExprTerm;
     }
 
     fn assert_ast<T: Ast>() {}
 
     #[test]
-    fn ast_only_cycle_with_where_clause_and_exprterm_compiles() {
+    fn ast_only_cycle_with_where_clause_compiles() {
         assert_ast::<ast_only::Expr<()>>();
         let _e: ast_only::Expr<()> = ast_only::Expr::Lit(PhantomData);
-        let _t = ast_only::ExprTerm;
-    }
-
-    #[test]
-    fn engine_cycle_user_exprterm_does_not_collide() {
-        let _t = engine::ExprTerm; // the user's own type, distinct from the nonce-stamped terminator
-        let _e: engine::Expr<()> = Parse::parse(quote! { 5 }).unwrap();
     }
 }
-
-// A where-clause on a cycle type is threaded through the engine, conversions, and
-// delegated impls — param bounds and self-referential bounds both work.
 mod where_clause {
     use syan::parse::{recurse, Parse, Unparse};
     use template_quote::quote;
@@ -407,25 +379,39 @@ mod problems {
     #[test]
     fn compile_fail_problems() {
         let t = trybuild::TestCases::new();
-        t.compile_fail("tests/ui/problem1_trait_impl.rs");
+        // `problem3`/`problem7` pin SCOPING rules of `#[recurse]`'s cycle detection: a `pub(crate)`
+        // type and a multi-segment path are both invisible to it, so the cycle is never detected and
+        // rustc rejects the type itself. (`problem1`/`problem5` were retired with the finite-size
+        // guard — once that abort was gone they asserted nothing but rustc's own output for an
+        // infinite-size type, whose diagnostic ordering is not deterministic; they failed
+        // intermittently on identical runs.)
         t.compile_fail("tests/ui/problem3_pub_crate.rs");
-        t.compile_fail("tests/ui/problem5_multiple_roots.rs");
-        t.compile_fail("tests/ui/problem7_multiseg_path.rs");
+        // NOTE: `problem7_multiseg_path.rs` was retired, and the shape it covered is now a KNOWN GAP
+        // rather than a supported rejection. It asserted that a cycle edge written through a re-export
+        // (`inner::Expr`, where `inner` is `pub use super::Expr`) was not seen as a reference to
+        // `Expr`, because syan keyed a reference on a path's FIRST segment — so no cycle was detected
+        // and rustc rejected the by-value type on its own. Reading the cycle from the derive's
+        // where-bounds keys on the head type instead (the LAST segment), so such an edge is now
+        // *detected* — but decycle cannot rank it: a ranked bound needs a bare module-local head, and
+        // `inner::Expr` is not one (`E0107` + an unsatisfied `shadowing_module::…` bound). It cannot be
+        // pinned as a golden either: the resulting error set is order-dependent (measured: two distinct
+        // outputs over three clean runs). Spell a cycle edge with a direct path.
 
         // `#[recurse]` takes no arguments; passing any argument is a clean compile error.
         t.compile_fail("tests/ui/recurse_takes_no_args.rs");
-        // A cycle type missing one of the ROOT's params is rejected, naming it (the depth default
-        // must be spellable).
-        t.compile_fail("tests/ui/recurse_missing_root_param.rs");
-        // A multi-root cycle whose self-referential roots are not a feedback vertex set is rejected
-        // with a clear message.
-        t.compile_fail("tests/ui/recurse_multiroot_rootless_subcycle.rs");
-        // A non-identity generic argument on a back-edge to the root (`Expr<Vec<S>>`) is rejected —
-        // the single-`__Rec` depth machinery can't thread it.
-        t.compile_fail("tests/ui/recurse_complex_root_param.rs");
-        // A rootless sub-cycle with ≤1 self-referential root is rejected (the `subgraph_is_cyclic`
-        // guard runs on the single-root path too).
-        t.compile_fail("tests/ui/recurse_rootless_subcycle_single_root.rs");
+        // Non-regular recursion (a cycle edge wrapping the referring type's own parameter). syan no
+        // longer pre-checks it — the rejection is decycle's `REACHABLE_OBLIGATIONS_CAP` abort, which
+        // is matchable because decycle's nesting alias is deterministic (it was not when syan owned
+        // the aliasing and keyed it on a random nonce).
+        t.compile_fail("tests/ui/recurse_nonregular_arg.rs");
+
+        // NOTE: four `ui/recurse_*` cases were retired when the depth engine was replaced by
+        // `decycle` (see CLAUDE.md). They asserted engine-era diagnostics about the *recursion root*
+        // and the depth parameter `__Rec` — a natural recursive type has neither, so the macro no
+        // longer rejects those shapes. The multi-root / rootless-sub-cycle shapes are now simply
+        // supported (see `no_root::rootless_subcycle_is_supported` below); a non-identity back-edge
+        // (`Box<Expr<Vec<S>>>`) is no longer a macro-time error and instead fails, if it is ever
+        // instantiated, as an ordinary rustc recursion-limit error.
     }
 
     // When the first type parameter is not named `S`/`Span`, #[recurse] warns at that param's
@@ -455,3 +441,53 @@ mod problems {
         assert!(matches!(v, Value::Lit(_)));
     }
 }
+
+// Shapes the old depth engine had to reject, now simply supported: with natural recursive types
+// there is no "recursion root" and no depth parameter, so a cycle needs no feedback-vertex-set of
+// self-referential types. Here `A` and `B` self-reference but the `C -> D -> C` sub-cycle touches
+// neither — which the engine's depth machinery could not terminate, and decycle handles as an
+// ordinary multi-type cycle.
+mod no_root {
+    use syan::parse::{recurse, Parse, Unparse};
+    use template_quote::quote;
+
+    #[recurse]
+    mod ast {
+        use core::marker::PhantomData;
+        use syan::parse::{Parse, Unparse};
+        use syan::source::proc_macro2::literal::Integer;
+
+        #[derive(Parse, Unparse)]
+        pub enum A<S> {
+            Me(Box<A<S>>),
+            ToC(Box<C<S>>),
+            Lit(Integer, PhantomData<S>),
+        }
+
+        // Each hop consumes a token first — a cycle that consumed nothing would be genuine left
+        // recursion and would recurse forever, which is the honest recursive-descent behaviour and
+        // unrelated to how the obligation cycle is broken.
+        #[derive(Parse, Unparse)]
+        pub enum C<S> {
+            ToD(Integer, Box<D<S>>),
+            Lit(Integer, PhantomData<S>),
+        }
+
+        #[derive(Parse, Unparse)]
+        pub enum D<S> {
+            ToC(Integer, Box<C<S>>),
+            Lit(Integer, PhantomData<S>),
+        }
+    }
+
+    #[test]
+    fn rootless_subcycle_is_supported() {
+        // `C <-> D` never passes through a self-referential type; it still parses and round-trips.
+        let v: ast::C<()> = Parse::parse(quote! { 1 2 3 }).unwrap();
+        assert!(matches!(v, ast::C::ToD(_, _)), "descended C -> D -> C");
+        let mut out = Vec::<proc_macro2::TokenTree>::new();
+        v.unparse(&mut (&mut out)).unwrap();
+        assert_eq!(out.len(), 3, "round-trips all three literals");
+    }
+}
+

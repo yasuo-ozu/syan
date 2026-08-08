@@ -23,11 +23,8 @@ where
     }
 }
 
-pub trait Spanned {
-    type Span: Span;
-
-    fn span(&self) -> Self::Span;
-}
+// Defined (and `#[decycle]`-annotated) in `crate::decycle_traits` — see that module's docs.
+pub use crate::decycle_traits::Spanned;
 
 impl<T: Spanned> Spanned for &'_ T {
     type Span = T::Span;

@@ -24,15 +24,47 @@ macro_rules! impl_group_unparse_tt {
                 &self,
                 sink: &mut E,
             ) -> Result<(), E::Error> {
-                let mut inner = Vec::<proc_macro2::TokenTree>::new();
-                // The sub-emitter (`&mut Vec`) is `Infallible`, so this never errors.
-                self.slot.unparse(&mut (&mut inner)).unwrap();
-                let stream: proc_macro2::TokenStream = inner.into_iter().collect();
-                let group = proc_macro2::Group::new(proc_macro2::Delimiter::$delim, stream);
-                sink.write_one(proc_macro2::TokenTree::Group(group))
+                emit_tt_group(&self.slot, proc_macro2::Delimiter::$delim, sink)
+            }
+        }
+
+        // The `GroupUnparse` counterpart, on the EMPTY holder: same emission, but the content comes
+        // from the caller instead of from `self.slot`, so nothing is cloned into a filled group.
+        impl<S> GroupUnparse<proc_macro2::TokenTree>
+            for Group<(), WithSpan<punct::$open, S>, WithSpan<punct::$close, S>>
+        {
+            fn unparse_group<Slot, E>(
+                &self,
+                slot: &Slot,
+                sink: &mut E,
+            ) -> Result<(), <E as crate::parse::unparse::Emitter<proc_macro2::TokenTree>>::Error>
+            where
+                Slot: Unparse<proc_macro2::TokenTree>,
+                E: crate::parse::unparse::Emitter<proc_macro2::TokenTree>,
+            {
+                emit_tt_group(slot, proc_macro2::Delimiter::$delim, sink)
             }
         }
     };
+}
+
+/// Emit `slot` into a sub-stream and write it as one delimited `TokenTree::Group`.
+fn emit_tt_group<T, E>(
+    slot: &T,
+    delim: proc_macro2::Delimiter,
+    sink: &mut E,
+) -> Result<(), E::Error>
+where
+    T: Unparse<proc_macro2::TokenTree>,
+    E: crate::parse::unparse::Emitter<proc_macro2::TokenTree>,
+{
+    let mut inner = Vec::<proc_macro2::TokenTree>::new();
+    // The sub-emitter (`&mut Vec`) is `Infallible`, so this never errors.
+    slot.unparse(&mut (&mut inner)).unwrap();
+    let stream: proc_macro2::TokenStream = inner.into_iter().collect();
+    sink.write_one(proc_macro2::TokenTree::Group(proc_macro2::Group::new(
+        delim, stream,
+    )))
 }
 impl_group_unparse_tt!(OpenParen, CloseParen, Parenthesis);
 impl_group_unparse_tt!(OpenBrace, CloseBrace, Brace);
@@ -68,6 +100,96 @@ where
         let slot = T::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
         let close = C::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
         Ok(Group { open, slot, close })
+    }
+}
+
+/// Parse a delimited group whose **content type is chosen by the caller**, returning the content and
+/// the now-empty holder.
+///
+/// This is what `#[derive(Parse)]` uses for a `#[group(..)]` field, and it is shaped the way it is for
+/// one reason: **`Slot` is a method generic, not a trait parameter**. The resulting obligation
+/// `FieldTy: GroupShape<Atom>` therefore says nothing about the content type, so it is never an edge in
+/// the type's recursion — which is what lets a `#[recurse]` cycle pass through a `#[group]` field. (The
+/// older formulation bounded `<FieldTy as EmptyGroup>::Fill<Substruct>: Parse<Atom>`: a projection that
+/// mentions the substruct, has no head type, and so can be neither reduced nor cycle-broken. See the
+/// `#[group]` entry under *Known gaps* in CLAUDE.md.)
+///
+/// Returning `(Slot, Self)` rather than a filled group is the other half: with no associated type there
+/// is no projection anywhere in the obligation.
+///
+/// Two families of impl exist, matching how real sources represent a group:
+/// - the **generic sequencing** impl below — open, content, close as three consecutive parses, correct
+///   for a flat/char-like atom;
+/// - **delimiter-specific** impls (see `crate::source::proc_macro2`) — for a token source a group is a
+///   *single* atom, so the impl consumes one `TokenTree::Group`, parses the content from its inner
+///   stream, and synthesizes the delimiter spans. The delimiters are never parsed as tokens there.
+pub trait GroupShape<Atom>: Sized {
+    fn parse_group<Slot>(
+        stream: impl IntoParseStream<Atom = Atom>,
+    ) -> Result<(Slot, Self), ParseError>
+    where
+        Slot: Parse<Atom>;
+}
+
+/// The [`GroupShape`] counterpart for emitting: write the delimited group back out around `slot`.
+///
+/// Takes the holder by reference and the content by reference, so — unlike the `EmptyGroup::fill`
+/// formulation it replaces — nothing is cloned and the holder needs no `Clone` bound.
+pub trait GroupUnparse<Atom> {
+    fn unparse_group<Slot, E>(
+        &self,
+        slot: &Slot,
+        sink: &mut E,
+    ) -> Result<(), <E as crate::parse::unparse::Emitter<Atom>>::Error>
+    where
+        Slot: Unparse<Atom>,
+        E: crate::parse::unparse::Emitter<Atom>;
+}
+
+// Generic sequencing: correct whenever the delimiters really are atoms of their own.
+impl<Atom, O, C> GroupShape<Atom> for Group<(), O, C>
+where
+    O: Parse<Atom>,
+    C: Parse<Atom>,
+{
+    fn parse_group<Slot>(
+        stream: impl IntoParseStream<Atom = Atom>,
+    ) -> Result<(Slot, Self), ParseError>
+    where
+        Slot: Parse<Atom>,
+    {
+        let mut stream = stream.into_parse_stream();
+        let open = O::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+        let slot = Slot::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+        let close = C::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+        Ok((
+            slot,
+            Group {
+                open,
+                slot: (),
+                close,
+            },
+        ))
+    }
+}
+
+impl<Atom, O, C> GroupUnparse<Atom> for Group<(), O, C>
+where
+    O: Unparse<Atom>,
+    C: Unparse<Atom>,
+{
+    fn unparse_group<Slot, E>(
+        &self,
+        slot: &Slot,
+        sink: &mut E,
+    ) -> Result<(), <E as crate::parse::unparse::Emitter<Atom>>::Error>
+    where
+        Slot: Unparse<Atom>,
+        E: crate::parse::unparse::Emitter<Atom>,
+    {
+        self.open.unparse(sink)?;
+        slot.unparse(sink)?;
+        self.close.unparse(sink)
     }
 }
 

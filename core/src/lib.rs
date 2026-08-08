@@ -1,3 +1,10 @@
+extern crate self as syan;
+
+#[doc(hidden)]
+pub use decycle as __decycle;
+
+#[doc(hidden)]
+pub mod decycle_traits;
 pub mod error;
 pub mod nested;
 pub mod parse;

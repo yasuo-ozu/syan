@@ -38,8 +38,16 @@ pub(crate) fn generate_substruct(
         }
     }
     if !subfields.is_empty() {
+        // `by_ref` is part of the NAME, not just of the shape. The two substructs generated for one
+        // `#[group]` field are genuinely different types — `Parse` needs its fields owned (it builds
+        // the value while parsing), `Unparse` needs them borrowed and carries an extra lifetime (it
+        // emits from `&self` without cloning) — so they cannot share a definition and must not share
+        // an ident. Encoding it here is what lets a caller driving BOTH derives from one expansion
+        // (`#[recurse]`) use a single nonce; the distinction is semantic, so it belongs in the name
+        // rather than hidden in a per-trait nonce perturbation.
+        let shape = if by_ref { "Ref" } else { "Own" };
         let substruct_ident = Ident::new(
-            &format!("__SyanSubstructOf_{field_ident}_{ident}_{nonce}"),
+            &format!("__SyanSubstructOf{shape}_{field_ident}_{ident}_{nonce}"),
             member.span(),
         );
         let phantom_args: Punctuated<Type, Token![,]> = generics

@@ -134,24 +134,28 @@ pub(crate) trait Adt {
                     if spacing.is_some() {
                         abort!(&field, "Cannot specify #[joint] or #[alonw] to field {}", quote!(#{&field.ident}));
                     }
+                    // The group is entered through `GroupShape::parse_group`, whose content type is a
+                    // METHOD generic. The two obligations that result are `FieldTy: GroupShape<Atom>`
+                    // (says nothing about the content, so it is never a recursion edge) and
+                    // `Substruct: Parse<Atom>` (a bare head). The older `EmptyGroup::Fill` form bounded
+                    // a projection naming the substruct, which could be neither reduced nor
+                    // cycle-broken — see `nested::group::GroupShape` and CLAUDE.md's `#[group]` entry.
                     let substruct_ident = &substruct.ident;
-                    let to_parse_ty: Type = parse_quote! {<#field_ty as #syan::nested::group::EmptyGroup>::Fill<
-                        #substruct_ident  #ty_generics
-                    >};
+                    let slot_ty: Type = parse_quote!(#substruct_ident #ty_generics);
+                    let group_shape: Path = parse_quote!(#syan::nested::group::GroupShape<#tp_atom>);
                     ret.extend(quote!(
-                        let #field_ident: #to_parse_ty = ::core::result::Result::map_err(
-                            <#to_parse_ty as #trait_fullpath>::parse(&mut #v_stream),
-                            |err| <_ as #syan::error::Error>::into_parse_error(err)
-                        )?;
                         let (#{ &substruct.ident } {
                             #(for subfield in subfields) { #{&subfield.ident.as_ref().unwrap()}, }
                             #field_phantom: _
-                        }, #field_ident) = #syan::nested::group::EmptyGroup::unfill(#field_ident);
+                        }, #field_ident) = ::core::result::Result::map_err(
+                            <#field_ty as #group_shape>::parse_group::<#slot_ty>(&mut #v_stream),
+                            |err| <_ as #syan::error::Error>::into_parse_error(err)
+                        )?;
                     ));
 
                     substructs.push(substruct);
-                    where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup));
-                    where_predicates.push(parse_quote!(#to_parse_ty: #trait_fullpath));
+                    where_predicates.push(parse_quote!(#field_ty: #group_shape));
+                    where_predicates.push(parse_quote!(#slot_ty: #trait_fullpath));
                 } else {
                     let to_parse_ty = field.ty.clone();
                     ret.extend(quote!(
@@ -204,7 +208,7 @@ pub(crate) trait Adt {
             atom_impl_header(generics, trait_path);
         proc_macro_error::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
-                fn unparse<__Syan_Emitter: #syan::parse::unparse::Emitter<#tp_atom>>(&self, _: &mut __Syan_Emitter) -> ::core::result::Result<(), __Syan_Emitter::Error> {
+                fn unparse<__Syan_Emitter: #syan::parse::unparse::Emitter<#tp_atom>>(&self, _: &mut __Syan_Emitter) -> ::core::result::Result<(), <__Syan_Emitter as #syan::parse::unparse::Emitter<#tp_atom>>::Error> {
                     ::core::unimplemented!()
                 }
             }
@@ -242,28 +246,31 @@ pub(crate) trait Adt {
                     nonce,
                     true,
                 ) {
+                    // Mirror of the `Parse` side: emit through `GroupUnparse::unparse_group`, whose
+                    // content type is a METHOD generic. `FieldTy: GroupUnparse<Atom>` mentions no
+                    // content type (never a recursion edge) and the substruct bound has a bare head.
+                    // Both the holder `Clone` and the `Fill` HRTB projection are gone — the holder and
+                    // the content are passed by reference.
+                    let mut sub_ty_generics = generics.clone();
+                    sub_ty_generics.params.insert(0, parse_quote!('syan_substruct_ref));
+                    let slot_ty = quote! {
+                        #{&substruct.ident}
+                        #{sub_ty_generics.split_for_impl().1}
+                    };
+                    let group_unparse: Path = parse_quote!(#syan::nested::group::GroupUnparse<#tp_atom>);
                     ret.extend(quote! {
-                        let #field_ident = <#field_ty as #syan::nested::group::EmptyGroup>::fill(
-                            ::core::clone::Clone::clone(#field_ident),
-                            #{&substruct.ident} {
-                                #(for subfield in &subfields) { #{&subfield.ident}, }
-                                #field_phantom: ::core::marker::PhantomData
-                            }
-                        );
+                        let __syan_slot = #{&substruct.ident} {
+                            #(for subfield in &subfields) { #{&subfield.ident}, }
+                            #field_phantom: ::core::marker::PhantomData
+                        };
+                        <#field_ty as #group_unparse>::unparse_group(
+                            #field_ident, &__syan_slot, #v_sink
+                        )?;
                     });
 
-                    let mut fill_ty_generics = generics.clone();
-                    fill_ty_generics.params.insert(0, parse_quote!('syan_substruct_ref));
-                    let fill_ty = quote! {
-                        #{&substruct.ident}
-                        #{fill_ty_generics.split_for_impl().1}
-                    };
-                    where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup + ::core::clone::Clone));
-                    where_predicates.push(parse_quote!(for<'syan_substruct_ref> <#field_ty as #syan::nested::group::EmptyGroup>::Fill<#fill_ty>: #trait_fullpath));
+                    where_predicates.push(parse_quote!(#field_ty: #group_unparse));
+                    where_predicates.push(parse_quote!(for<'syan_substruct_ref> #slot_ty: #trait_fullpath));
                     substructs.push(substruct);
-                ret.extend(quote!(
-                    <_ as #trait_fullpath>::unparse(&#field_ident, #v_sink)?;
-                ));
                 } else  {
                 ret.extend(quote!(
                     <_ as #trait_fullpath>::unparse(#field_ident, #v_sink)?;
@@ -289,7 +296,9 @@ pub(crate) trait Adt {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics
             #(if !where_predicates.is_empty()) { where #where_predicates}
             {
-                fn unparse<__Syan_Emitter: #syan::parse::unparse::Emitter<#tp_atom>>(&self, #v_sink: &mut __Syan_Emitter) -> ::core::result::Result<(), __Syan_Emitter::Error> {
+                // Spelled in FULL (not the `__Syan_Emitter::Error` shorthand) so the impl survives
+                // decycle's ranked-twin rewrite under `#[recurse]` — see `decycle_traits::Unparse`.
+                fn unparse<__Syan_Emitter: #syan::parse::unparse::Emitter<#tp_atom>>(&self, #v_sink: &mut __Syan_Emitter) -> ::core::result::Result<(), <__Syan_Emitter as #syan::parse::unparse::Emitter<#tp_atom>>::Error> {
                     #inner
                 }
             }
