@@ -8,9 +8,8 @@
 //! is correctly treated as a leaf, so the visitor never tries to resolve a metadata macro for the
 //! recurse'd alias.
 //!
-//! Visiting *through* the recurse'd cycle itself is a separate, still-open gap (see CLAUDE.md): the
-//! cycle's back-edges are rewritten to a generic `__Rec` param, so they are not name-resolvable
-//! traversal edges.
+//! Visiting *through* the recurse'd cycle now works too (natural types make a former-cycle an ordinary
+//! acyclic visitor); the `unlisted` module below drills through an *unlisted* cross-edge cycle type.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -113,4 +112,58 @@ fn struct_visitor_reaches_type_only_through_drilling() {
     decl.visit(&mut c);
     assert_eq!(c.decls, 1);
     assert_eq!(c.types, 1, "reached via drilling through Cast, not via the Expr field");
+}
+
+/// Drilling through an *unlisted* cross-edge cycle type (it gets no `visit_*`), reaching the listed
+/// types nested inside it. Here `Expr` is the root (self-referential via `Bin`) and the only listed type;
+/// `Cast` is an unlisted cross-edge that `visit_expr` drills through to reach the inner `Expr`.
+mod unlisted {
+    use core::marker::PhantomData;
+    use syan::parse::recurse;
+
+    #[recurse]
+    mod ast {
+        use core::marker::PhantomData;
+        use syan::visit::Ast;
+
+        #[derive(Ast)]
+        #[subast(crate::unlisted::ast::Cast)]
+        pub enum Expr<S> {
+            Bin(Box<Expr<S>>),  // self-reference → Expr is the root
+            Cast(Box<Cast<S>>), // cross-edge to the UNLISTED Cast
+            Lit(PhantomData<S>),
+        }
+
+        #[derive(Ast)]
+        #[subast(crate::unlisted::ast::Expr)]
+        pub enum Cast<S> {
+            Inner(Box<Expr<S>>), // ref to the root Expr — reached by drilling through the unlisted Cast
+            Nope(PhantomData<S>),
+        }
+    }
+
+    mod v {
+        // Cast is NOT listed → it must be drilled through.
+        syan::visit::visitor!(crate::unlisted::ast::Expr);
+    }
+
+    #[derive(Default)]
+    struct Counter(usize);
+
+    impl<S> v::Visit<S> for Counter {
+        fn visit_expr(&mut self, i: &ast::Expr<S>) {
+            self.0 += 1;
+            v::visit_expr(self, i);
+        }
+    }
+
+    #[test]
+    fn drills_through_unlisted_cast() {
+        // Expr::Cast( Cast::Inner( Expr::Lit ) ) → outer Expr + (drill Cast, no visit_cast) + inner Expr.
+        let e: ast::Expr<()> =
+            ast::Expr::Cast(Box::new(ast::Cast::Inner(Box::new(ast::Expr::Lit(PhantomData)))));
+        let mut c = Counter::default();
+        v::Visit::visit_expr(&mut c, &e);
+        assert_eq!(c.0, 2, "outer Expr + inner Expr reached by drilling through the unlisted Cast");
+    }
 }

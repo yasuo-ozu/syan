@@ -27,9 +27,10 @@ pub struct Wrap<S> {
 #[derive(Ast)]
 pub struct Inner<S>(pub PhantomData<S>);
 
-// `#[subast(..)]` records this type's sub-AST children + their resolvable paths.
+// `#[subast(..)]` records this type's sub-AST children + their resolvable paths. The path must be
+// fully qualified (`crate`-rooted here), so it resolves wherever the metadata macro is expanded.
 #[derive(Ast)]
-#[subast(self::Inner)]
+#[subast(crate::Inner)]
 pub struct Outer<S> {
     pub child: Inner<S>,
 }

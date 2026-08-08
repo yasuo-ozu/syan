@@ -36,8 +36,8 @@ fn macro_audit_compile_fail() {
     //  where_clause_attribute.rs.)
     // Unparse on a zero-variant enum → E0004 (non-exhaustive empty match).
     t.compile_fail("tests/ui/audit_unparse_empty_enum.rs");
-    // #[ignore_bounds] is a silent no-op — the field bound is still emitted.
-    t.compile_fail("tests/ui/audit_ignore_bounds_noop.rs");
+    // (#[ignore_bounds] is now HONORED — it suppresses the field's `: Parse` bound; a positive
+    //  regression test lives in `ignore_bounds.rs`.)
     // Generated parse-stream local `__syan_stream` is not hygienic (collides with a like-named field).
     t.compile_fail("tests/ui/audit_attribute_hygiene_local.rs");
 
@@ -50,14 +50,20 @@ fn macro_audit_compile_fail() {
     // ── #[derive(Ast)] / visitor!() ─────────────────────────────────────────────────────────────
     // #[subast(path<GenericArgs>)] accepted silently → cryptic error when the intermediate is drilled.
     t.compile_fail("tests/ui/audit_subast_generic_args.rs");
+    // A non-fully-qualified `#[subast(..)]` path (bare ident / `self::` / `super::`) is rejected with a
+    // clear message (it would otherwise resolve in the consumer's scope, not the definition's).
+    t.compile_fail("tests/ui/subast_non_full_path.rs");
     // A union listed in visitor!() is silently dropped (misleading "no AST definitions resolved").
     t.compile_fail("tests/ui/audit_visitor_union.rs");
 
     // ── #[recurse] ──────────────────────────────────────────────────────────────────────────────
     // (#6 limit=1-generic and #7 foreign-dispatch are now FIXED — positive regression tests live in
     //  recurse_fixes.rs.)
-    // Generated terminator `XxxTerm` collides with a user type of that name → E0428.
-    t.compile_fail("tests/ui/audit_recurse_terminator_collision.rs");
-    // A where-clause on a cycle type is not threaded into the regenerated items → cryptic E0277.
-    t.compile_fail("tests/ui/audit_recurse_where_clause.rs");
+    // (A where-clause on a Parse-deriving cycle type is now THREADED through the generated engine /
+    //  conversion / delegated impls — positive regression test in `recurse_where_clause.rs`.)
+    // (Generated internal names — engine `__XxxRec`, terminator `XxxTerm`, depth default `__XxxDefault`,
+    //  conversion traits `__ToNat`/`__FromNat` — now carry a per-expansion nonce, so a user type named
+    //  `ExprTerm` no longer collides; positive regression test in `recurse_no_engine.rs`.)
+    // (A group-ful cycle's natural `Unparse`/`Spanned` now fully work — `Group` unparses to a single
+    //  `TokenTree::Group` and takes its span from its delimiters — see `recurse_group_ful.rs`.)
 }

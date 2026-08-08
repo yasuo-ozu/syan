@@ -44,9 +44,9 @@ fn two_independent_cycles_build() {
 }
 
 // ── two independent cycles, visited via one visitor!() ───────────────────────────
-// A single unified `visitor!()` over both cycles: one `Visit` trait carrying `visit_expr` +
-// `visit_type`, and one `VisitRec` dispatch serving both cycles' nodes/terminators — yet each cycle
-// keeps its own depth dimension, so the visitors descend only their own type and don't bleed.
+// A single unified `visitor!()` over both cycles: one acyclic `Visit` trait carrying `visit_expr` +
+// `visit_type`. Each cycle is a self-recursive natural type, so the visitors descend only their own
+// type and don't bleed.
 #[recurse]
 mod vis {
     use core::marker::PhantomData;
@@ -72,11 +72,11 @@ mod v_vis {
 }
 
 impl<S> v_vis::Visit<S> for Counter {
-    fn visit_expr<R: v_vis::VisitRec<S, Self>>(&mut self, i: &v_vis::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &vis::Expr<S>) {
         self.0 += 10;
         v_vis::visit_expr(self, i);
     }
-    fn visit_type<R: v_vis::VisitRec<S, Self>>(&mut self, i: &v_vis::TypeNode<S, R>) {
+    fn visit_type(&mut self, i: &vis::Type<S>) {
         self.0 += 1;
         v_vis::visit_type(self, i);
     }
@@ -86,8 +86,8 @@ impl<S> v_vis::Visit<S> for Counter {
 fn independent_visitors_are_separate() {
     // Expr depth 2 (Nest + Lit) → +10 twice = 20; Type depth 2 → +1 twice = 2. Each cycle's visitor
     // descends only its own type — they don't bleed into each other.
-    let e: vis::Expr<()> = vis::Expr::Nest(Box::new(v_vis::ExprNode::Lit(PhantomData)));
-    let t: vis::Type<()> = vis::Type::Arrow(Box::new(v_vis::TypeNode::Unit(PhantomData)));
+    let e: vis::Expr<()> = vis::Expr::Nest(Box::new(vis::Expr::Lit(PhantomData)));
+    let t: vis::Type<()> = vis::Type::Arrow(Box::new(vis::Type::Unit(PhantomData)));
 
     let mut c = Counter::default();
     v_vis::Visit::visit_expr(&mut c, &e);

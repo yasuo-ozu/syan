@@ -1,7 +1,7 @@
-//! The previously-rejected gap, now unblocked: `visitor!()` directly over a `#[recurse]` cycle.
-//! `#[recurse]` emits `@recurse` metadata (it no longer needs `visit`); `visitor!()` consumes it and
-//! generates the depth-generic visitor (`Visit`/`VisitRec`/`visit_*<R>` keyed on ITS own trait), so a
-//! `Visit` impl + `Visit::visit_*` walks the cycle. `visit_<X>` exists only for listed `X`.
+//! `visitor!()` directly over a `#[recurse]` cycle. `#[recurse]` exposes the cycle as *natural*
+//! recursive types (a single `Expr<S>` at every depth), so `visitor!()` generates an **ordinary
+//! acyclic visitor** — `visit_*` methods take the natural type (no depth parameter), and a `Visit`
+//! impl + `Visit::visit_*` walks the cycle. `visit_<X>` exists only for listed `X`.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -22,7 +22,7 @@ mod ast {
     #[derive(Ast)]
     #[subast(crate::ast::Expr)]
     pub enum Stmt<S> {
-        Expr(Box<Expr<S>>), // back-edge to the root Expr → drives via the depth param
+        Expr(Box<Expr<S>>), // back-reference to the root Expr
         Nop(PhantomData<S>),
     }
 }
@@ -38,11 +38,11 @@ struct Counter {
 }
 
 impl<S> v::Visit<S> for Counter {
-    fn visit_expr<R: v::VisitRec<S, Self>>(&mut self, i: &v::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &ast::Expr<S>) {
         self.e += 1;
         v::visit_expr(self, i);
     }
-    fn visit_stmt<R: v::VisitRec<S, Self>>(&mut self, i: &v::StmtNode<S, R>) {
+    fn visit_stmt(&mut self, i: &ast::Stmt<S>) {
         self.s += 1;
         v::visit_stmt(self, i);
     }
@@ -51,8 +51,8 @@ impl<S> v::Visit<S> for Counter {
 #[test]
 fn walks_the_cycle() {
     // Expr -> Stmt (cross-edge) -> Expr (back-edge) -> Lit.
-    let e: ast::Expr<()> = ast::Expr::Stmt(Box::new(v::StmtNode::Expr(Box::new(
-        v::ExprNode::Lit(PhantomData),
+    let e: ast::Expr<()> = ast::Expr::Stmt(Box::new(ast::Stmt::Expr(Box::new(
+        ast::Expr::Lit(PhantomData),
     ))));
     let mut c = Counter::default();
     v::Visit::visit_expr(&mut c, &e);
@@ -71,14 +71,14 @@ fn leaf_only() {
     assert_eq!((c.e, c.s), (1, 0));
 }
 
-// The visitor also generates the mutable mirror: VisitMut / VisitRecMut / visit_*_mut + inherent
-// .visit_mut(), all depth-generic over the recurse cycle.
+// The visitor also generates the mutable mirror: VisitMut / visit_*_mut + inherent .visit_mut(),
+// over the natural acyclic types.
 impl<S> v::VisitMut<S> for Counter {
-    fn visit_expr_mut<R: v::VisitRecMut<S, Self>>(&mut self, i: &mut v::ExprNode<S, R>) {
+    fn visit_expr_mut(&mut self, i: &mut ast::Expr<S>) {
         self.e += 1;
         v::visit_expr_mut(self, i);
     }
-    fn visit_stmt_mut<R: v::VisitRecMut<S, Self>>(&mut self, i: &mut v::StmtNode<S, R>) {
+    fn visit_stmt_mut(&mut self, i: &mut ast::Stmt<S>) {
         self.s += 1;
         v::visit_stmt_mut(self, i);
     }
@@ -86,10 +86,10 @@ impl<S> v::VisitMut<S> for Counter {
 
 #[test]
 fn walks_the_cycle_mut() {
-    let mut e: ast::Expr<()> = ast::Expr::Stmt(Box::new(v::StmtNode::Expr(Box::new(
-        v::ExprNode::Lit(PhantomData),
+    let mut e: ast::Expr<()> = ast::Expr::Stmt(Box::new(ast::Stmt::Expr(Box::new(
+        ast::Expr::Lit(PhantomData),
     ))));
     let mut c = Counter::default();
-    e.visit_mut(&mut c); // inherent .visit_mut(), depth-generic mutable traversal
+    e.visit_mut(&mut c); // inherent .visit_mut(), natural mutable traversal
     assert_eq!((c.e, c.s), (2, 1), "same shape as the shared walk, via &mut");
 }

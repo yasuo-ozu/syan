@@ -3,3 +3,35 @@ error: #[recurse]: the reference to recursion root `Expr` carries generic argume
    |
 19 |         Wrap(Box<Expr<Vec<S>>>), // non-identity back-edge — REJECTED
    |                  ^^^^
+
+warning: unused imports: `Parse` and `Unparse`
+ --> tests/ui/recurse_complex_root_param.rs:9:28
+  |
+9 | use syan::parse::{recurse, Parse, Unparse};
+  |                            ^^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+error[E0275]: overflow evaluating the requirement `Expr<Vec<Vec<Vec<Vec<Vec<Vec<...>>>>>>>: Parse<...>`
+  --> tests/ui/recurse_complex_root_param.rs:16:14
+   |
+16 |     #[derive(Parse, Unparse)]
+   |              ^^^^^
+   |
+   = help: consider increasing the recursion limit by adding a `#![recursion_limit = "256"]` attribute to your crate (`$CRATE`)
+   = note: required for `Box<Expr<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<S>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>` to implement `Parse<__SyanMacro_Atom>`
+   = note: 127 redundant requirements hidden
+   = note: required for `Expr<S>` to implement `Parse<__SyanMacro_Atom>`
+   = note: this error originates in the derive macro `Parse` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0275]: overflow evaluating the requirement `Expr<Vec<Vec<Vec<Vec<Vec<Vec<...>>>>>>>: Unparse<...>`
+  --> tests/ui/recurse_complex_root_param.rs:16:21
+   |
+16 |     #[derive(Parse, Unparse)]
+   |                     ^^^^^^^
+   |
+   = help: consider increasing the recursion limit by adding a `#![recursion_limit = "256"]` attribute to your crate (`$CRATE`)
+   = note: required for `Box<Expr<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<S>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>` to implement `Unparse<__SyanMacro_Atom>`
+   = note: 126 redundant requirements hidden
+   = note: required for `Box<Expr<S>>` to implement `Unparse<__SyanMacro_Atom>`
+   = note: this error originates in the derive macro `Unparse` (in Nightly builds, run with -Z macro-backtrace for more info)

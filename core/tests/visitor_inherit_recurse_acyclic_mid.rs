@@ -1,12 +1,6 @@
-//! Inheritance over a recurse base through an ACYCLIC intermediate:
-//! `recurse-base (Expr cycle) => acyclic mid (Program) => acyclic new (Module)`.
-//!
-//! AUDIT: the `@recbase {}` marker (which forces struct-only inheritance because a recurse base's
-//! `visit_*` methods carry `where Self: Sized`) was dropped when an *acyclic* intermediate re-exported
-//! its `__syan_visited` macro — `generate_module` hardcoded `recbase = false`. So `new`, consuming
-//! `mid`, took the non-struct-only path and emitted the `&mut V` blanket impl + `?Sized` free fn,
-//! neither of which can satisfy the transitive recurse supertrait. Fixed by propagating
-//! `st.base_is_recurse`.
+//! Multi-level inheritance over a former-`#[recurse]` cycle through an acyclic intermediate:
+//! `base (Expr cycle) => mid (Program) => new (Module)`. With natural types every link is an ordinary
+//! acyclic visitor, so this is plain three-level supertrait inheritance.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -47,7 +41,6 @@ pub struct Module<S> {
 }
 
 mod nv {
-    // The acyclic link in the chain — must still carry `@recbase` downstream.
     syan::visit::visitor!(crate::mid => crate::Module);
 }
 
@@ -71,7 +64,7 @@ impl<S> mid::Visit<S> for Walker {
     }
 }
 impl<S> base::Visit<S> for Walker {
-    fn visit_expr<R: base::VisitRec<S, Self>>(&mut self, i: &base::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &ast::Expr<S>) {
         self.e += 1;
         base::visit_expr(self, i);
     }
@@ -80,7 +73,7 @@ impl<S> base::Visit<S> for Walker {
 #[test]
 fn three_level_over_recurse_base() {
     let m: Module<()> = Module {
-        prog: Program { body: ast::Expr::Bin(Box::new(base::ExprNode::Lit(PhantomData))) },
+        prog: Program { body: ast::Expr::Bin(Box::new(ast::Expr::Lit(PhantomData))) },
     };
     let mut w = Walker::default();
     m.visit(&mut w);

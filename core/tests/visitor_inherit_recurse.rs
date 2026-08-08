@@ -1,8 +1,8 @@
-//! Inheritance over a `#[recurse]` cycle.
-//! (a) An acyclic `New` visitor `visitor!(base => …)` extends a recurse `base`, adding an outer type
-//!     whose field drills into the cycle via the inherited depth-generic `visit_*`.
-//! (b) A recurse `New` cycle extends a recurse `base` (independent cycles), inheriting `base`'s
-//!     `visit_*` via the supertrait.
+//! Inheritance over a former-`#[recurse]` cycle. With natural types the base visitor is an ordinary
+//! acyclic visitor, so this is plain supertrait inheritance.
+//! (a) An acyclic `New` visitor `visitor!(base => …)` extends the base, adding an outer type whose
+//!     field drills into the cycle via the inherited `visit_*`.
+//! (b) A second natural cycle extends the base (independent cycles), inheriting `base`'s `visit_*`.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -51,7 +51,7 @@ impl<S> nv::Visit<S> for Walker {
 }
 
 impl<S> base::Visit<S> for Walker {
-    fn visit_expr<R: base::VisitRec<S, Self>>(&mut self, i: &base::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &ast::Expr<S>) {
         self.e += 1;
         base::visit_expr(self, i);
     }
@@ -60,7 +60,7 @@ impl<S> base::Visit<S> for Walker {
 #[test]
 fn acyclic_extends_recurse() {
     let prog: Program<()> =
-        Program { body: ast::Expr::Bin(Box::new(base::ExprNode::Lit(PhantomData))) };
+        Program { body: ast::Expr::Bin(Box::new(ast::Expr::Lit(PhantomData))) };
     let mut w = Walker::default();
     prog.visit(&mut w);
     assert_eq!((w.p, w.e), (1, 2), "Program + 2 Exprs (Bin + inner Lit)");
@@ -92,13 +92,13 @@ struct Both {
 }
 
 impl<S> nv2::Visit<S> for Both {
-    fn visit_stmt<R: nv2::VisitRec<S, Self>>(&mut self, i: &nv2::StmtNode<S, R>) {
+    fn visit_stmt(&mut self, i: &new_ast::Stmt<S>) {
         self.s += 1;
         nv2::visit_stmt(self, i);
     }
 }
 impl<S> base::Visit<S> for Both {
-    fn visit_expr<R: base::VisitRec<S, Self>>(&mut self, i: &base::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &ast::Expr<S>) {
         self.e += 1;
         base::visit_expr(self, i);
     }
@@ -107,8 +107,8 @@ impl<S> base::Visit<S> for Both {
 #[test]
 fn recurse_extends_recurse() {
     // One `Both` (a `nv2::Visit`, hence a `base::Visit`) walks both independent cycles.
-    let s: new_ast::Stmt<()> = new_ast::Stmt::Seq(Box::new(nv2::StmtNode::Nop(PhantomData)));
-    let e: ast::Expr<()> = ast::Expr::Bin(Box::new(base::ExprNode::Lit(PhantomData)));
+    let s: new_ast::Stmt<()> = new_ast::Stmt::Seq(Box::new(new_ast::Stmt::Nop(PhantomData)));
+    let e: ast::Expr<()> = ast::Expr::Bin(Box::new(ast::Expr::Lit(PhantomData)));
     let mut b = Both::default();
     nv2::Visit::visit_stmt(&mut b, &s);
     base::Visit::visit_expr(&mut b, &e);

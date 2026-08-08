@@ -47,6 +47,15 @@ pub(crate) trait FindAttribute {
     fn has_default(&self) -> bool {
         self.find_attribute("default").is_some()
     }
+
+    /// `#[ignore_bounds]` on a field suppresses the synthesized `field_ty: Trait` where-predicate in
+    /// the `Parse`/`Unparse`/`Spanned` derives. This lets a *naturally* mutually-recursive type carry
+    /// leaf-only bounds (the recursive children are resolved coinductively via their sibling impls'
+    /// call sites, not via a where-bound cycle that would overflow with E0275). `#[recurse]` injects it
+    /// on every recursive-child field of a natural cycle type.
+    fn has_ignore_bounds(&self) -> bool {
+        self.find_attribute("ignore_bounds").is_some()
+    }
 }
 
 #[allow(dead_code)]
@@ -102,36 +111,21 @@ fn strip_derive_helper_attrs(substruct: &ItemStruct) -> ItemStruct {
     substruct
 }
 
-fn add_type_param_predicates(
+/// For each **unbounded** type param of `generics`, add `T: Spanned<Span = #tp_span>` to
+/// `where_predicates` — the `Spanned` derive's per-param bound (pinning every param's span to the impl's
+/// invented span type). A param that already carries bounds is left to the user. Only the `Spanned`
+/// derive needs this (the `Parse`/`Unparse` derives synthesize their per-field bounds directly).
+fn add_spanned_param_predicates(
     where_predicates: &mut Punctuated<WherePredicate, Token![,]>,
     generics: &Generics,
     syan: &Path,
-    tp_atom: &Ident,
-    for_parse: bool,
-    for_unparse: bool,
-    for_spanned: bool,
-    tp_span: Option<&Ident>,
+    tp_span: &Ident,
 ) {
     for param in &generics.params {
         if let GenericParam::Type(type_param) = param {
-            // Check if the type parameter has any bounds
             if type_param.bounds.is_empty() {
                 let ty = &type_param.ident;
-                if for_parse {
-                    where_predicates.push(parse_quote!(#ty: #syan::parse::parse::Parse<#tp_atom>));
-                }
-                if for_unparse {
-                    where_predicates
-                        .push(parse_quote!(#ty: #syan::parse::unparse::Unparse<#tp_atom>));
-                }
-                if for_spanned {
-                    if let Some(span) = tp_span {
-                        where_predicates
-                            .push(parse_quote!(#ty: #syan::span::Spanned<Span = #span>));
-                    } else {
-                        where_predicates.push(parse_quote!(#ty: #syan::span::Spanned));
-                    }
-                }
+                where_predicates.push(parse_quote!(#ty: #syan::span::Spanned<Span = #tp_span>));
             }
         }
     }
@@ -199,7 +193,6 @@ fn generate_substruct(
     nonce: u64,
     by_ref: bool,
 ) -> Option<(ItemStruct, Vec<Field>)> {
-    // iterate over subfields which has attribute `#[group(...)]`
     let mut subfields = Vec::new();
     let lt = Lifetime::new("'syan_substruct_ref", Span::call_site());
     while let Some((submember, subident, subfield)) = fields.pop_front() {
@@ -227,7 +220,6 @@ fn generate_substruct(
         }
     }
     if !subfields.is_empty() {
-        // make substruct
         let substruct_ident = Ident::new(
             &format!("__SyanSubstructOf_{field_ident}_{ident}_{nonce}"),
             member.span(),
@@ -358,12 +350,12 @@ pub(crate) trait Adt {
                     continue;
                 }
 
-                // if !field.attrs.has_ignore_bounds() && !matches!(field.ty, Type::Macro(_)) {
+                if !field.has_ignore_bounds() {
                     let field_ty = & field.ty;
                     where_predicates.push(parse_quote!{
                         #field_ty: #trait_fullpath
                     });
-                // }
+                }
 
                 // check if the toplevel field has no `#[group(..)]` attr
                 if let Some(group_member) = field.find_group() {
@@ -403,23 +395,7 @@ pub(crate) trait Adt {
                         }, #field_ident) = #syan::nested::group::EmptyGroup::unfill(#field_ident);
                     ));
 
-                    // let substruct_ty: Type = parse2(quote!(#{&substruct.ident}<#(for p in &substruct.generics.params), {#p}>)).unwrap();
-                    // let mut replaced_ty = field.ty.clone();
-                    // if let Type::Path(TypePath {  path,.. }) = &mut replaced_ty {
-                    //     if let Some(PathSegment {  arguments: PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) ,..}) = path.segments.last_mut() {
-                    //         for arg in args.iter_mut() {
-                    //             if let GenericArgument::Type(ty) = arg {
-                    //                 if ty == &parse_quote!(()) {
-                    //                     *ty = substruct_ty.clone();
-                    //                 } else {
-                    //                     where_predicates.push(parse_quote!(#ty: #trait_fullpath));
-                    //                 }
-                    //             }
-                    //         }
-                    //     }
-                    // }
                     substructs.push(substruct);
-                    // where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroupParse<#tp_atom>));
                     where_predicates.push(parse_quote!(#field_ty: #syan::nested::group::EmptyGroup));
                     where_predicates.push(parse_quote!(#to_parse_ty: #trait_fullpath));
                 } else {
@@ -536,12 +512,12 @@ pub(crate) trait Adt {
                     continue;
                 }
 
-                // if !field.attrs.has_ignore_bounds() && !matches!(field.ty, Type::Macro(_)) {
+                if !field.has_ignore_bounds() {
                     let field_ty = &field.ty;
                     where_predicates.push(parse_quote!{
                         #field_ty: #trait_fullpath
                     });
-                // }
+                }
 
                 let field_ty = &field.ty;
                 // Check if this field has grouped subfields (though for unparse we don't generate substructs)
@@ -639,21 +615,28 @@ pub(crate) trait Adt {
         let trait_fullpath: Path = trait_path.clone();
         let ty_generics = generics.split_for_impl().1;
         let mut generic_params = generics.params.clone();
+        // A generic param default (e.g. the engine's `__Rec = __ExprDefault<S>`) is only valid in the
+        // type *definition*; carried onto an `impl` header it is an error (and a non-trailing one once
+        // `__Syan_Span` is appended). Strip defaults here, mirroring the `Parse`/`Unparse` derives.
+        for param in &mut generic_params {
+            match param {
+                GenericParam::Type(type_param) => {
+                    type_param.eq_token = None;
+                    type_param.default = None;
+                }
+                GenericParam::Const(const_param) => {
+                    const_param.eq_token = None;
+                    const_param.default = None;
+                }
+                _ => {}
+            }
+        }
         let mut where_predicates: Punctuated<WherePredicate, token::Comma> = Punctuated::new();
 
         let tp_span: Ident = parse_quote!(__Syan_Span);
 
-        // Add where predicates for unbounded type parameters
-        add_type_param_predicates(
-            &mut where_predicates,
-            generics,
-            syan,
-            &tp_span,
-            false,
-            false,
-            true,
-            Some(&tp_span),
-        );
+        // Add `T: Spanned<Span = __Syan_Span>` for each unbounded type parameter.
+        add_spanned_param_predicates(&mut where_predicates, generics, syan, &tp_span);
         generic_params.push(parse_quote!(#tp_span: #syan::span::Span));
         proc_macro_error::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
@@ -679,11 +662,19 @@ pub(crate) trait Adt {
                 if field.has_default() {
                     continue;
                 }
+                // `#[ignore_bounds]` suppresses the synthesized predicate (for a naturally-recursive
+                // child whose bound would otherwise cycle). NOTE: `Spanned` carries an associated `Span`
+                // type, and the dropped predicate is what pins it to `__Syan_Span`; without it the
+                // child's `Span` is unconstrained in the `migrate` fold below, so `#[ignore_bounds]` on
+                // a `Spanned` field only type-checks when the field's `Span` is otherwise inferable.
+                if field.has_ignore_bounds() {
+                    continue;
+                }
                 // Every folded field must report the impl's span type `__Syan_Span`. Constraining it
                 // here pins the invented span param (fixes E0207 "unconstrained") and makes the
                 // `Span::migrate(acc, Spanned::span(field))` fold type-check (fixes E0308) for
                 // composite / bounded field types like `WithSpan<_, S>`. (For a bare unbounded type
-                // param, add_type_param_predicates already adds the matching bound — harmless dup.)
+                // param, add_spanned_param_predicates already adds the matching bound — harmless dup.)
                 let field_ty = &field.ty;
                 where_predicates.push(parse_quote!(#field_ty: #syan::span::Spanned<Span = #tp_span>));
             }

@@ -17,14 +17,14 @@ fn unparse_to_tokens<T: Unparse<TokenTree>>(value: &T) -> TokenStream {
 fn test_bool_parse_true() {
     let tokens = quote! { true };
     let result = parse_single::<Bool>(tokens).unwrap();
-    assert_eq!(result.value, true);
+    assert!(result.value);
 }
 
 #[test]
 fn test_bool_parse_false() {
     let tokens = quote! { false };
     let result = parse_single::<Bool>(tokens).unwrap();
-    assert_eq!(result.value, false);
+    assert!(!result.value);
 }
 
 #[test]

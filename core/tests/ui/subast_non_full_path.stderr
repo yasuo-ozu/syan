@@ -1,0 +1,5 @@
+error: `#[subast(..)]` path `Stmt` is not fully qualified. Use a `crate`-rooted path (`crate::path::to::Stmt`) — or an external-crate path (`other_crate::path::Stmt`) for a type from another crate. A bare ident or a `self::`/`super::`-relative path resolves in the consumer's scope (where the metadata macro is expanded), not here.
+  --> tests/ui/subast_non_full_path.rs:15:10
+   |
+15 | #[subast(Stmt)] // not fully qualified — should be `crate::Stmt`
+   |          ^^^^

@@ -35,4 +35,12 @@ fn recurse_audit_compile_fail() {
     //    recursion non-regular; the single-`__Rec` depth machinery can't thread it, so it's
     //    rejected (was: the argument was silently dropped → miscompile).
     t.compile_fail("tests/ui/recurse_complex_root_param.rs");
+
+    // 8. A rootless `C⇄D` sub-cycle with ≤1 self-referential root: the `subgraph_is_cyclic` guard runs
+    //    on the single-root path too, so this is rejected (was: silently compiled un-depth-limited).
+    //    (The `visitor!()`-over-`#[recurse]` "must compile" audit findings — helper-ident hygiene, a
+    //    non-root lifetime emitted lifetime-first, a followed `&T` made a leaf on the mut side — are
+    //    plain bulk files whose compiling is the check: `audit_visitor_recurse_*.rs`. Independent cycles
+    //    with disjoint params are now an ordinary union-param visitor — `visitor_multicycle_disjoint_params.rs`.)
+    t.compile_fail("tests/ui/recurse_rootless_subcycle_single_root.rs");
 }

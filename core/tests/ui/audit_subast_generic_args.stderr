@@ -1,10 +1,5 @@
-error: expected one of `!` or `::`, found `<`
-  --> tests/ui/audit_subast_generic_args.rs:21:21
+error: `#[subast(..)]` path `crate::Cast<()>` carries generic arguments; a subast entry names a type by path only (it is used as a metadata-macro fetch target and a match scrutinee, where `<..>` is illegal). Drop the arguments — write `crate::Cast`.
+  --> tests/ui/audit_subast_generic_args.rs:18:10
    |
-21 | #[subast(crate::Cast<()>)] // generic args silently accepted here
-   |                     ^ expected one of `!` or `::`
-...
-29 |     syan::visit::visitor!(crate::Expr, crate::Type);
-   |     ----------------------------------------------- in this macro invocation
-   |
-   = note: this error originates in the macro `crate::Expr` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+18 | #[subast(crate::Cast<()>)] // generic args — rejected at the derive
+   |          ^^^^^^^^^^^^^^^

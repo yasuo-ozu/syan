@@ -1,7 +1,7 @@
 //! Phase 2a: ONE `visitor!()` listing recurse types from TWO independent cycles (`Expr` and `Type`,
-//! disjoint self-referential cycles in the same `#[recurse]` module). Each cycle keeps its own depth
-//! dimension; the unified `Visit` trait carries a depth-generic `visit_*` for each, and a single
-//! `VisitRec` dispatch serves both cycles' nodes/terminators.
+//! disjoint self-referential cycles in the same `#[recurse]` module). With natural types it is a
+//! unified ordinary acyclic `Visit` trait carrying a `visit_*` for each, traversing both cycles
+//! unbounded.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;
@@ -38,11 +38,11 @@ struct C {
 }
 
 impl<S> v::Visit<S> for C {
-    fn visit_expr<R: v::VisitRec<S, Self>>(&mut self, i: &v::ExprNode<S, R>) {
+    fn visit_expr(&mut self, i: &ast::Expr<S>) {
         self.e += 1;
         v::visit_expr(self, i);
     }
-    fn visit_type<R: v::VisitRec<S, Self>>(&mut self, i: &v::TypeNode<S, R>) {
+    fn visit_type(&mut self, i: &ast::Type<S>) {
         self.t += 1;
         v::visit_type(self, i);
     }
@@ -50,10 +50,10 @@ impl<S> v::Visit<S> for C {
 
 #[test]
 fn two_independent_cycles_one_visitor() {
-    let e: ast::Expr<()> = ast::Expr::Nest(Box::new(v::ExprNode::Lit(PhantomData)));
-    let t: ast::Type<()> = ast::Type::Arrow(Box::new(v::TypeNode::Unit(PhantomData)));
+    let e: ast::Expr<()> = ast::Expr::Nest(Box::new(ast::Expr::Lit(PhantomData)));
+    let t: ast::Type<()> = ast::Type::Arrow(Box::new(ast::Type::Unit(PhantomData)));
     let mut c = C::default();
     e.visit(&mut c);
     t.visit(&mut c);
-    assert_eq!((c.e, c.t), (2, 2), "each cycle traversed to depth 2, independently");
+    assert_eq!((c.e, c.t), (2, 2), "each cycle traversed (2 nodes each), independently");
 }

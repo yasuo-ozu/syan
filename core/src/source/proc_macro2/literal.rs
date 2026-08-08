@@ -107,9 +107,9 @@ impl Parse<proc_macro2::TokenTree> for ByteChar {
                     if inner.len() == 1 {
                         let byte_val = inner.chars().next().unwrap() as u8;
                         Ok(ByteChar { value: byte_val })
-                    } else if inner.starts_with('\\') {
+                    } else if let Some(rest) = inner.strip_prefix('\\') {
                         // Handle escape sequences
-                        match &inner[1..] {
+                        match rest {
                             "n" => Ok(ByteChar { value: b'\n' }),
                             "t" => Ok(ByteChar { value: b'\t' }),
                             "r" => Ok(ByteChar { value: b'\r' }),
@@ -152,9 +152,9 @@ impl Parse<proc_macro2::TokenTree> for Char {
                     if inner.len() == 1 {
                         let char_val = inner.chars().next().unwrap();
                         Ok(Char { value: char_val })
-                    } else if inner.starts_with('\\') {
+                    } else if let Some(rest) = inner.strip_prefix('\\') {
                         // Handle escape sequences
-                        match &inner[1..] {
+                        match rest {
                             "n" => Ok(Char { value: '\n' }),
                             "t" => Ok(Char { value: '\t' }),
                             "r" => Ok(Char { value: '\r' }),
@@ -336,10 +336,10 @@ impl Parse<proc_macro2::TokenTree> for StrRaw {
         match stream.next() {
             Some(proc_macro2::TokenTree::Literal(lit)) => {
                 let lit_str = lit.to_string();
-                if lit_str.starts_with('r') {
+                if let Some(rest) = lit_str.strip_prefix('r') {
                     // Count hash marks
                     let mut hash_count = 0;
-                    let mut chars = lit_str[1..].chars();
+                    let mut chars = rest.chars();
                     while let Some('#') = chars.next() {
                         hash_count += 1;
                     }
@@ -410,10 +410,10 @@ impl Parse<proc_macro2::TokenTree> for ByteStrRaw {
         match stream.next() {
             Some(proc_macro2::TokenTree::Literal(lit)) => {
                 let lit_str = lit.to_string();
-                if lit_str.starts_with("br") {
+                if let Some(rest) = lit_str.strip_prefix("br") {
                     // Count hash marks after "br"
                     let mut hash_count = 0;
-                    let mut chars = lit_str[2..].chars();
+                    let mut chars = rest.chars();
                     while let Some('#') = chars.next() {
                         hash_count += 1;
                     }
@@ -484,10 +484,10 @@ impl Parse<proc_macro2::TokenTree> for CStrRaw {
         match stream.next() {
             Some(proc_macro2::TokenTree::Literal(lit)) => {
                 let lit_str = lit.to_string();
-                if lit_str.starts_with("cr") {
+                if let Some(rest) = lit_str.strip_prefix("cr") {
                     // Count hash marks after "cr"
                     let mut hash_count = 0;
-                    let mut chars = lit_str[2..].chars();
+                    let mut chars = rest.chars();
                     while let Some('#') = chars.next() {
                         hash_count += 1;
                     }
@@ -774,13 +774,13 @@ mod tests {
     #[test]
     fn test_bool_parsing_true() {
         let result = parse_tokens::<Bool>("true").unwrap();
-        assert_eq!(result.value, true);
+        assert!(result.value);
     }
 
     #[test]
     fn test_bool_parsing_false() {
         let result = parse_tokens::<Bool>("false").unwrap();
-        assert_eq!(result.value, false);
+        assert!(!result.value);
     }
 
     #[test]
