@@ -1,0 +1,5 @@
+error: `#[recurse]` takes no arguments (the `limit = N` argument was removed)
+ --> tests/ui/recurse_takes_no_args.rs:7:11
+  |
+7 | #[recurse(limit = 0)]
+  |           ^^^^^

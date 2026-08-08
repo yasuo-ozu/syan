@@ -67,7 +67,6 @@ impl ParseStream for Stream {
             return None;
         };
 
-        // Update is_joint based on the token type and its connectivity
         if let proc_macro2::TokenTree::Punct(ref punct) = token {
             self.is_joint = punct.spacing() == proc_macro2::Spacing::Joint;
         } else {
@@ -106,7 +105,6 @@ impl From<proc_macro2::TokenStream> for Stream {
 
 impl crate::parse::into_parse_stream::IntoParseStream for proc_macro2::TokenStream {
     type Atom = proc_macro2::TokenTree;
-    type Error = core::convert::Infallible;
     type Output = Stream;
 
     fn into_parse_stream(self) -> Self::Output {
@@ -129,28 +127,21 @@ impl crate::parse::unparse::Emitter<proc_macro2::TokenTree> for proc_macro2::Tok
         Ok(())
     }
 
+    // write_sep re-spaces the trailing punct as Alone to signal separation.
     fn write_sep(&mut self) -> Result<(), Self::Error> {
-        // emit_sep should modify the spacing of the last token to indicate separation
-        // We need to convert the TokenStream to a vector, modify the last token's spacing,
-        // and rebuild the stream
-
         let tokens: Vec<proc_macro2::TokenTree> = std::mem::take(self).into_iter().collect();
 
         if let Some((last_token, rest)) = tokens.split_last() {
-            // Rebuild the stream with all tokens except the last
             self.extend(rest.iter().cloned());
 
-            // Modify the last token's spacing if it's a punctuation token
             match last_token {
                 proc_macro2::TokenTree::Punct(punct) => {
-                    // Create a new punct with Alone spacing to indicate separation
                     let mut new_punct =
                         proc_macro2::Punct::new(punct.as_char(), proc_macro2::Spacing::Alone);
                     new_punct.set_span(punct.span());
                     self.extend(std::iter::once(proc_macro2::TokenTree::Punct(new_punct)));
                 }
                 other => {
-                    // For non-punct tokens, just add them back as-is
                     self.extend(std::iter::once(other.clone()));
                 }
             }

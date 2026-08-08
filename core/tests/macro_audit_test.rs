@@ -4,9 +4,7 @@
 //! cause. Silent-wrong findings are demonstrated as runtime tests in `macro_audit_runtime_test.rs`.
 //!
 //! These are *known limitations*, captured so a fix has a regression target and the failure modes
-//! are documented rather than surprising. (Audit findings #1–#8 have since been FIXED — see
-//! where_clause_attribute.rs, visitor_tuple_field.rs, visitor_where_clause.rs, recurse_fixes.rs, and
-//! the symbol! abort below; the entries still registered here remain open.)
+//! are documented rather than surprising. The entries registered below remain open.
 //!
 //! ── Also found, but NOT encoded as a trybuild test (and why) ───────────────────────────────────
 //! * visitor!(): listing the same type twice (`visitor!(T, T)`) emits ~18 duplicate-definition
@@ -31,13 +29,8 @@ fn macro_audit_compile_fail() {
     let t = trybuild::TestCases::new();
 
     // ── attribute derives (Parse / Unparse / Spanned) ──────────────────────────────────────────
-    // (#1 Parse where-clause panic, #4 Unparse/Spanned where-clause drop, and #5 Spanned
-    //  composite-field span inference are now FIXED — positive regression tests in
-    //  where_clause_attribute.rs.)
     // Unparse on a zero-variant enum → E0004 (non-exhaustive empty match).
     t.compile_fail("tests/ui/audit_unparse_empty_enum.rs");
-    // (#[ignore_bounds] is now HONORED — it suppresses the field's `: Parse` bound; a positive
-    //  regression test lives in `ignore_bounds.rs`.)
     // Generated parse-stream local `__syan_stream` is not hygienic (collides with a like-named field).
     t.compile_fail("tests/ui/audit_attribute_hygiene_local.rs");
 
@@ -57,13 +50,4 @@ fn macro_audit_compile_fail() {
     t.compile_fail("tests/ui/audit_visitor_union.rs");
 
     // ── #[recurse] ──────────────────────────────────────────────────────────────────────────────
-    // (#6 limit=1-generic and #7 foreign-dispatch are now FIXED — positive regression tests live in
-    //  recurse_fixes.rs.)
-    // (A where-clause on a Parse-deriving cycle type is now THREADED through the generated engine /
-    //  conversion / delegated impls — positive regression test in `recurse_where_clause.rs`.)
-    // (Generated internal names — engine `__XxxRec`, terminator `XxxTerm`, depth default `__XxxDefault`,
-    //  conversion traits `__ToNat`/`__FromNat` — now carry a per-expansion nonce, so a user type named
-    //  `ExprTerm` no longer collides; positive regression test in `recurse_no_engine.rs`.)
-    // (A group-ful cycle's natural `Unparse`/`Spanned` now fully work — `Group` unparses to a single
-    //  `TokenTree::Group` and takes its span from its delimiters — see `recurse_group_ful.rs`.)
 }

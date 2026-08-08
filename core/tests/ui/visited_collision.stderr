@@ -1,7 +1,5 @@
 error: two visited types share the last segment `Foo` (`crate::a::Foo` vs `crate::b::Foo`); their generated `visit_*`/`*Hook` names would collide — give them distinct final idents
-  --> tests/ui/visited_collision.rs:26:5
+  --> tests/ui/visited_collision.rs:26:42
    |
 26 |     syan::visit::visitor!(crate::a::Foo, crate::b::Foo);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+   |                                          ^^^^^^^^^^^^^

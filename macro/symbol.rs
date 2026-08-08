@@ -4,7 +4,6 @@ use syn::parse::{Parse, ParseStream};
 use syn::*;
 use template_quote::quote;
 
-#[derive(Debug)]
 pub struct SymbolToken {
     slot: String,
     span: Span,
@@ -114,8 +113,6 @@ fn char_to_type_path(c: char, syan_path: &Ident, span: proc_macro2::Span) -> Opt
         '|' => quote! { #chars_path::Or },
         '~' => quote! { #chars_path::Tilde },
         ' ' => {
-            // Space character - we'll represent it as a special Space type if it exists,
-            // or skip it for now
             let space_ident = Ident::new("Space", span);
             quote! { #chars_path::#space_ident }
         }
@@ -130,29 +127,17 @@ fn create_joint_type(char_types: Vec<TokenStream>, syan_path: &Ident) -> TokenSt
     if char_types.len() <= MAX_TUPLE_SIZE {
         quote! { #syan_path::nested::Joint<(#(#char_types,)*)> }
     } else {
-        // Recursive case: split into chunks
-        let chunks: Vec<Vec<TokenStream>> = char_types
+        let joint_types: Vec<TokenStream> = char_types
             .chunks(MAX_TUPLE_SIZE)
-            .map(|chunk| chunk.to_vec())
+            .map(|chunk| create_joint_type(chunk.to_vec(), syan_path))
             .collect();
-
-        let joint_types: Vec<TokenStream> = chunks
-            .into_iter()
-            .map(|chunk| create_joint_type(chunk, syan_path))
-            .collect();
-
-        if joint_types.len() == 1 {
-            joint_types[0].clone()
-        } else {
-            quote! { #syan_path::nested::Joint<(#(#joint_types),*)> }
-        }
+        quote! { #syan_path::nested::Joint<(#(#joint_types),*)> }
     }
 }
 
 pub fn symbol(args: SymbolArgs) -> TokenStream {
     let syan_path = &args.syan_path;
 
-    // Convert all tokens to character types
     let mut char_types = Vec::new();
     for token in &args.tokens {
         for c in token.slot.chars() {
@@ -168,9 +153,7 @@ pub fn symbol(args: SymbolArgs) -> TokenStream {
         }
     }
 
-    // Generate the Joint type using recursive algorithm
     let joint_type = create_joint_type(char_types, syan_path);
 
-    // Wrap in Symbol<T>
     quote! { #syan_path::symbol::Symbol<#joint_type> }
 }

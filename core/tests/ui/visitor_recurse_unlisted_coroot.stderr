@@ -1,7 +1,10 @@
 error: `#[subast]` cycle through unlisted intermediate `B`: it cannot be drilled inline. List one of the cycle's types in `visitor!(..)` so a method call breaks the recursion
-  --> tests/ui/visitor_recurse_unlisted_coroot.rs:33:5
+  --> tests/ui/visitor_recurse_unlisted_coroot.rs:27:19
    |
+27 |         SelfB(Box<B<S>>), // back-edge to root B
+   |                   ^
+...
 33 |     syan::visit::visitor!(crate::ast::A); // omits co-root B
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     ------------------------------------ in this macro invocation
    |
-   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::ast::B` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

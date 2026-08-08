@@ -40,8 +40,7 @@ impl SubastEntry {
 
 /// Render a `#[subast(..)]` allowlist as the `@subast { path as key, … }` token list carried in a
 /// metadata macro: each entry's path is `$crate`-rooted (so it resolves downstream, exactly as
-/// `derive_ast`) and paired with its matchkey. Shared by `#[derive(Ast)]` and `#[recurse]`'s
-/// per-cycle-type metadata macros.
+/// `derive_ast`) and paired with its matchkey.
 pub(crate) fn subast_tokens(entries: &[SubastEntry]) -> Vec<TokenStream> {
     entries
         .iter()
@@ -159,9 +158,16 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
     entries
 }
 
-/// Produce a cleaned copy of the input definition (all attributes stripped) so it can be embedded
-/// verbatim inside the metadata `macro_rules!` and re-parsed as a `syn::Item` by `__visitor_build`.
+/// Produce a cleaned copy of the input definition (attributes stripped, except the field-level
+/// `#[seq]`/`#[opt]` view markers which are preserved so `__visitor_build` sees them) so it can be
+/// embedded verbatim inside the metadata `macro_rules!` and re-parsed as a `syn::Item`.
 pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
+    // Keep only the `#[seq]`/`#[opt]` field markers (the visitor reads them to dispatch a field through
+    // its `SeqView`/`OptView` edit method); drop everything else.
+    fn clean_field_attrs(f: &mut Field) {
+        f.attrs.retain(|a| a.path().is_ident("seq") || a.path().is_ident("opt"));
+        f.vis = Visibility::Inherited;
+    }
     let mut di = input.clone();
     di.attrs.clear();
     di.vis = Visibility::Public(Default::default());
@@ -170,21 +176,18 @@ pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
             for v in &mut e.variants {
                 v.attrs.clear();
                 for f in &mut v.fields {
-                    f.attrs.clear();
-                    f.vis = Visibility::Inherited;
+                    clean_field_attrs(f);
                 }
             }
         }
         Data::Struct(s) => {
             for f in &mut s.fields {
-                f.attrs.clear();
-                f.vis = Visibility::Inherited;
+                clean_field_attrs(f);
             }
         }
         Data::Union(u) => {
             for f in &mut u.fields.named {
-                f.attrs.clear();
-                f.vis = Visibility::Inherited;
+                clean_field_attrs(f);
             }
         }
     }
@@ -259,24 +262,7 @@ fn collect_type_idents(ty: &Type, out: &mut std::collections::HashSet<String>) {
 
 fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    let visit_fields = |fields: &Fields, out: &mut std::collections::HashSet<String>| {
-        for f in fields {
-            collect_type_idents(&f.ty, out);
-        }
-    };
-    match &input.data {
-        Data::Struct(s) => visit_fields(&s.fields, &mut out),
-        Data::Enum(e) => {
-            for v in &e.variants {
-                visit_fields(&v.fields, &mut out);
-            }
-        }
-        Data::Union(u) => {
-            for f in &u.fields.named {
-                collect_type_idents(&f.ty, &mut out);
-            }
-        }
-    }
+    for_each_field(&input.data, |ty| collect_type_idents(ty, &mut out));
     out
 }
 
@@ -316,8 +302,6 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    // `#[subast(..)]` allowlist of this type's sub-AST children (+ their resolvable paths). Carried
-    // verbatim in the metadata macro; the visitor matches field heads against it.
     let subast = parse_subast(&input.attrs);
     let has_subast_attr = input.attrs.iter().any(|a| a.path().is_ident("subast"));
     let field_heads = field_head_idents(input);
@@ -345,11 +329,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
             .generics
             .params
             .iter()
-            .map(|p| match p {
-                GenericParam::Type(t) => t.ident.to_string(),
-                GenericParam::Const(c) => c.ident.to_string(),
-                GenericParam::Lifetime(l) => l.lifetime.ident.to_string(),
-            })
+            .map(crate::util::param_name)
             .collect();
         let mut suspects: Vec<String> = Vec::new();
         for_each_field(&input.data, |ty| {
@@ -392,6 +372,10 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
         quote! {
             #(for (n, ty) in leak_tys.iter().enumerate()) {
                 #[automatically_derived]
+                // This associated type mirrors a user field type verbatim, so a deliberate AST shape can
+                // trip clippy's type-shape lints (`Box<Vec<_>>`, `Vec<Box<_>>`, deep nesting); silence them
+                // on the generated mirror so they never surface in a consumer's lint output.
+                #[allow(clippy::box_collection, clippy::vec_box, clippy::type_complexity)]
                 impl #g_def #syan::visit::Repeater< #{Literal::usize_unsuffixed(n)} >
                     for #ident #g_use #where_clause
                 {

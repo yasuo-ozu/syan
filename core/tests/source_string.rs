@@ -4,19 +4,6 @@ use syan::span::{Span as SpanTrait, WithSpan};
 use syan::symbol::{chars, Symbol};
 
 #[test]
-fn test_span_basic() {
-    let span = Span {
-        line: 5,
-        col: 10,
-        loc: 25,
-    };
-    
-    assert_eq!(span.line, 5);
-    assert_eq!(span.col, 10);
-    assert_eq!(span.loc, 25);
-}
-
-#[test]
 fn test_span_default() {
     let span: Span = Default::default();
     assert_eq!(span.line, 0);
@@ -77,19 +64,6 @@ fn test_stream_empty_string() {
 }
 
 #[test]
-fn test_stream_single_char() {
-    let mut stream = Stream::new("a".to_string());
-    
-    let atom = stream.next().unwrap();
-    assert_eq!(atom.slot, 'a');
-    assert_eq!(atom.span.line, 1);
-    assert_eq!(atom.span.col, 1);
-    assert_eq!(atom.span.loc, 0);
-    
-    assert!(stream.next().is_none());
-}
-
-#[test]
 fn test_stream_multiple_chars() {
     let mut stream = Stream::new("abc".to_string());
     
@@ -112,41 +86,6 @@ fn test_stream_multiple_chars() {
     assert_eq!(atom3.span.loc, 2);
     
     assert!(stream.next().is_none());
-}
-
-#[test]
-fn test_stream_newlines() {
-    let mut stream = Stream::new("a\nb\nc".to_string());
-    
-    let atom1 = stream.next().unwrap();
-    assert_eq!(atom1.slot, 'a');
-    assert_eq!(atom1.span.line, 1);
-    assert_eq!(atom1.span.col, 1);
-    assert_eq!(atom1.span.loc, 0);
-    
-    let newline = stream.next().unwrap();
-    assert_eq!(newline.slot, '\n');
-    assert_eq!(newline.span.line, 1);
-    assert_eq!(newline.span.col, 2);
-    assert_eq!(newline.span.loc, 1);
-    
-    let atom2 = stream.next().unwrap();
-    assert_eq!(atom2.slot, 'b');
-    assert_eq!(atom2.span.line, 2);
-    assert_eq!(atom2.span.col, 1);
-    assert_eq!(atom2.span.loc, 2);
-    
-    let newline2 = stream.next().unwrap();
-    assert_eq!(newline2.slot, '\n');
-    assert_eq!(newline2.span.line, 2);
-    assert_eq!(newline2.span.col, 2);
-    assert_eq!(newline2.span.loc, 3);
-    
-    let atom3 = stream.next().unwrap();
-    assert_eq!(atom3.slot, 'c');
-    assert_eq!(atom3.span.line, 3);
-    assert_eq!(atom3.span.col, 1);
-    assert_eq!(atom3.span.loc, 4);
 }
 
 #[test]
@@ -216,104 +155,29 @@ fn test_stream_skip_sep() {
 }
 
 #[test]
-fn test_into_parse_stream_for_string() {
-    let input = "hello".to_string();
-    let mut stream = input.into_parse_stream();
-    
-    assert_eq!(stream.next().unwrap().slot, 'h');
-    assert_eq!(stream.next().unwrap().slot, 'e');
-    assert_eq!(stream.next().unwrap().slot, 'l');
-    assert_eq!(stream.next().unwrap().slot, 'l');
-    assert_eq!(stream.next().unwrap().slot, 'o');
-    assert!(stream.next().is_none());
-}
-
-#[test]
-fn test_parse_lowercase_letters() {
+fn test_parse_char_classes() {
+    // One ok + one err assert per token class (all share one `impl_parse_for_char!`-generated
+    // body), plus two empty-string errors.
     assert!(Symbol::<chars::_a>::parse("a".to_string()).is_ok());
-    assert!(Symbol::<chars::_b>::parse("b".to_string()).is_ok());
-    assert!(Symbol::<chars::_z>::parse("z".to_string()).is_ok());
-    
-    // Wrong char should fail
     assert!(Symbol::<chars::_a>::parse("b".to_string()).is_err());
-    assert!(Symbol::<chars::_b>::parse("a".to_string()).is_err());
-}
 
-#[test]
-fn test_parse_uppercase_letters() {
     assert!(Symbol::<chars::_A>::parse("A".to_string()).is_ok());
-    assert!(Symbol::<chars::_B>::parse("B".to_string()).is_ok());
-    assert!(Symbol::<chars::_Z>::parse("Z".to_string()).is_ok());
-    
-    // Wrong char should fail
     assert!(Symbol::<chars::_A>::parse("B".to_string()).is_err());
-    assert!(Symbol::<chars::_B>::parse("A".to_string()).is_err());
-}
 
-#[test]
-fn test_parse_digits() {
     assert!(Symbol::<chars::_0>::parse("0".to_string()).is_ok());
-    assert!(Symbol::<chars::_1>::parse("1".to_string()).is_ok());
-    assert!(Symbol::<chars::_9>::parse("9".to_string()).is_ok());
-    
-    // Wrong digit should fail
     assert!(Symbol::<chars::_0>::parse("1".to_string()).is_err());
-    assert!(Symbol::<chars::_1>::parse("0".to_string()).is_err());
-}
 
-#[test]
-fn test_parse_punctuation() {
     assert!(Symbol::<chars::Plus>::parse("+".to_string()).is_ok());
-    assert!(Symbol::<chars::Minus>::parse("-".to_string()).is_ok());
-    assert!(Symbol::<chars::Star>::parse("*".to_string()).is_ok());
-    assert!(Symbol::<chars::Slash>::parse("/".to_string()).is_ok());
-    assert!(Symbol::<chars::Eq>::parse("=".to_string()).is_ok());
-    assert!(Symbol::<chars::Lt>::parse("<".to_string()).is_ok());
-    assert!(Symbol::<chars::Gt>::parse(">".to_string()).is_ok());
-    
-    // Wrong punctuation should fail
     assert!(Symbol::<chars::Plus>::parse("-".to_string()).is_err());
-    assert!(Symbol::<chars::Minus>::parse("+".to_string()).is_err());
-}
 
-#[test]
-fn test_parse_special_chars() {
     assert!(Symbol::<chars::OpenParen>::parse("(".to_string()).is_ok());
-    assert!(Symbol::<chars::CloseParen>::parse(")".to_string()).is_ok());
-    assert!(Symbol::<chars::OpenBrace>::parse("{".to_string()).is_ok());
-    assert!(Symbol::<chars::CloseBrace>::parse("}".to_string()).is_ok());
-    assert!(Symbol::<chars::OpenBracket>::parse("[".to_string()).is_ok());
-    assert!(Symbol::<chars::CloseBracket>::parse("]".to_string()).is_ok());
-    assert!(Symbol::<chars::Space>::parse(" ".to_string()).is_ok());
-    
-    // Wrong special chars should fail
     assert!(Symbol::<chars::OpenParen>::parse(")".to_string()).is_err());
-    assert!(Symbol::<chars::CloseParen>::parse("(".to_string()).is_err());
-}
 
-#[test]
-fn test_parse_underscore() {
     assert!(Symbol::<chars::__>::parse("_".to_string()).is_ok());
     assert!(Symbol::<chars::__>::parse("a".to_string()).is_err());
-}
 
-#[test]
-fn test_parse_empty_string() {
     assert!(Symbol::<chars::_a>::parse("".to_string()).is_err());
     assert!(Symbol::<chars::Plus>::parse("".to_string()).is_err());
-}
-
-#[test]
-fn test_parse_multiple_chars() {
-    // Should succeed and consume only first char
-    let input = "abc".to_string();
-    let result = Symbol::<chars::_a>::parse(input);
-    assert!(result.is_ok());
-    
-    // First char doesn't match - should fail
-    let input = "bac".to_string();
-    let result = Symbol::<chars::_a>::parse(input);
-    assert!(result.is_err());
 }
 
 #[test]

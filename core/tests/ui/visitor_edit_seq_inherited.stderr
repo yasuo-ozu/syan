@@ -1,0 +1,7 @@
+error: a `#[seq]`/`#[opt]` field views the inherited type `Item`; container-edit views are not generated for inherited types (the `visit_item` method would have nowhere to live). Drop the marker — the field is still traversed, calling the inherited per-node visit for each element.
+  --> tests/ui/visitor_edit_seq_inherited.rs:25:5
+   |
+25 |     syan::visit::visitor!(crate::base => crate::List);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

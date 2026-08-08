@@ -1,0 +1,22 @@
+error[E0277]: the trait bound `Box<Leaf<S>>: SeqView<Leaf<S>>` is not satisfied
+  --> tests/ui/visitor_edit_marker_noncontainer.rs:15:9
+   |
+15 |     pub inner: Box<Leaf<S>>,
+   |         ^^^^^ the trait `SeqView<Leaf<S>>` is not implemented for `Box<Leaf<S>>`
+...
+19 |     syan::visit::visitor!(crate::Wrap, crate::Leaf);
+   |     -----------------------------------------------
+   |     |
+   |     required by a bound introduced by this call
+   |     in this macro invocation
+   |
+   = help: the following other types implement trait `SeqView<T>`:
+             Punctuated<T, P>
+             Vec<T>
+             VecDeque<T>
+note: required by a bound in `VisitMut::visit_leaf_seq`
+  --> tests/ui/visitor_edit_marker_noncontainer.rs:19:5
+   |
+19 |     syan::visit::visitor!(crate::Wrap, crate::Leaf);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `VisitMut::visit_leaf_seq`
+   = note: this error originates in the macro `crate::Wrap` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

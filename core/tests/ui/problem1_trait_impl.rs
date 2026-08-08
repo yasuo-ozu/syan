@@ -1,8 +1,5 @@
-// Problem 1: trait impl for a cycle type is not transformed by #[recurse].
-// The macro renames `Expr` to `__ExprRec`; the trait impl still says `Expr<S>`,
-// which no longer exists as a type definition — only as a public alias.
-// However, `impl Trait for TypeAlias<S>` is not allowed in Rust, so this would
-// fail even if the alias existed.  The compile error exposes the gap.
+// Problem 1: `Expr<S>` self-references by value (no Box), so #[recurse]'s by-value-cycle guard aborts
+// before any transform; rustc's E0072/type-param/derive errors then cascade on the untransformed module.
 
 use syan::parse::recurse;
 use syan::source::proc_macro2::literal::Integer;
@@ -18,7 +15,7 @@ mod m {
         Nested(Expr<S>),
     }
 
-    // Trait impl targets `Expr<S>` — after #[recurse] this name is gone.
+    // The trait impl passes through verbatim onto the natural type.
     impl<S> std::fmt::Display for Expr<S> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "expr")

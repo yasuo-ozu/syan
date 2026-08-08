@@ -9,8 +9,6 @@ mod m {
     use syan::parse::{Parse, Unparse};
     use syan::source::proc_macro2::literal::Integer;
 
-    // `pub(crate)` — not detected as a cycle participant; not renamed/transformed.
-    // Rust sees a self-referential enum with no indirection → error.
     #[derive(Parse, Unparse)]
     pub(crate) enum Expr<S> {
         Lit(Integer),

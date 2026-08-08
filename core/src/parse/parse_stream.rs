@@ -1,4 +1,10 @@
 use crate::span::{Span, Spanned};
+
+/// The core token stream. **Object-safe** — so `&mut dyn ParseStream<Atom = A, Error = E>` is a usable
+/// type (needed to type-erase the stream at the unbounded-`#[recurse]` re-entry boundary). The generic
+/// conveniences `dup`/`validate_spacing` carry `where Self: Sized`, which keeps them off the vtable (not
+/// callable on `dyn ParseStream`) while preserving object safety — and they're callable on every real
+/// (sized) stream (`Stream`, `Dup<…>`, `&mut T`).
 pub trait ParseStream {
     type Atom;
     type Error;
@@ -11,8 +17,6 @@ pub trait ParseStream {
     fn get_error(&mut self) -> Result<(), Self::Error> {
         todo!()
     }
-
-    // Pre-defined
 
     /// Skip the separator atoms if exists. Returns whether we skipped some separators.
     ///
@@ -27,6 +31,7 @@ pub trait ParseStream {
         is_joint: bool,
     ) -> Result<(), crate::error::ParseError>
     where
+        Self: Sized,
         Self::Atom: Spanned<Span = S>,
     {
         let first_peek = self.peek().map(|a| a.span()).unwrap_or_default();
@@ -51,7 +56,11 @@ pub trait ParseStream {
     fn dup<'a, T, E, F: FnOnce(&mut Dup<&'a mut Self, Self::Atom>) -> std::result::Result<T, E>>(
         &'a mut self,
         f: F,
-    ) -> std::result::Result<T, E> {
+    ) -> std::result::Result<T, E>
+    where
+        Self: Sized,
+        Self::Atom: Clone,
+    {
         let mut dup = Dup {
             slot: self,
             take_buf: Vec::new(),

@@ -1,0 +1,10 @@
+error: a `#[seq]` field's element type is not a visited type — mark only a field whose element is a container of a type listed in `visitor!(..)` (or reached via `#[subast]`)
+  --> tests/ui/visitor_edit_marker_unvisited.rs:15:16
+   |
+15 |     pub items: Vec<String>, // `String` is not a visited AST type
+   |                ^^^^^^^^^^^
+...
+20 |     syan::visit::visitor!(crate::Wrap, crate::Leaf);
+   |     ----------------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `crate::Wrap` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
