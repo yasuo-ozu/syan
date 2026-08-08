@@ -74,7 +74,12 @@ pub trait ParseStream {
         } = dup;
         match result {
             Ok(ok) => {
-                while let Some(item) = push_buf.pop() {
+                // Replay in insertion order. `pop()` here drained the buffer BACKWARDS onto a
+                // LIFO parent, which reversed two or more leftover pushbacks: a stream of
+                // `[1,2,3,4]` whose inner attempt consumed 1,2 and failed came back as
+                // `[2,1,3,4]` once the enclosing scope committed. Invisible in practice only
+                // because an attempt almost always dies on its first atom, leaving at most one.
+                for item in push_buf.drain(..) {
                     slot.push(item);
                 }
                 Ok(ok)
@@ -143,6 +148,17 @@ where
     fn push(&mut self, token: Self::Atom) {
         self.push_buf.push(token);
     }
+
+    // Forward, do not inherit. The trait's defaults for these two are `todo!()`, so a wrapper
+    // that omits them turns any call reaching it into a panic — reachable today, since a leaf
+    // parser calls `skip_sep`/`validate_spacing` on whatever stream it is handed.
+    fn get_error(&mut self) -> std::result::Result<(), Self::Error> {
+        self.slot.get_error()
+    }
+
+    fn skip_sep(&mut self) -> bool {
+        self.slot.skip_sep()
+    }
 }
 
 impl<T: ?Sized> ParseStream for &'_ mut T
@@ -162,5 +178,14 @@ where
 
     fn push(&mut self, item: Self::Atom) {
         T::push(self, item)
+    }
+
+    // See the note on `Dup`: omitting these inherits the trait's `todo!()` defaults.
+    fn get_error(&mut self) -> std::result::Result<(), Self::Error> {
+        T::get_error(self)
+    }
+
+    fn skip_sep(&mut self) -> bool {
+        T::skip_sep(self)
     }
 }

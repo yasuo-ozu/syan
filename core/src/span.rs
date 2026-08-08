@@ -109,6 +109,15 @@ where
             fn push(&mut self, token: Self::Atom) {
                 self.0.push(token)
             }
+
+            // Forward rather than inherit the trait's `todo!()` defaults — see the note on `Dup`.
+            fn get_error(&mut self) -> Result<(), Self::Error> {
+                self.0.get_error()
+            }
+
+            fn skip_sep(&mut self) -> bool {
+                self.0.skip_sep()
+            }
         }
         let mut stream = SubStream(stream.into_parse_stream(), Atom::Span::default());
         let slot = T::parse(&mut stream)?;
