@@ -23,6 +23,7 @@ syan-macro = { path = "../macro", version = "0.1.0" }
 [dev-dependencies]
 template-quote = "0.4"
 type-macro-derive-tricks = "0.2"
+trybuild = { version = "1.0", features = ["diff"] }
 
 [features]
 default = ["proc_macro2"]

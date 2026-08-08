@@ -8,5 +8,6 @@ pub mod tuple;
 
 #[doc(hidden)]
 pub mod _imp {
+    pub use crate::parse::{Parse, Unparse};
     pub use syan_macro;
 }

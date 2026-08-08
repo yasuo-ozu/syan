@@ -1,1193 +1,696 @@
-use proc_macro2::TokenStream;
-use proc_macro_error::abort;
+use proc_macro::TokenStream as TokenStream1;
+use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro_error::emit_warning;
 use std::collections::{HashMap, HashSet};
-use syn::punctuated::Punctuated;
-use syn::spanned::Spanned;
-use syn::*;
+use syn::{
+    punctuated::Punctuated, AngleBracketedGenericArguments, Fields, FieldsNamed, FieldsUnnamed,
+    FnArg, GenericArgument, GenericParam, Generics, ImplItem, Item, ItemMod, Path, PathArguments,
+    PathSegment, ReturnType, Token, Type, TypeParam, TypePath, Visibility,
+};
 use template_quote::quote;
 
-fn get_name_and_field_tys(item: &Item) -> Option<(Ident, Vec<Type>)> {
-    match item {
-        Item::Struct(ItemStruct { ident, fields, .. }) => Some((
-            ident.clone(),
-            fields.iter().map(|field| field.ty.clone()).collect(),
-        )),
-        Item::Enum(ItemEnum {
-            ident, variants, ..
-        }) => Some((
-            ident.clone(),
-            variants
-                .iter()
-                .map(|variant| variant.fields.iter().map(|field| field.ty.clone()))
-                .flatten()
-                .collect(),
-        )),
-        _ => None,
+/// Default recursion depth when no `limit` argument is given.
+const DEFAULT_RECURSION_DEPTH: usize = 4;
+
+struct RecurseArgs {
+    limit: usize,
+}
+
+impl syn::parse::Parse for RecurseArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Ok(RecurseArgs {
+                limit: DEFAULT_RECURSION_DEPTH,
+            });
+        }
+        let ident: Ident = input.parse()?;
+        if ident != "limit" {
+            return Err(syn::Error::new(
+                ident.span(),
+                "expected `limit = <integer>`",
+            ));
+        }
+        let _: Token![=] = input.parse()?;
+        let lit: syn::LitInt = input.parse()?;
+        let limit: usize = lit.base10_parse()?;
+        Ok(RecurseArgs { limit })
     }
 }
 
-fn find_fundamental_tys(
-    ty: &Type,
-    idents: &[Ident],
-    additional_predicates: &mut Vec<TokenStream>,
-    additional_predicates_parse: &mut Vec<TokenStream>,
-    additional_predicates_unparse: &mut Vec<TokenStream>,
-) -> Option<HashSet<Type>> {
-    let child_types = match ty {
-        Type::Array(TypeArray { elem, .. }) => vec![elem.as_ref()],
-        Type::Ptr(TypePtr { elem, .. }) => vec![elem.as_ref()],
-        Type::Reference(TypeReference { elem, .. }) => vec![elem.as_ref()],
-        Type::Slice(TypeSlice { elem, .. }) => vec![elem.as_ref()],
-        Type::Tuple(TypeTuple { elems, .. }) => elems.iter().collect(),
+struct TransformCtx {
+    cycle_types: HashSet<String>,
+    root_types: HashSet<String>,
+    internal_names: HashMap<String, Ident>,
+    rec_param: Ident,
+    default_alias: Ident,
+    /// All type parameters of the root type (in order), used for depth-aliases and defaults.
+    root_type_params: Vec<Ident>,
+    /// Original type-parameter count for each cycle type (before extra root params are added).
+    cycle_orig_param_counts: HashMap<String, usize>,
+}
+
+fn collect_refs(ty: &Type, known: &HashSet<String>, out: &mut HashSet<String>) {
+    match ty {
         Type::Path(TypePath { path, .. }) => {
-            // Collect types from generic arguments
-            let mut types = Vec::new();
-            for segment in &path.segments {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                    for arg in &args.args {
-                        if let GenericArgument::Type(arg_ty) = arg {
-                            types.push(arg_ty);
+            if let Some(seg) = path.segments.first() {
+                let name = seg.ident.to_string();
+                if known.contains(&name) {
+                    out.insert(name);
+                }
+            }
+            for seg in &path.segments {
+                if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+                    for arg in &ab.args {
+                        if let GenericArgument::Type(t) = arg {
+                            collect_refs(t, known, out);
                         }
                     }
                 }
             }
-            types
         }
-        _ => vec![],
+        Type::Reference(r) => collect_refs(&r.elem, known, out),
+        Type::Slice(s) => collect_refs(&s.elem, known, out),
+        Type::Array(a) => collect_refs(&a.elem, known, out),
+        Type::Tuple(t) => t.elems.iter().for_each(|e| collect_refs(e, known, out)),
+        _ => {}
+    }
+}
+
+fn collect_refs_fields(fields: &Fields, known: &HashSet<String>, out: &mut HashSet<String>) {
+    for field in fields {
+        collect_refs(&field.ty, known, out);
+    }
+}
+
+fn collect_refs_item(item: &Item, known: &HashSet<String>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    match item {
+        Item::Enum(e) => e
+            .variants
+            .iter()
+            .for_each(|v| collect_refs_fields(&v.fields, known, &mut out)),
+        Item::Struct(s) => collect_refs_fields(&s.fields, known, &mut out),
+        _ => {}
+    }
+    out
+}
+
+// Collect only direct (outermost type constructor) references — used to pick the root type.
+fn collect_direct_refs_item(item: &Item, known: &HashSet<String>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let check = |ty: &Type, out: &mut HashSet<String>| {
+        if let Type::Path(TypePath { path, .. }) = ty {
+            if let Some(seg) = path.segments.first() {
+                let name = seg.ident.to_string();
+                if known.contains(&name) {
+                    out.insert(name);
+                }
+            }
+        }
+    };
+    match item {
+        Item::Enum(e) => {
+            for v in &e.variants {
+                for field in &v.fields {
+                    check(&field.ty, &mut out);
+                }
+            }
+        }
+        Item::Struct(s) => {
+            for field in &s.fields {
+                check(&field.ty, &mut out);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn can_reach(
+    from: &str,
+    target: &str,
+    graph: &HashMap<String, HashSet<String>>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    for next in graph.get(from).into_iter().flatten() {
+        if next == target {
+            return true;
+        }
+        if visited.insert(next.clone()) && can_reach(next, target, graph, visited) {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_cycle_types(graph: &HashMap<String, HashSet<String>>) -> HashSet<String> {
+    graph
+        .keys()
+        .filter(|name| {
+            let mut visited = HashSet::new();
+            can_reach(name, name, graph, &mut visited)
+        })
+        .cloned()
+        .collect()
+}
+
+fn transform_type(ty: &Type, ctx: &TransformCtx) -> Type {
+    match ty {
+        Type::Path(TypePath { qself: None, path }) => {
+            if let Some(seg) = path.segments.first() {
+                let name = seg.ident.to_string();
+                if ctx.root_types.contains(&name) {
+                    let p = &ctx.rec_param;
+                    return syn::parse_quote!(#p);
+                }
+                if let Some(internal) = ctx.internal_names.get(&name) {
+                    let existing: Vec<GenericArgument> =
+                        if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+                            ab.args
+                                .iter()
+                                .map(|arg| match arg {
+                                    GenericArgument::Type(t) => {
+                                        GenericArgument::Type(transform_type(t, ctx))
+                                    }
+                                    other => other.clone(),
+                                })
+                                .collect()
+                        } else {
+                            vec![]
+                        };
+                    // Insert extra root type params (those beyond this type's original count).
+                    let orig_count = ctx
+                        .cycle_orig_param_counts
+                        .get(&name)
+                        .copied()
+                        .unwrap_or(existing.len());
+                    let rec = &ctx.rec_param;
+                    let mut args: Punctuated<GenericArgument, Token![,]> =
+                        existing.into_iter().collect();
+                    for p in ctx.root_type_params.iter().skip(orig_count) {
+                        args.push(syn::parse_quote!(#p));
+                    }
+                    args.push(syn::parse_quote!(#rec));
+                    return Type::Path(TypePath {
+                        qself: None,
+                        path: Path {
+                            leading_colon: None,
+                            segments: {
+                                let mut s = Punctuated::new();
+                                s.push(PathSegment {
+                                    ident: internal.clone(),
+                                    arguments: PathArguments::AngleBracketed(
+                                        AngleBracketedGenericArguments {
+                                            colon2_token: None,
+                                            lt_token: Default::default(),
+                                            args,
+                                            gt_token: Default::default(),
+                                        },
+                                    ),
+                                });
+                                s
+                            },
+                        },
+                    });
+                }
+            }
+            // Non-cycle path: recurse into generic args
+            let mut new_path = path.clone();
+            for seg in new_path.segments.iter_mut() {
+                if let PathArguments::AngleBracketed(ref mut ab) = seg.arguments {
+                    for arg in ab.args.iter_mut() {
+                        if let GenericArgument::Type(t) = arg {
+                            *t = transform_type(t, ctx);
+                        }
+                    }
+                }
+            }
+            Type::Path(TypePath {
+                qself: None,
+                path: new_path,
+            })
+        }
+        Type::Reference(r) => Type::Reference(syn::TypeReference {
+            elem: Box::new(transform_type(&r.elem, ctx)),
+            ..r.clone()
+        }),
+        Type::Slice(s) => Type::Slice(syn::TypeSlice {
+            elem: Box::new(transform_type(&s.elem, ctx)),
+            ..s.clone()
+        }),
+        Type::Array(a) => Type::Array(syn::TypeArray {
+            elem: Box::new(transform_type(&a.elem, ctx)),
+            ..a.clone()
+        }),
+        Type::Tuple(t) => Type::Tuple(syn::TypeTuple {
+            elems: t.elems.iter().map(|e| transform_type(e, ctx)).collect(),
+            ..t.clone()
+        }),
+        other => other.clone(),
+    }
+}
+
+fn transform_fields(fields: &mut Fields, ctx: &TransformCtx) {
+    match fields {
+        Fields::Named(FieldsNamed { named, .. }) => {
+            for field in named.iter_mut() {
+                field.ty = transform_type(&field.ty, ctx);
+            }
+        }
+        Fields::Unnamed(FieldsUnnamed { unnamed, .. }) => {
+            for field in unnamed.iter_mut() {
+                field.ty = transform_type(&field.ty, ctx);
+            }
+        }
+        Fields::Unit => {}
+    }
+}
+
+fn all_type_params(generics: &Generics) -> Vec<Ident> {
+    generics
+        .params
+        .iter()
+        .filter_map(|p| {
+            if let GenericParam::Type(TypeParam { ident, .. }) = p {
+                Some(ident.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn transform_item(item: Item, ctx: &TransformCtx) -> Item {
+    match item {
+        Item::Enum(mut e)
+            if matches!(e.vis, Visibility::Public(_))
+                && ctx.cycle_types.contains(&e.ident.to_string()) =>
+        {
+            let orig_name = e.ident.to_string();
+            let orig_count = ctx
+                .cycle_orig_param_counts
+                .get(&orig_name)
+                .copied()
+                .unwrap_or(0);
+            e.ident = ctx.internal_names[&orig_name].clone();
+            let rec = &ctx.rec_param;
+            let default_alias = &ctx.default_alias;
+            // Append extra root params (those not in this type's original generics).
+            for p in ctx.root_type_params.iter().skip(orig_count) {
+                e.generics.params.push(syn::parse_quote!(#p));
+            }
+            let root_params = &ctx.root_type_params;
+            e.generics
+                .params
+                .push(syn::parse_quote!(#rec = #default_alias<#(#root_params),*>));
+            for variant in &mut e.variants {
+                transform_fields(&mut variant.fields, ctx);
+            }
+            Item::Enum(e)
+        }
+        Item::Struct(mut s)
+            if matches!(s.vis, Visibility::Public(_))
+                && ctx.cycle_types.contains(&s.ident.to_string()) =>
+        {
+            let orig_name = s.ident.to_string();
+            let orig_count = ctx
+                .cycle_orig_param_counts
+                .get(&orig_name)
+                .copied()
+                .unwrap_or(0);
+            s.ident = ctx.internal_names[&orig_name].clone();
+            let rec = &ctx.rec_param;
+            let default_alias = &ctx.default_alias;
+            for p in ctx.root_type_params.iter().skip(orig_count) {
+                s.generics.params.push(syn::parse_quote!(#p));
+            }
+            let root_params = &ctx.root_type_params;
+            s.generics
+                .params
+                .push(syn::parse_quote!(#rec = #default_alias<#(#root_params),*>));
+            transform_fields(&mut s.fields, ctx);
+            Item::Struct(s)
+        }
+        // Inherent impl block whose Self type is a cycle type: rename Self type, add __Rec param,
+        // and transform all method signature types so they use the internal names.
+        Item::Impl(mut impl_block) if impl_block.trait_.is_none() => {
+            let cycle_name: Option<String> = (|| {
+                let Type::Path(TypePath { qself: None, path }) = impl_block.self_ty.as_ref() else {
+                    return None;
+                };
+                let seg = path.segments.first()?;
+                let name = seg.ident.to_string();
+                ctx.cycle_types.contains(&name).then_some(name)
+            })();
+
+            if let Some(name) = cycle_name {
+                let internal = ctx.internal_names[&name].clone();
+                let rec = &ctx.rec_param;
+                let orig_count = ctx.cycle_orig_param_counts.get(&name).copied().unwrap_or(0);
+
+                // Extra root params to thread into this impl block.
+                let extra_root_params: Vec<&Ident> =
+                    ctx.root_type_params.iter().skip(orig_count).collect();
+
+                // Rename self_ty, add extra root params, and append __Rec type argument.
+                if let Type::Path(TypePath { path, .. }) = impl_block.self_ty.as_mut() {
+                    if let Some(seg) = path.segments.first_mut() {
+                        seg.ident = internal;
+                        match &mut seg.arguments {
+                            PathArguments::AngleBracketed(ab) => {
+                                for arg in ab.args.iter_mut() {
+                                    if let GenericArgument::Type(t) = arg {
+                                        *t = transform_type(t, ctx);
+                                    }
+                                }
+                                for p in &extra_root_params {
+                                    ab.args.push(syn::parse_quote!(#p));
+                                }
+                                ab.args.push(syn::parse_quote!(#rec));
+                            }
+                            PathArguments::None => {
+                                let mut args: Punctuated<GenericArgument, Token![,]> =
+                                    Punctuated::new();
+                                for p in &extra_root_params {
+                                    args.push(syn::parse_quote!(#p));
+                                }
+                                args.push(syn::parse_quote!(#rec));
+                                seg.arguments =
+                                    PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                                        colon2_token: None,
+                                        lt_token: Default::default(),
+                                        args,
+                                        gt_token: Default::default(),
+                                    });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Add extra root params + __Rec to impl generics (no defaults — not allowed).
+                for p in &extra_root_params {
+                    impl_block.generics.params.push(syn::parse_quote!(#p));
+                }
+                impl_block.generics.params.push(syn::parse_quote!(#rec));
+
+                // Transform types in method signatures (params + return type)
+                for item in &mut impl_block.items {
+                    if let ImplItem::Fn(method) = item {
+                        for input in &mut method.sig.inputs {
+                            if let FnArg::Typed(pat_type) = input {
+                                pat_type.ty = Box::new(transform_type(&pat_type.ty, ctx));
+                            }
+                        }
+                        if let ReturnType::Type(_, ty) = &mut method.sig.output {
+                            *ty = Box::new(transform_type(ty, ctx));
+                        }
+                    }
+                }
+            }
+
+            Item::Impl(impl_block)
+        }
+        other => other,
+    }
+}
+
+pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
+    let args: RecurseArgs = match syn::parse(attr) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let recursion_depth = args.limit;
+
+    let module: ItemMod = match syn::parse(input) {
+        Ok(m) => m,
+        Err(e) => return e.to_compile_error().into(),
     };
 
-    let mut result = HashSet::new();
-    let mut has_fundamental = false;
+    let Some((_, items)) = module.content else {
+        return quote!(#module).into();
+    };
 
-    let fundamental_tys = child_types
-        .iter()
-        .map(|ty| {
-            find_fundamental_tys(
-                ty,
-                idents,
-                additional_predicates,
-                additional_predicates_parse,
-                additional_predicates_unparse,
-            )
-        })
-        .collect::<Vec<_>>();
+    let mod_attrs = &module.attrs;
+    let mod_vis = &module.vis;
+    let mod_ident = &module.ident;
 
-    for (fund, &ty) in fundamental_tys.iter().zip(&child_types) {
-        if let Some(inner) = fund {
-            has_fundamental = true;
-            result.extend(inner.clone());
-        } else {
-            result.insert(ty.clone());
-        }
-    }
-
-    if let Type::Path(TypePath { qself: None, path }) = ty {
-        if path.leading_colon.is_none() && path.segments.len() == 1 {
-            let segment = &path.segments[0];
-            let type_name = &segment.ident;
-
-            if idents.contains(type_name) {
-                // This is a fundamental type
-                return Some([ty.clone()].into());
-            }
-        }
-        if let Some(_) = compare_trait_path(
-            [
-                &parse_quote!(::core::option::Option<T>),
-                &parse_quote!(::std::option::Option<T>),
-                &parse_quote!(::core::vec::Vec<T>),
-                &parse_quote!(::std::vec::Vec<T>),
-            ],
-            path,
-        ) {
-            additional_predicates_parse.push(quote!($atom: ::core::clone::Clone));
-        } else if let Some(args) =
-            compare_trait_path([&parse_quote!(::std::collections::HashSet<K>)], path)
-        {
-            additional_predicates.push(quote!(#{&args[0]}: ::core::hash::Hash + ::core::cmp::Eq));
-        } else if let Some(args) =
-            compare_trait_path([&parse_quote!(::std::collections::BTreeSet<K>)], path)
-        {
-            additional_predicates.push(quote!(#{&args[0]}: ::core::cmp::Ord));
-        } else if let Some(args) =
-            compare_trait_path([&parse_quote!(::std::collections::HashMap<K, V>)], path)
-        {
-            assert_eq!(fundamental_tys.len(), 2);
-            match (&fundamental_tys[0], &fundamental_tys[1]) {
-                (None, None) => {
-                    additional_predicates_parse.push(quote!(
-                         <#{&args[0]} as $syan::parse::parse::Parse<$atom>>:: Error: $syan::error::UnionWith<
-                             <#{&args[1]} as $syan::parse::parse::Parse<$atom>>::Error
-                         >
-                    ));
-                }
-                (Some(_), None) => {
-                    additional_predicates_parse.push(quote!(
-                         $syan::error::ParseError: $syan::error::UnionWith<
-                             <#{&args[1]} as $syan::parse::parse::Parse<$atom>>::Error
-                         >
-                    ));
-                }
-                (None, Some(_)) => {
-                    additional_predicates_parse.push(quote!(
-                         <#{&args[0]} as $syan::parse::parse::Parse<$atom>>:: Error: $syan::error::UnionWith<
-                             $syan::error::ParseError
-                         >
-                    ));
-                }
-                _ => (),
-            }
-            additional_predicates.push(quote!(#{&args[0]}: ::core::hash::Hash + ::core::cmp::Eq));
-        } else if let Some(args) =
-            compare_trait_path([&parse_quote!(::std::collections::BTreeMap<K, V>)], path)
-        {
-            assert_eq!(fundamental_tys.len(), 2);
-            match (&fundamental_tys[0], &fundamental_tys[1]) {
-                (None, None) => {
-                    additional_predicates_parse.push(quote!(
-                         <#{&args[0]} as $syan::parse::parse::Parse<$atom>>:: Error: $syan::error::UnionWith<
-                             <#{&args[1]} as $syan::parse::parse::Parse<$atom>>::Error
-                         >
-                    ));
-                }
-                (Some(_), None) => {
-                    additional_predicates_parse.push(quote!(
-                         $syan::error::ParseError: $syan::error::UnionWith<
-                             <#{&args[1]} as $syan::parse::parse::Parse<$atom>>::Error
-                         >
-                    ));
-                }
-                (None, Some(_)) => {
-                    additional_predicates_parse.push(quote!(
-                         <#{&args[0]} as $syan::parse::parse::Parse<$atom>>:: Error: $syan::error::UnionWith<
-                             $syan::error::ParseError
-                         >
-                    ));
-                }
-                _ => (),
-            }
-            additional_predicates.push(quote!(#{&args[0]}: ::core::cmp::Ord));
-        }
-    }
-
-    if has_fundamental {
-        Some(result)
-    } else {
-        None
-    }
-}
-
-fn make_graph(items: &[Item]) -> HashMap<Ident, HashSet<Ident>> {
-    let mut ret: HashMap<Ident, HashSet<Ident>> = HashMap::new();
-    let mut idents = HashSet::new();
-
-    for item in items {
-        if let Some((ident, _)) = get_name_and_field_tys(item) {
-            idents.insert(ident);
-        }
-    }
-
-    use syn::visit::Visit;
-    #[derive(Default)]
-    struct Visitor(HashSet<Ident>);
-    impl syn::visit::Visit<'_> for Visitor {
-        fn visit_type(&mut self, ty: &Type) {
-            if let Type::Path(TypePath { qself: None, path }) = ty {
-                if path.leading_colon.is_none() && path.segments.len() == 1 {
-                    self.0.insert(path.segments[0].ident.clone());
-                }
-                syn::visit::visit_path(self, path);
-            }
-        }
-    }
-
-    // Build the graph using get_name_and_field_tys
-    for item in items {
-        if let Some((ident, field_tys)) = get_name_and_field_tys(item) {
-            let mut visitor = Visitor::default();
-            for field_ty in field_tys {
-                visitor.visit_type(&field_ty);
-            }
-            ret.entry(ident)
-                .or_default()
-                .extend(visitor.0.intersection(&idents).cloned().collect::<Vec<_>>());
-        }
-    }
-    ret
-}
-
-fn find_strong_loop(graph: &HashMap<Ident, HashSet<Ident>>) -> Vec<HashSet<Ident>> {
-    let mut tarjan_indices: HashMap<Ident, (usize, usize)> = HashMap::new();
-
-    fn visit(
-        counter: &mut usize,
-        node: &Ident,
-        graph: &HashMap<Ident, HashSet<Ident>>,
-        tarjan_indices: &mut HashMap<Ident, (usize, usize)>,
-        stack: &mut Vec<Ident>,
-        output: &mut Vec<HashSet<Ident>>,
-    ) {
-        // check if the node is not visited
-        if tarjan_indices.contains_key(node) {
-            return;
-        }
-        tarjan_indices.insert(node.clone(), (*counter, *counter));
-        let stack_top = stack.len();
-        stack.push(node.clone());
-        *counter += 1;
-        for next_node in &graph[node] {
-            match tarjan_indices.get(next_node) {
-                Some((next_ix, _)) if stack.contains(next_node) => {
-                    let next_ix = *next_ix;
-                    let (_, lowlink) = tarjan_indices.get_mut(node).unwrap();
-                    *lowlink = usize::min(*lowlink, next_ix);
-                }
-                None => {
-                    visit(counter, next_node, graph, tarjan_indices, stack, output);
-                    let next_lowlink = tarjan_indices.get(next_node).unwrap().1;
-                    let (_, lowlink) = tarjan_indices.get_mut(node).unwrap();
-                    *lowlink = usize::min(*lowlink, next_lowlink);
-                }
-                _ => (),
-            }
-        }
-        let (ix, lowlink) = tarjan_indices.get(node).unwrap();
-        if lowlink == ix {
-            let mut to_output = HashSet::new();
-            while stack.len() > stack_top {
-                to_output.insert(stack.pop().unwrap());
-            }
-            output.push(to_output);
-        }
-    }
-
-    let mut counter = 0;
-    let mut stack = Vec::new();
-    let mut output = Vec::new();
-    for node in graph.keys() {
-        visit(
-            &mut counter,
-            node,
-            graph,
-            &mut tarjan_indices,
-            &mut stack,
-            &mut output,
-        );
-    }
-    output
-}
-
-fn compare_trait_path<'a>(
-    absolute_paths: impl IntoIterator<Item = &'a Path>,
-    mandatory_path: &Path,
-) -> Option<Punctuated<GenericArgument, Token![,]>> {
-    let mand_segments = &mandatory_path.segments;
-
-    for absolute_path in absolute_paths {
-        let abs_segments = &absolute_path.segments;
-        let mut matched_count = 0;
-        for (abs_seg, mand_seg) in abs_segments.iter().rev().zip(mand_segments.iter().rev()) {
-            if abs_seg.ident == mand_seg.ident {
-                matched_count += 1;
-            } else {
-                break;
-            }
-        }
-
-        if matched_count == mand_segments.len()
-            && matched_count > 0
-            && (matched_count < abs_segments.len()
-                || (absolute_path.leading_colon.is_some()
-                    || mandatory_path.leading_colon.is_none()))
-        {
-            match (
-                &abs_segments.last().unwrap().arguments,
-                &mand_segments.last().unwrap().arguments,
-            ) {
-                (
-                    PathArguments::AngleBracketed(_),
-                    PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
-                ) => {
-                    return Some(args.clone());
-                }
-                (PathArguments::None, PathArguments::None) => return Some(Default::default()),
-                _ => (),
-            }
-        }
-    }
-    None
-}
-
-fn split_type_path(ty: &Type) -> Option<(&Ident, Punctuated<GenericArgument, Token![,]>)> {
-    if let Type::Path(TypePath {
-        qself: None,
-        path: Path {
-            leading_colon: None,
-            segments,
-        },
-        ..
-    }) = ty
-    {
-        if segments.len() == 1 {
-            let segment = &segments[0];
-            match &segment.arguments {
-                PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) => {
-                    return Some((&segment.ident, args.clone()));
-                }
-                PathArguments::None => {
-                    // For types without generic arguments, we need to handle them differently
-                    return Some((&segment.ident, Punctuated::new()));
-                }
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
-#[allow(unused)]
-fn collect_all_fundamental_tys(
-    ty: &Type,
-    items: &HashMap<Ident, (Punctuated<GenericParam, Token![,]>, Vec<Type>)>,
-    hist_stack: &mut Vec<(Ident, Punctuated<GenericArgument, Token![,]>)>,
-    additional_predicates: &mut Vec<TokenStream>,
-    additional_predicates_parse: &mut Vec<TokenStream>,
-    additional_predicates_unparse: &mut Vec<TokenStream>,
-) -> Option<HashSet<Type>> {
-    let idents: Vec<Ident> = items.keys().cloned().collect();
-    let mut result: HashSet<Type> = HashSet::new();
-    let mut has_fundamental = false;
-    for fundamental_ty in find_fundamental_tys(
-        ty,
-        &idents,
-        additional_predicates,
-        additional_predicates_parse,
-        additional_predicates_unparse,
-    )
-    .unwrap_or(core::iter::once(ty.clone()).collect())
-    {
-        if let Some((ident, args)) = split_type_path(&fundamental_ty) {
-            if let Some((params, tys)) = items.get(ident) {
-                has_fundamental = true;
-                if let Some((_, found_args)) =
-                    hist_stack.iter().find(|(hist_name, _)| hist_name == ident)
-                {
-                    continue;
-                }
-                hist_stack.push((ident.clone(), args.clone()));
-                let mut param_map = HashMap::new();
-                for (param, arg) in params.iter().zip(args.iter()) {
-                    param_map.insert(param.clone(), arg.clone());
-                }
-                // Handle default type parameters if args.len() < params.len()
-                if args.len() < params.len() {
-                    for param in params.iter().skip(args.len()) {
-                        if let GenericParam::Type(TypeParam {
-                            default: Some(default_ty),
-                            ..
-                        }) = param
-                        {
-                            param_map
-                                .insert(param.clone(), GenericArgument::Type(default_ty.clone()));
-                        }
-                    }
-                }
-                for ty in tys {
-                    let mut substituted_ty = ty.clone();
-                    substitute_generics_in_type(&mut substituted_ty, &param_map);
-                    if let Some(nested_result) = collect_all_fundamental_tys(
-                        &substituted_ty,
-                        items,
-                        hist_stack,
-                        additional_predicates,
-                        additional_predicates_parse,
-                        additional_predicates_unparse,
-                    ) {
-                        has_fundamental = true;
-                        result.extend(nested_result);
-                    } else {
-                        result.insert(substituted_ty.clone());
-                    }
-                }
-                hist_stack.pop();
-                continue;
-            }
-        }
-        result.insert(fundamental_ty.clone());
-    }
-    if has_fundamental {
-        Some(result)
-    } else {
-        None
-    }
-}
-
-// Helper function to substitute generics in a type using VisitMut
-fn substitute_generics_in_type(ty: &mut Type, param_map: &HashMap<GenericParam, GenericArgument>) {
-    use syn::visit_mut::VisitMut;
-
-    struct Visitor<'a>(&'a HashMap<GenericParam, GenericArgument>);
-
-    impl<'a> VisitMut for Visitor<'a> {
-        fn visit_type_mut(&mut self, ty: &mut Type) {
-            // Replace types using the map
-            if let Type::Path(TypePath { qself: None, path }) = ty {
-                if path.leading_colon.is_none() && path.segments.len() == 1 {
-                    let segment = &path.segments[0];
-                    // Look for matching GenericParam::Type with this ident
-                    for (param, replacement) in self.0.iter() {
-                        if let GenericParam::Type(TypeParam { ident, .. }) = param {
-                            if ident == &segment.ident {
-                                if let GenericArgument::Type(replacement_ty) = replacement {
-                                    *ty = replacement_ty.clone();
-                                    return; // Don't continue visiting if we replaced
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            syn::visit_mut::visit_type_mut(self, ty);
-        }
-
-        fn visit_lifetime_mut(&mut self, lifetime: &mut Lifetime) {
-            // Replace lifetimes using the map
-            for (param, replacement) in self.0.iter() {
-                if let GenericParam::Lifetime(LifetimeParam {
-                    lifetime: param_lifetime,
-                    ..
-                }) = param
-                {
-                    if param_lifetime.ident == lifetime.ident {
-                        if let GenericArgument::Lifetime(replacement_lifetime) = replacement {
-                            *lifetime = replacement_lifetime.clone();
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
-        fn visit_expr_mut(&mut self, expr: &mut Expr) {
-            // Replace const generics in expressions
-            if let Expr::Path(expr_path) = expr {
-                if let Some(path) = &expr_path.path.get_ident() {
-                    for (param, replacement) in self.0.iter() {
-                        if let GenericParam::Const(ConstParam { ident, .. }) = param {
-                            if ident == *path {
-                                if let GenericArgument::Const(replacement_expr) = replacement {
-                                    *expr = replacement_expr.clone();
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            syn::visit_mut::visit_expr_mut(self, expr);
-        }
-    }
-
-    let mut visitor = Visitor(param_map);
-    visitor.visit_type_mut(ty);
-}
-
-pub fn recurse(mut item_mod: ItemMod) -> TokenStream {
-    let span = item_mod.span();
-    let contents = item_mod
-        .content
-        .as_mut()
-        .unwrap_or_else(|| abort!(span, "no content"))
-        .1
-        .as_mut_slice();
-    let items: HashMap<_, _> = contents
+    // Collect all pub type names
+    let pub_types: HashSet<String> = items
         .iter()
         .filter_map(|item| match item {
-            Item::Struct(ItemStruct {
-                ident,
-                generics,
-                fields,
-                ..
-            }) => {
-                let field_tys = fields.iter().map(|f| f.ty.clone()).collect();
-                Some((ident.clone(), (generics.params.clone(), field_tys)))
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => Some(e.ident.to_string()),
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => Some(s.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    // Build reference graph
+    let type_refs: HashMap<String, HashSet<String>> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => {
+                Some((e.ident.to_string(), collect_refs_item(item, &pub_types)))
             }
-            Item::Enum(ItemEnum {
-                ident,
-                generics,
-                variants,
-                ..
-            }) => {
-                let field_tys = variants
-                    .iter()
-                    .flat_map(|v| v.fields.iter().map(|f| f.ty.clone()))
-                    .collect();
-                Some((ident.clone(), (generics.params.clone(), field_tys)))
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => {
+                Some((s.ident.to_string(), collect_refs_item(item, &pub_types)))
             }
             _ => None,
         })
         .collect();
-    let graph = make_graph(&contents);
-    let groups = find_strong_loop(&graph);
-    for content in contents {
-        let (ident, generics, all_fields) = match content {
-            Item::Struct(ItemStruct {
-                generics,
-                ident,
-                fields,
-                ..
-            }) => (
-                ident.clone(),
-                generics.clone(),
-                fields.iter_mut().collect::<Vec<_>>(),
-            ),
-            Item::Enum(ItemEnum {
-                generics,
-                ident,
-                variants,
-                ..
-            }) => (
-                ident.clone(),
-                generics.clone(),
-                variants
-                    .iter_mut()
-                    .flat_map(|v| &mut v.fields)
-                    .collect::<Vec<_>>(),
-            ),
+
+    // Find all types in cycles using DFS back-edge detection
+    let cycle_types = find_cycle_types(&type_refs);
+
+    if cycle_types.is_empty() {
+        return quote!(
+            #(#mod_attrs)* #mod_vis mod #mod_ident { #(#items)* }
+        )
+        .into();
+    }
+
+    // Root types: those that directly reference themselves
+    let root_types: HashSet<String> = cycle_types
+        .iter()
+        .filter(|name| {
+            type_refs
+                .get(*name)
+                .map_or(false, |refs| refs.contains(*name))
+        })
+        .cloned()
+        .collect();
+
+    // Build direct-reference counts: how many cycle types reference each type as a bare field
+    // (not wrapped in Vec, Box, etc.). This is the primary criterion for root selection.
+    let direct_type_refs: HashMap<String, HashSet<String>> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e) if matches!(e.vis, Visibility::Public(_)) => Some((
+                e.ident.to_string(),
+                collect_direct_refs_item(item, &pub_types),
+            )),
+            Item::Struct(s) if matches!(s.vis, Visibility::Public(_)) => Some((
+                s.ident.to_string(),
+                collect_direct_refs_item(item, &pub_types),
+            )),
+            _ => None,
+        })
+        .collect();
+
+    let mut direct_ref_counts: HashMap<&str, usize> = HashMap::new();
+    for refs in direct_type_refs.values() {
+        for r in refs {
+            if cycle_types.contains(r) {
+                *direct_ref_counts.entry(r.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Root type: the one that controls recursion depth.
+    // Priority: (1) self-referential types, (2) most directly referenced by other cycle types
+    // (so that destructuring a non-root gives back root type directly), (3) most referenced
+    // overall, (4) alphabetically smallest for determinism.
+    let root_name: String = if !root_types.is_empty() {
+        root_types.iter().min().cloned().unwrap()
+    } else {
+        let mut ref_counts: HashMap<&str, usize> = HashMap::new();
+        for refs in type_refs.values() {
+            for r in refs {
+                if cycle_types.contains(r) {
+                    *ref_counts.entry(r.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut candidates: Vec<&String> = cycle_types.iter().collect();
+        candidates.sort_by(|a, b| {
+            let da = direct_ref_counts.get(a.as_str()).copied().unwrap_or(0);
+            let db = direct_ref_counts.get(b.as_str()).copied().unwrap_or(0);
+            db.cmp(&da)
+                .then_with(|| {
+                    let ra = ref_counts.get(a.as_str()).copied().unwrap_or(0);
+                    let rb = ref_counts.get(b.as_str()).copied().unwrap_or(0);
+                    rb.cmp(&ra)
+                })
+                .then_with(|| a.as_str().cmp(b.as_str()))
+        });
+        candidates[0].clone()
+    };
+
+    let root_ident = Ident::new(&root_name, Span::call_site());
+    let term_ident = Ident::new(&format!("{root_name}Term"), Span::call_site());
+    let default_alias = Ident::new(&format!("__{root_name}Default"), Span::call_site());
+    let rec_param = Ident::new("__Rec", Span::call_site());
+
+    // Internal (renamed) idents: "Expr" → "__ExprRec"
+    let internal_names: HashMap<String, Ident> = cycle_types
+        .iter()
+        .map(|n| {
+            (
+                n.clone(),
+                Ident::new(&format!("__{n}Rec"), Span::call_site()),
+            )
+        })
+        .collect();
+
+    // Warn if the first type parameter of a cycle type is not named `S` or `Span`.
+    // The macro unconditionally uses the first param as the span type in depth aliases;
+    // any other name likely means the assumption is wrong.
+    for item in &items {
+        let (type_ident, generics): (&Ident, &Generics) = match item {
+            Item::Enum(e)
+                if matches!(e.vis, Visibility::Public(_))
+                    && cycle_types.contains(&e.ident.to_string()) =>
+            {
+                (&e.ident, &e.generics)
+            }
+            Item::Struct(s)
+                if matches!(s.vis, Visibility::Public(_))
+                    && cycle_types.contains(&s.ident.to_string()) =>
+            {
+                (&s.ident, &s.generics)
+            }
             _ => continue,
         };
-        let group = groups
-            .iter()
-            .find_map(|g| g.contains(&ident).then_some(g))
-            .unwrap();
-        let items = items
-            .iter()
-            .filter(|(ident, _)| group.contains(ident))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let mut fundamental_tys: Option<HashSet<Type>> = None;
-        let mut additional_predicates = Vec::new();
-        let mut additional_predicates_parse = Vec::new();
-        let mut additional_predicates_unparse = Vec::new();
-        let mut stack = Vec::new();
-        stack.push((
-            ident.clone(),
-            generics
-                .params
-                .iter()
-                .map(|p| match p {
-                    GenericParam::Lifetime(LifetimeParam { lifetime, .. }) => {
-                        GenericArgument::Lifetime(lifetime.clone())
-                    }
-                    GenericParam::Type(TypeParam { ident, .. }) => parse_quote!(#ident),
-                    GenericParam::Const(ConstParam { ident, .. }) => parse_quote!(#ident),
-                })
-                .collect(),
-        ));
-        for field in all_fields {
-            if let Some(tys) = collect_all_fundamental_tys(
-                &field.ty,
-                &items,
-                &mut stack,
-                &mut additional_predicates,
-                &mut additional_predicates_parse,
-                &mut additional_predicates_unparse,
-            ) {
-                let mut s = fundamental_tys.unwrap_or_default();
-                s.extend(tys);
-                fundamental_tys = Some(s);
-                field.attrs.push(parse_quote!(#[ignore_bounds]));
+        let first_ty_param = generics.params.iter().find_map(|p| {
+            if let GenericParam::Type(tp) = p {
+                Some(&tp.ident)
+            } else {
+                None
             }
-        }
-        if let Some(fundamental_tys) = &fundamental_tys {
-            match content {
-                Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. }) => {
-                    let s = fundamental_tys.iter().collect::<Vec<_>>();
-                    attrs.push(parse_quote!(#[fundamental_tys(#(#s),*)]));
-                }
-                _ => panic!(),
-            }
-        }
-        if !additional_predicates.is_empty() {
-            match content {
-                Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. }) => {
-                    for predicate in &additional_predicates {
-                        attrs.push(parse_quote!(#[predicate(#predicate)]));
-                    }
-                }
-                _ => panic!(),
-            }
-        }
-        if !additional_predicates_parse.is_empty() {
-            match content {
-                Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. }) => {
-                    for predicate in &additional_predicates_parse {
-                        attrs.push(parse_quote!(#[predicate_parse(#predicate)]));
-                    }
-                }
-                _ => panic!(),
-            }
-        }
-        if !additional_predicates_unparse.is_empty() {
-            match content {
-                Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. }) => {
-                    for predicate in &additional_predicates_unparse {
-                        attrs.push(parse_quote!(#[predicate_unparse(#predicate)]));
-                    }
-                }
-                _ => panic!(),
+        });
+        if let Some(param_ident) = first_ty_param {
+            let name = param_ident.to_string();
+            if name != "S" && name != "Span" {
+                emit_warning!(
+                    param_ident.span(),
+                    "`#[recurse]` uses the first type parameter `{}` of `{}` as the span type \
+                     for depth-alias generation; rename it to `S` or `Span` to make this \
+                     explicit, or reorder generics so the span type comes first",
+                    name,
+                    type_ident
+                );
             }
         }
     }
-    quote!(#item_mod)
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use quote::format_ident;
+    // Collect original type-param counts for every cycle type (before any macro transforms).
+    let cycle_orig_param_counts: HashMap<String, usize> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(e)
+                if matches!(e.vis, Visibility::Public(_))
+                    && cycle_types.contains(&e.ident.to_string()) =>
+            {
+                Some((e.ident.to_string(), all_type_params(&e.generics).len()))
+            }
+            Item::Struct(s)
+                if matches!(s.vis, Visibility::Public(_))
+                    && cycle_types.contains(&s.ident.to_string()) =>
+            {
+                Some((s.ident.to_string(), all_type_params(&s.generics).len()))
+            }
+            _ => None,
+        })
+        .collect();
 
-    macro_rules! graph {
-        ($($node:ident $(=> $($edge:ident),+)? $(;)*)*) => {{
-            #[allow(unused_mut)]
-            let mut graph: HashMap<Ident, HashSet<Ident>> = HashMap::new();
-            $(
-                let node = format_ident!(stringify!($node));
-                #[allow(unused_mut)]
-                let mut edges = HashSet::new();
-                $($(
-                    let edge = format_ident!(stringify!($edge));
-                    edges.insert(edge.clone());
-                    graph.entry(edge).or_default();
-                )+)?
-                graph.insert(node, edges);
-            )*
-            graph
-        }};
+    // All type params of the root type — threaded through depth aliases and all cycle types.
+    let root_type_params: Vec<Ident> = items
+        .iter()
+        .find_map(|item| match item {
+            Item::Enum(e)
+                if matches!(e.vis, Visibility::Public(_)) && e.ident.to_string() == root_name =>
+            {
+                Some(all_type_params(&e.generics))
+            }
+            Item::Struct(s)
+                if matches!(s.vis, Visibility::Public(_)) && s.ident.to_string() == root_name =>
+            {
+                Some(all_type_params(&s.generics))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| vec![Ident::new("S", Span::call_site())]);
+
+    // For root detection in the transformer: we treat the ROOT type as "replaced by __Rec"
+    // and all other cycle types as "renamed + get __Rec appended".
+    // The root type's direct references also become __Rec, so we add it to root_types set.
+    let mut effective_roots = root_types.clone();
+    effective_roots.insert(root_name.clone());
+
+    let ctx = TransformCtx {
+        cycle_types: cycle_types.clone(),
+        root_types: effective_roots,
+        internal_names: internal_names.clone(),
+        rec_param: rec_param.clone(),
+        default_alias: default_alias.clone(),
+        root_type_params: root_type_params.clone(),
+        cycle_orig_param_counts: cycle_orig_param_counts.clone(),
+    };
+
+    let root_params = &root_type_params;
+
+    // Inner default: (recursion_depth - 1) levels of __ExprRec<P0, P1, …, depth_ty>.
+    // The public Expr<…> alias adds one more layer so that matching Expr::Block { stmts }
+    // leaves stmts: Vec<__StmtRec<…, __ExprDefault<…>>> which equals Vec<Stmt<…>>.
+    let root_internal = &internal_names[&root_name];
+    let mut depth_ty: TokenStream = quote!(#term_ident);
+    for _ in 0..(recursion_depth - 1) {
+        depth_ty = quote!(#root_internal<#(#root_params,)* #depth_ty>);
     }
 
-    #[test]
-    fn test_find_strong_loop_empty_graph() {
-        let graph = graph!();
-        let result = find_strong_loop(&graph);
-        let expected: Vec<HashSet<Ident>> = vec![];
-        assert_eq!(result, expected);
-    }
+    quote! {
+        #(#mod_attrs)* #mod_vis mod #mod_ident {
+            #(for item in items.into_iter().map(|item| transform_item(item, &ctx))) { #item }
 
-    #[test]
-    fn test_find_strong_loop_single_node_no_self_loop() {
-        let graph = graph!(A);
-        let a = format_ident!("A");
+            pub struct #term_ident;
 
-        let result = find_strong_loop(&graph);
-        let expected = vec![HashSet::from([a])];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_find_strong_loop_single_node_self_loop() {
-        let graph = graph!(A => A);
-        let a = format_ident!("A");
-
-        let result = find_strong_loop(&graph);
-        let expected = vec![HashSet::from([a])];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_find_strong_loop_two_nodes_no_cycle() {
-        let graph = graph!(A => B; B);
-        let a = format_ident!("A");
-        let b = format_ident!("B");
-
-        let mut result = find_strong_loop(&graph);
-        result.sort_by_key(|set| set.iter().next().unwrap().to_string());
-        let mut expected = vec![HashSet::from([a]), HashSet::from([b])];
-        expected.sort_by_key(|set| set.iter().next().unwrap().to_string());
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_find_strong_loop_two_nodes_cycle() {
-        let graph = graph!(A => B; B => A);
-        let a = format_ident!("A");
-        let b = format_ident!("B");
-
-        let result = find_strong_loop(&graph);
-        let expected = vec![HashSet::from([a, b])];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_find_strong_loop_three_nodes_cycle() {
-        let graph = graph!(A => B; B => C; C => A);
-        let a = format_ident!("A");
-        let b = format_ident!("B");
-        let c = format_ident!("C");
-
-        let result = find_strong_loop(&graph);
-        let expected = vec![HashSet::from([a, b, c])];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_find_strong_loop_complex_graph() {
-        // A -> B -> C -> A (cycle of 3)
-        // B -> D
-        // E (isolated)
-        let graph = graph!(A => B; B => C, D; C => A; D; E);
-        let a = format_ident!("A");
-        let b = format_ident!("B");
-        let c = format_ident!("C");
-        let d = format_ident!("D");
-        let e = format_ident!("E");
-
-        let result = find_strong_loop(&graph);
-
-        // Check that we have exactly 3 SCCs
-        assert_eq!(result.len(), 3);
-
-        // Verify specific SCCs exist
-        let expected_sccs = vec![
-            HashSet::from([d]),       // isolated D
-            HashSet::from([e]),       // isolated E
-            HashSet::from([a, b, c]), // 3-node cycle
-        ];
-
-        for expected_scc in expected_sccs {
-            assert!(
-                result.contains(&expected_scc),
-                "SCC {:?} not found in result",
-                expected_scc
-            );
-        }
-    }
-
-    #[test]
-    fn test_find_strong_loop_multiple_cycles() {
-        // A <-> B (cycle of 2)
-        // C <-> D (cycle of 2)
-        let graph = graph!(A => B; B => A; C => D; D => C);
-        let a = format_ident!("A");
-        let b = format_ident!("B");
-        let c = format_ident!("C");
-        let d = format_ident!("D");
-
-        let mut result = find_strong_loop(&graph);
-        result.sort_by_key(|set| set.iter().next().unwrap().to_string());
-        let mut expected = vec![
-            HashSet::from([a, b]), // A <-> B cycle
-            HashSet::from([c, d]), // C <-> D cycle
-        ];
-        expected.sort_by_key(|set| set.iter().next().unwrap().to_string());
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_find_strong_loop_large_complex_graph() {
-        // Large complex graph with multiple SCCs of different sizes
-        //
-        // SCC 1: A -> B -> C -> A (3-node cycle)
-        // SCC 2: D -> E -> F -> G -> D (4-node cycle)
-        // SCC 3: H <-> I (2-node cycle)
-        // SCC 4: J -> K -> L -> M -> N -> J (5-node cycle)
-        // Isolated nodes: O, P, Q
-        // Cross-SCC edges: A -> D, C -> H, G -> O, I -> P
-        let graph = graph!(
-            A => B, D;
-            B => C;
-            C => A, H;
-            D => E;
-            E => F;
-            F => G;
-            G => D, O;
-            H => I;
-            I => H, P;
-            J => K;
-            K => L;
-            L => M;
-            M => N;
-            N => J;
-            O;
-            P;
-            Q
-        );
-
-        let a = format_ident!("A");
-        let b = format_ident!("B");
-        let c = format_ident!("C");
-        let d = format_ident!("D");
-        let e = format_ident!("E");
-        let f = format_ident!("F");
-        let g = format_ident!("G");
-        let h = format_ident!("H");
-        let i = format_ident!("I");
-        let j = format_ident!("J");
-        let k = format_ident!("K");
-        let l = format_ident!("L");
-        let m = format_ident!("M");
-        let n = format_ident!("N");
-        let o = format_ident!("O");
-        let p = format_ident!("P");
-        let q = format_ident!("Q");
-
-        let result = find_strong_loop(&graph);
-
-        // Check that we have exactly 7 SCCs with the right sizes
-        assert_eq!(result.len(), 7);
-
-        let mut size_counts = std::collections::HashMap::new();
-        for scc in &result {
-            *size_counts.entry(scc.len()).or_insert(0) += 1;
-        }
-
-        assert_eq!(size_counts[&1], 3); // 3 isolated nodes
-        assert_eq!(size_counts[&2], 1); // 1 two-node cycle
-        assert_eq!(size_counts[&3], 1); // 1 three-node cycle
-        assert_eq!(size_counts[&4], 1); // 1 four-node cycle
-        assert_eq!(size_counts[&5], 1); // 1 five-node cycle
-
-        // Verify specific SCCs exist
-        let expected_sccs = vec![
-            HashSet::from([o]),             // Isolated node O
-            HashSet::from([p]),             // Isolated node P
-            HashSet::from([q]),             // Isolated node Q
-            HashSet::from([h, i]),          // H <-> I (2-node cycle)
-            HashSet::from([a, b, c]),       // A -> B -> C -> A (3-node cycle)
-            HashSet::from([d, e, f, g]),    // D -> E -> F -> G -> D (4-node cycle)
-            HashSet::from([j, k, l, m, n]), // J -> K -> L -> M -> N -> J (5-node cycle)
-        ];
-
-        for expected_scc in expected_sccs {
-            assert!(
-                result.contains(&expected_scc),
-                "SCC {:?} not found in result",
-                expected_scc
-            );
-        }
-    }
-
-    #[test]
-    fn test_compare_trait_path_comprehensive() {
-        macro_rules! test_success {
-            ($abs:ty, $mand:ty $(,)?) => {
-                let abs_path: Path = parse_quote!($abs);
-                let mand_path: Path = parse_quote!($mand);
-                let result = compare_trait_path([&abs_path], &mand_path);
-                assert!(result.is_some());
-            };
-        }
-
-        macro_rules! test_failure {
-            ($abs:ty, $mand:ty $(,)?) => {
-                let abs_path: Path = parse_quote!($abs);
-                let mand_path: Path = parse_quote!($mand);
-                let result = compare_trait_path([&abs_path], &mand_path);
-                assert!(result.is_none());
-            };
-        }
-
-        // Success cases
-        test_success!(std::collections::HashMap, std::collections::HashMap);
-        test_success!(
-            std::collections::HashMap<K, V>,
-            std::collections::HashMap<A, B>,
-        );
-        test_success!(
-            crate::std::collections::HashMap<String, i32>,
-            std::collections::HashMap<C, D>,
-        );
-        test_success!(HashMap<T>, HashMap<T>);
-        test_success!(::std::collections::HashMap<T>, HashMap<T>);
-        test_success!(::std::collections::HashMap, HashMap);
-        test_success!(::std::collections::HashMap, std::collections::HashMap);
-        test_success!(
-            std::collections::HashMap<String, Vec<i32>>,
-            HashMap<A, B>,
-        );
-        test_success!(
-            crate::module::std::collections::HashMap<T>,
-            std::collections::HashMap<T>,
-        );
-
-        // Failure cases
-        test_failure!(std::collections::HashSet, HashMap);
-        test_failure!(HashMap, std::collections::HashMap);
-        test_failure!(crate::other::HashMap, std::collections::HashMap);
-    }
-
-    #[test]
-    fn test_graph_macro_edge_cases() {
-        // Test various edge cases of the graph macro syntax
-
-        // Single node with multiple outgoing edges
-        let graph1 = graph!(A => B, C, D, E, F);
-        assert_eq!(graph1.len(), 6); // A + B + C + D + E + F
-        assert_eq!(graph1[&format_ident!("A")].len(), 5);
-
-        // Multiple nodes, some with edges, some without
-        let graph2 = graph!(X => Y, Z; A; B => C; D);
-        assert_eq!(graph2.len(), 7); // X + Y + Z + A + B + C + D
-        assert_eq!(graph2[&format_ident!("X")].len(), 2);
-        assert_eq!(graph2[&format_ident!("A")].len(), 0);
-        assert_eq!(graph2[&format_ident!("B")].len(), 1);
-        assert_eq!(graph2[&format_ident!("D")].len(), 0);
-
-        // Chain of nodes
-        let graph3 = graph!(A => B; B => C; C => D; D => E; E => F);
-        assert_eq!(graph3.len(), 6);
-        for node_name in ["A", "B", "C", "D", "E"] {
-            let node = format_ident!("{}", node_name);
-            assert_eq!(
-                graph3[&node].len(),
-                1,
-                "Node {} should have exactly 1 outgoing edge",
-                node_name
-            );
-        }
-        assert_eq!(graph3[&format_ident!("F")].len(), 0);
-    }
-
-    #[test]
-    fn test_collect_all_fundamental_tys() {
-        // Define test structs and enums using quote! macro
-        let test_module: ItemMod = parse_quote! {
-            mod test {
-                struct CircularA<T> {
-                    b_ref: CircularB<T>,
-                    data: u32,
-                }
-
-                struct CircularB<T> {
-                    c_ref: CircularC<T>,
-                    value: String,
-                }
-
-                struct CircularC<T> {
-                    a_ref: CircularA<T>,
-                    b_ref: CircularB<T>,
-                    flag: bool,
+            impl<__Atom: ::syan::span::Spanned> ::syan::parse::Parse<__Atom> for #term_ident {
+                type Error = ::syan::error::ParseError;
+                fn parse(
+                    _stream: impl ::syan::parse::IntoParseStream<Atom = __Atom>,
+                ) -> ::core::result::Result<Self, Self::Error> {
+                    Err(::syan::error::ParseError::new((), "recursion depth limit reached"))
                 }
             }
-        };
-        let expected_types: HashSet<String> = [
-            quote!(u32).to_string(),
-            quote!(String).to_string(),
-            quote!(bool).to_string(),
-            // quote!(CircularB<i32>).to_string(),
-        ]
-        .into();
 
-        let items: HashMap<Ident, (Punctuated<GenericParam, Token![,]>, Vec<Type>)> = test_module
-            .content
-            .unwrap()
-            .1
-            .iter()
-            .filter_map(|item| match item {
-                Item::Struct(ItemStruct {
-                    ident,
-                    generics,
-                    fields,
-                    ..
-                }) => {
-                    let field_tys = fields.iter().map(|f| f.ty.clone()).collect();
-                    Some((ident.clone(), (generics.params.clone(), field_tys)))
-                }
-                Item::Enum(ItemEnum {
-                    ident,
-                    generics,
-                    variants,
-                    ..
-                }) => {
-                    let field_tys = variants
-                        .iter()
-                        .flat_map(|v| v.fields.iter().map(|f| f.ty.clone()))
-                        .collect();
-                    Some((ident.clone(), (generics.params.clone(), field_tys)))
-                }
-                _ => None,
-            })
-            .collect();
-
-        let mut hist_stack = Vec::new();
-        let mut additional_predicates = Vec::new();
-
-        let result = collect_all_fundamental_tys(
-            &parse_quote!(CircularA<i32>),
-            &items,
-            &mut hist_stack,
-            &mut additional_predicates,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        )
-        .unwrap()
-        .into_iter()
-        .map(|t| quote!(#t).to_string())
-        .collect::<HashSet<_>>();
-        assert_eq!(&result, &expected_types);
-        assert_eq!(hist_stack.len(), 0);
-
-        let result = collect_all_fundamental_tys(
-            &parse_quote!(CircularB<i32>),
-            &items,
-            &mut hist_stack,
-            &mut additional_predicates,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        );
-        let circular_b_expected: HashSet<Type> =
-            [parse_quote!(u32), parse_quote!(String), parse_quote!(bool)].into();
-        assert_eq!(result.as_ref(), Some(&circular_b_expected));
-        assert_eq!(hist_stack.len(), 0);
-
-        let result = collect_all_fundamental_tys(
-            &parse_quote!(CircularC<i32>),
-            &items,
-            &mut hist_stack,
-            &mut additional_predicates,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        );
-        let circular_c_expected: HashSet<Type> =
-            [parse_quote!(u32), parse_quote!(String), parse_quote!(bool)].into();
-        assert_eq!(result.as_ref(), Some(&circular_c_expected));
-        assert_eq!(hist_stack.len(), 0);
-
-        let result = collect_all_fundamental_tys(
-            &parse_quote!(Option<CircularA<i32>>),
-            &items,
-            &mut hist_stack,
-            &mut additional_predicates,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        )
-        .unwrap()
-        .into_iter()
-        .map(|t| quote!(#t).to_string())
-        .collect::<HashSet<_>>();
-        assert_eq!(&result, &expected_types);
-        assert_eq!(hist_stack.len(), 0);
-    }
-
-    #[test]
-    fn test_recurse_mutual_reference() {
-        let input: ItemMod = parse_quote! {
-            mod test {
-                struct A {
-                    id: u32,
-                    b_field: B,
-                    name: String,
-                }
-                struct B {
-                    value: i32,
-                    a_field: A,
-                    flag: bool,
+            impl<__Atom> ::syan::parse::Unparse<__Atom> for #term_ident {
+                fn unparse<__E: ::syan::parse::unparse::Emitter<__Atom>>(
+                    &self,
+                    _sink: &mut __E,
+                ) -> ::core::result::Result<(), __E::Error> {
+                    ::core::panic!("recursion depth limit reached")
                 }
             }
-        };
 
-        let result = recurse(input);
-        println!("result = {}", quote!(#result));
-        let output: ItemMod = parse2(result).unwrap();
+            type #default_alias<#(#root_params),*> = #depth_ty;
+            pub type #root_ident<#(#root_params),*> =
+                #root_internal<#(#root_params,)* #default_alias<#(#root_params),*>>;
 
-        let items = &output.content.unwrap().1;
-        // Check struct A
-        if let Item::Struct(struct_a) = &items[0] {
-            assert_eq!(struct_a.ident, "A");
-
-            // Parse #[fundamental_tys] attribute
-            let fundamental_attr = struct_a
-                .attrs
-                .iter()
-                .find(|attr| attr.path().is_ident("fundamental_tys"))
-                .expect("A should have #[fundamental_tys]");
-
-            let types: Punctuated<Type, Token![,]> = fundamental_attr
-                .parse_args_with(Punctuated::parse_terminated)
-                .expect("Failed to parse fundamental_tys args");
-            let actual_types: HashSet<String> =
-                types.into_iter().map(|t| quote!(#t).to_string()).collect();
-            assert!(
-                actual_types.len() == 2
-                    && actual_types.contains("bool")
-                    && actual_types.contains("i32")
-            );
-
-            // Check fields: only b_field should have #[ignore_bounds]
-            let fields: Vec<_> = struct_a.fields.iter().collect();
-            assert_eq!(fields.len(), 3);
-
-            let id_has_ignore = fields[0]
-                .attrs
-                .iter()
-                .any(|attr| attr.path().is_ident("ignore_bounds"));
-            assert!(!id_has_ignore, "id field should NOT have #[ignore_bounds]");
-
-            let b_has_ignore = fields[1]
-                .attrs
-                .iter()
-                .any(|attr| attr.path().is_ident("ignore_bounds"));
-            assert!(b_has_ignore, "b_field should have #[ignore_bounds]");
-
-            let name_has_ignore = fields[2]
-                .attrs
-                .iter()
-                .any(|attr| attr.path().is_ident("ignore_bounds"));
-            assert!(
-                !name_has_ignore,
-                "name field should NOT have #[ignore_bounds]"
-            );
-        }
-
-        // Check struct B
-        if let Item::Struct(struct_b) = &items[1] {
-            assert_eq!(struct_b.ident, "B");
-
-            // Parse #[fundamental_tys] attribute
-            let fundamental_attr = struct_b
-                .attrs
-                .iter()
-                .find(|attr| attr.path().is_ident("fundamental_tys"))
-                .expect("B should have #[fundamental_tys]");
-
-            let types: Punctuated<Type, Token![,]> = fundamental_attr
-                .parse_args_with(Punctuated::parse_terminated)
-                .expect("Failed to parse fundamental_tys args");
-            let actual_types: HashSet<String> =
-                types.into_iter().map(|t| quote!(#t).to_string()).collect();
-            assert!(
-                actual_types.len() == 2
-                    && actual_types.contains("String")
-                    && actual_types.contains("u32")
-            );
-
-            // Check fields: only a_field should have #[ignore_bounds]
-            let fields: Vec<_> = struct_b.fields.iter().collect();
-            assert_eq!(fields.len(), 3);
-
-            let value_has_ignore = fields[0]
-                .attrs
-                .iter()
-                .any(|attr| attr.path().is_ident("ignore_bounds"));
-            assert!(
-                !value_has_ignore,
-                "value field should NOT have #[ignore_bounds]"
-            );
-
-            let a_has_ignore = fields[1]
-                .attrs
-                .iter()
-                .any(|attr| attr.path().is_ident("ignore_bounds"));
-            assert!(a_has_ignore, "a_field should have #[ignore_bounds]");
-
-            let flag_has_ignore = fields[2]
-                .attrs
-                .iter()
-                .any(|attr| attr.path().is_ident("ignore_bounds"));
-            assert!(
-                !flag_has_ignore,
-                "flag field should NOT have #[ignore_bounds]"
-            );
+            #(for (orig_name, non_root_internal) in cycle_types.iter().filter(|n| *n != &root_name).map(|n| (n, &internal_names[n]))) {
+                pub type #{Ident::new(orig_name, Span::call_site())}<#(#root_params),*> =
+                    #non_root_internal<#(#root_params,)* #default_alias<#(#root_params),*>>;
+            }
         }
     }
+    .into()
 }

@@ -11,19 +11,19 @@ pub struct Group<T, O, C> {
     pub close: C,
 }
 
-impl<Atom: Spanned, T, O, C> Parse<Atom> for Group<T, O, C>
+impl<Atom, T, O, C> Parse<Atom> for Group<T, O, C>
 where
-    T: Parse<Atom, Error = ParseError>,
-    O: Parse<Atom, Error = ParseError>,
-    C: Parse<Atom, Error = ParseError>,
+    T: Parse<Atom>,
+    O: Parse<Atom>,
+    C: Parse<Atom>,
 {
     type Error = ParseError;
 
     fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
         let mut stream = stream.into_parse_stream();
-        let open = O::parse(&mut stream)?;
-        let slot = T::parse(&mut stream)?;
-        let close = C::parse(&mut stream)?;
+        let open = O::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+        let slot = T::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+        let close = C::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
         Ok(Group { open, slot, close })
     }
 }

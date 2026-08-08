@@ -1,0 +1,24 @@
+warning: unused import: `syan::source::proc_macro2::literal::Integer`
+ --> tests/ui/problem1_trait_impl.rs:8:5
+  |
+8 | use syan::source::proc_macro2::literal::Integer;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+error[E0392]: type parameter `S` is never used
+  --> tests/ui/problem1_trait_impl.rs:16:19
+   |
+16 |     pub enum Expr<S> {
+   |                   ^ unused type parameter
+   |
+   = help: consider removing `S`, referring to it in a field, or using a marker such as `PhantomData`
+   = help: if you intended `S` to be a const parameter, use `const S: /* Type */` instead
+
+error[E0282]: type annotations needed
+  --> tests/ui/problem1_trait_impl.rs:10:1
+   |
+10 | #[recurse]
+   | ^^^^^^^^^^ cannot infer type
+   |
+   = note: this error originates in the attribute macro `recurse` (in Nightly builds, run with -Z macro-backtrace for more info)
