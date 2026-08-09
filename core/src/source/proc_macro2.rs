@@ -1,6 +1,6 @@
 use crate::error::{Error, ParseError};
 use crate::nested::group::{Group, GroupBrace, GroupBracket, GroupParen, GroupShape};
-use crate::parse::{unparse::Emitter, IntoParseStream, Parse, ParseStream, Unparse};
+use crate::parse::{unparse::Emitter, IntoParseStream, Parse, ParseStream, Tape, Unparse};
 use crate::span::WithSpan;
 use crate::symbol::Symbol;
 
@@ -39,17 +39,20 @@ impl From<Span> for Option<proc_macro2::Span> {
 
 /// Wrapper around proc_macro2::TokenStream that implements syan's ParseStream trait
 pub struct Stream {
-    tokens: proc_macro2::token_stream::IntoIter,
+    tape: Tape<proc_macro2::token_stream::IntoIter>,
+    /// Spacing of the last atom served — read by `skip_sep`, so it is *derived* state that must be
+    /// restored alongside the tape. A parallel stack keyed by the tape's own raw token is the
+    /// general recipe for a stream whose state does not fit in one opaque `u64`.
     is_joint: bool,
-    buf: Vec<proc_macro2::TokenTree>,
+    joint_saves: Vec<bool>,
 }
 
 impl Stream {
     pub fn new(tokens: proc_macro2::TokenStream) -> Self {
         Self {
-            tokens: tokens.into_iter(),
+            tape: Tape::new(tokens.into_iter()),
             is_joint: false,
-            buf: Vec::new(),
+            joint_saves: Vec::new(),
         }
     }
 }
@@ -59,33 +62,40 @@ impl ParseStream for Stream {
     type Error = core::convert::Infallible;
 
     fn next(&mut self) -> Option<Self::Atom> {
-        let token = if let Some(buffered) = self.buf.pop() {
-            buffered
-        } else if let Some(token) = self.tokens.next() {
-            token
-        } else {
-            return None;
+        let token = self.tape.next()?;
+        self.is_joint = match token {
+            proc_macro2::TokenTree::Punct(ref punct) => {
+                punct.spacing() == proc_macro2::Spacing::Joint
+            }
+            _ => false,
         };
-
-        if let proc_macro2::TokenTree::Punct(ref punct) = token {
-            self.is_joint = punct.spacing() == proc_macro2::Spacing::Joint;
-        } else {
-            self.is_joint = false;
-        }
         Some(token)
     }
 
     fn peek(&mut self) -> Option<&Self::Atom> {
-        if self.buf.is_empty() {
-            if let Some(token) = self.tokens.next() {
-                self.buf.push(token);
-            }
-        }
-        self.buf.last()
+        self.tape.peek()
     }
 
     fn push(&mut self, atom: Self::Atom) {
-        self.buf.push(atom);
+        self.tape.push(atom)
+    }
+
+    fn checkpoint_raw(&mut self) -> u64 {
+        self.joint_saves.push(self.is_joint);
+        self.tape.checkpoint()
+    }
+
+    fn rollback_raw(&mut self, raw: u64) {
+        self.tape.rollback(raw);
+        if let Some(&saved) = self.joint_saves.get(raw as usize) {
+            self.is_joint = saved;
+        }
+        self.joint_saves.truncate(raw as usize);
+    }
+
+    fn commit_raw(&mut self, raw: u64) {
+        self.tape.commit(raw);
+        self.joint_saves.truncate(raw as usize);
     }
 
     fn get_error(&mut self) -> Result<(), Self::Error> {

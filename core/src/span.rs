@@ -110,7 +110,24 @@ where
                 self.0.push(token)
             }
 
-            // Forward rather than inherit the trait's `todo!()` defaults — see the note on `Dup`.
+            // Pure delegation. The accumulated span in `self.1` is NOT restored by a rollback, so a
+            // failed inner attempt leaves the span over-extended — pre-existing behaviour, preserved
+            // here deliberately rather than fixed as a side effect of the checkpoint migration. The
+            // trio does make a fix possible (save `(inner_raw, span)` on a side stack, as
+            // `source::proc_macro2::Stream` does for `is_joint`).
+            fn checkpoint_raw(&mut self) -> u64 {
+                self.0.checkpoint_raw()
+            }
+
+            fn rollback_raw(&mut self, raw: u64) {
+                self.0.rollback_raw(raw)
+            }
+
+            fn commit_raw(&mut self, raw: u64) {
+                self.0.commit_raw(raw)
+            }
+
+            // Forward rather than inherit the trait's `todo!()` defaults.
             fn get_error(&mut self) -> Result<(), Self::Error> {
                 self.0.get_error()
             }

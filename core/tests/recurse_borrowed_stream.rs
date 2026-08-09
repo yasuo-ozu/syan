@@ -86,6 +86,11 @@ pub struct SliceStream<'s, 'a> {
     pos: usize,
     /// Atoms handed back by `push` (backtracking), most recent first.
     buf: Vec<Tok<'a>>,
+    /// One `(pos, buf)` snapshot per open checkpoint — a hand-rolled trio rather than
+    /// `syan::parse::Tape`, since this stream indexes a slice it already has rather than pulling
+    /// from an iterator. Keeping one impl off `Tape` also keeps the trio's contract under test
+    /// independently of that helper.
+    saves: Vec<(usize, Vec<Tok<'a>>)>,
 }
 
 impl<'s, 'a> SliceStream<'s, 'a> {
@@ -94,6 +99,7 @@ impl<'s, 'a> SliceStream<'s, 'a> {
             toks,
             pos: 0,
             buf: Vec::new(),
+            saves: Vec::new(),
         }
     }
 }
@@ -125,6 +131,23 @@ impl<'s, 'a> ParseStream for SliceStream<'s, 'a> {
 
     fn push(&mut self, atom: Tok<'a>) {
         self.buf.push(atom);
+    }
+
+    fn checkpoint_raw(&mut self) -> u64 {
+        self.saves.push((self.pos, self.buf.clone()));
+        (self.saves.len() - 1) as u64
+    }
+
+    fn rollback_raw(&mut self, raw: u64) {
+        self.saves.truncate(raw as usize + 1);
+        if let Some((pos, buf)) = self.saves.pop() {
+            self.pos = pos;
+            self.buf = buf;
+        }
+    }
+
+    fn commit_raw(&mut self, raw: u64) {
+        self.saves.truncate(raw as usize);
     }
 
     fn get_error(&mut self) -> Result<(), LexError<'a>> {

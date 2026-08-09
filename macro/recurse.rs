@@ -8,8 +8,9 @@
 //!
 //! **One** reshape is left here: wrapping parse-call streams in `erase(…)` ([`erase_expanded`]).
 //! That one is irreducibly syan's — the growth it breaks is in the *stream type*
-//! (`Dup<Dup<…>>`), a monomorphization cycle rather than a trait-obligation cycle, and the type it
-//! pins to (`&mut dyn ParseStream`) is syan's own, not derivable from the trait being routed.
+//! (`&mut &mut …`, one layer per descent level, because `Parse::parse` takes its stream by value), a
+//! monomorphization cycle rather than a trait-obligation cycle, and the type it pins to
+//! (`&mut dyn ParseStream`) is syan's own, not derivable from the trait being routed.
 //!
 //! Everything else moved to decycle, because in each case decycle either has the information or
 //! caused the problem: deciding which types recurse (`analysis::cyclic_subgraph`), spelling the
@@ -538,8 +539,8 @@ fn make_natural_item(item: &Item) -> Item {
 //    survive untouched, with no supertrait-alias laundering.
 // 3. **Every field-parse call's stream argument is wrapped in `syan::parse::erase(…)`** — see
 //    [`syan::parse::erase`]. This is the one thing no obligation engine can do for us: the growth is
-//    in the *stream type* (`Dup<Dup<…>>`, one wrapper per backtracking descent), a monomorphization
-//    cycle rather than a trait cycle.
+//    in the *stream type* (`&mut &mut …`, one layer per descent level), a monomorphization cycle
+//    rather than a trait cycle.
 //
 // Bodies are otherwise emitted **verbatim**, still calling the **fully-qualified** trait. That is NOT
 // redundancy — the module does import the trait, so a bare `Parse` would resolve to the same item.
@@ -619,8 +620,8 @@ fn erase_parse_stream_args(item_impl: &mut ItemImpl, syan: &Path, members: &Hash
                 return;
             }
             // Only a call that can **re-enter the cycle** needs its stream pinned. The growth is a
-            // monomorphization cycle: `Expr::parse::<S>` → `Stmt::parse::<Dup<&mut S>>` →
-            // `Expr::parse::<Dup<&mut Dup<…>>>` … and that only closes if the callee leads back here.
+            // monomorphization cycle: `Expr::parse::<S>` → `Stmt::parse::<&mut S>` →
+            // `Expr::parse::<&mut &mut S>` … and that only closes if the callee leads back here.
             // A leaf field (`Integer`, `Token![;]`, a `GroupBrace`) adds one instantiation and stops,
             // so erasing it buys nothing and costs a virtual call per field — which in a real grammar
             // is most of them.

@@ -3,6 +3,7 @@ pub mod into_parse_stream;
 #[allow(clippy::module_inception)]
 pub mod parse;
 pub mod parse_stream;
+pub mod tape;
 pub mod unparse;
 
 mod tuple;
@@ -11,6 +12,7 @@ pub use into_parse_stream::IntoParseStream;
 pub use parse::Parse;
 pub use parse_stream::{erase, ParseStream};
 pub use syan_macro::recurse;
+pub use tape::Tape;
 pub use unparse::Unparse;
 
 use crate::span::Span;

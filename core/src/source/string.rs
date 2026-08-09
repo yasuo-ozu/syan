@@ -1,5 +1,5 @@
 use crate::error::ParseError;
-use crate::parse::{IntoParseStream, Parse, ParseStream};
+use crate::parse::{IntoParseStream, Parse, ParseStream, Tape};
 use crate::span::WithSpan;
 use crate::symbol::Symbol;
 use core::convert::Infallible;
@@ -21,34 +21,28 @@ impl crate::span::Span for Span {
     }
 }
 
-pub struct Stream {
-    chars: std::vec::IntoIter<char>,
-    buf: Vec<WithSpan<char, Span>>,
+/// Walks the source text one `char` at a time, attaching the position it was at. Owns the `String`
+/// and indexes into it, so nothing is collected up front and the line/col/loc bookkeeping lives here
+/// rather than in the stream — which is what lets a checkpoint be a plain index.
+struct SpannedChars {
+    src: String,
+    byte: usize,
     line: usize,
     col: usize,
     loc: usize,
 }
 
-impl Stream {
-    pub fn new(s: String) -> Self {
-        Self {
-            chars: s.chars().collect::<Vec<_>>().into_iter(),
-            buf: Vec::new(),
-            line: 1,
-            col: 1,
-            loc: 0,
-        }
-    }
+impl Iterator for SpannedChars {
+    type Item = WithSpan<char, Span>;
 
-    fn make_span(&self) -> Span {
-        Span {
+    fn next(&mut self) -> Option<Self::Item> {
+        let ch = self.src[self.byte..].chars().next()?;
+        self.byte += ch.len_utf8();
+        let span = Span {
             line: self.line,
             col: self.col,
             loc: self.loc,
-        }
-    }
-
-    fn advance(&mut self, ch: char) {
+        };
         if ch == '\n' {
             self.line += 1;
             self.col = 1;
@@ -56,6 +50,21 @@ impl Stream {
             self.col += 1;
         }
         self.loc += 1;
+        Some(WithSpan { slot: ch, span })
+    }
+}
+
+pub struct Stream(Tape<SpannedChars>);
+
+impl Stream {
+    pub fn new(s: String) -> Self {
+        Self(Tape::new(SpannedChars {
+            src: s,
+            byte: 0,
+            line: 1,
+            col: 1,
+            loc: 0,
+        }))
     }
 }
 
@@ -64,29 +73,27 @@ impl ParseStream for Stream {
     type Error = Infallible;
 
     fn next(&mut self) -> Option<Self::Atom> {
-        if let Some(buffered) = self.buf.pop() {
-            return Some(buffered);
-        }
-
-        let ch = self.chars.next()?;
-        let span = self.make_span();
-        self.advance(ch);
-
-        Some(WithSpan { slot: ch, span })
+        self.0.next()
     }
 
     fn peek(&mut self) -> Option<&Self::Atom> {
-        if self.buf.is_empty() {
-            if let Some(ch) = self.chars.next() {
-                let span = self.make_span();
-                self.buf.push(WithSpan { slot: ch, span });
-            }
-        }
-        self.buf.last()
+        self.0.peek()
     }
 
     fn push(&mut self, atom: Self::Atom) {
-        self.buf.push(atom);
+        self.0.push(atom)
+    }
+
+    fn checkpoint_raw(&mut self) -> u64 {
+        self.0.checkpoint()
+    }
+
+    fn rollback_raw(&mut self, raw: u64) {
+        self.0.rollback(raw)
+    }
+
+    fn commit_raw(&mut self, raw: u64) {
+        self.0.commit(raw)
     }
 
     fn get_error(&mut self) -> Result<(), Self::Error> {

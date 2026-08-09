@@ -31,8 +31,7 @@ fn random() -> u64 {
 ///   coinductively via the sibling type's own impl. (Caveat for `Parse` specifically: a
 ///   *generic* field type with no other impl in scope, e.g. a bare `T`, will then fail to parse — the
 ///   bound was the only thing satisfying it.) `#[recurse]` routes `Parse` through `decycle` rather than
-///   using this, and separately fixes the `stream.dup(…)` stream-monomorphization cycle with
-///   `syan::parse::erase`.
+///   using this, and separately fixes the stream-monomorphization cycle with `syan::parse::erase`.
 /// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
 #[proc_macro_error]
 #[proc_macro_derive(Parse, attributes(group, syan, joint, alone, ignore_bounds,))]
@@ -146,8 +145,9 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// **`Parse`, `Unparse` and `Spanned`** all go through `decycle`. Depth is **unbounded** modulo the
 /// OS call stack: a recursive call re-enters through the un-ranked delegating impl at full height, so
 /// decycle's rank ladder only discharges the *obligation*. (Deriving `Parse` naively cannot work —
-/// the per-field bounds form an E0275 cycle, and backtracking `stream.dup(…)` grows the stream type
-/// one `Dup<…>` per level, an infinite *monomorphization* chain no obligation engine can break. The
+/// the per-field bounds form an E0275 cycle, and `Parse::parse` takes `impl IntoParseStream` — a
+/// generic parameter, which *moves* rather than reborrows, so each descent level asks for
+/// `parse::<&mut &mut …>`, an infinite *monomorphization* chain no obligation engine can break. The
 /// latter is fixed by wrapping every recursive call's stream in `syan::parse::erase`, pinning it to
 /// one fixed `&mut dyn ParseStream` layer.) As for any recursive-descent parser, a *left-recursive*
 /// grammar recurses forever rather than being truncated. `Spanned`'s `Span = _` associated-type

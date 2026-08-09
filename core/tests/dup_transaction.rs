@@ -244,10 +244,10 @@ fn peek_agrees_with_next_after_a_rollback() {
 /// consumes `leftovers` atoms and FAILS. Returns what the stream serves after.
 ///
 /// The nesting is written out EXPLICITLY rather than by a depth-generic helper.
-/// A generic `fn inner<S: ParseStream>(s: &mut S, ..)` that calls `dup` on its
-/// own parameter monomorphizes `Dup<&mut Dup<&mut ..>>` and fails to compile
-/// with E0275 — growth source (1) blocks its own systematic test. See
-/// `dup_growth_repro/dup_nesting.rs`.
+/// It no longer has to be — see `dup_nests_to_arbitrary_depth_generically` — but
+/// when this test was written a generic helper could not compile at all
+/// (`Dup<&mut Dup<&mut ..>>`, E0275), so growth source (1) blocked its own
+/// systematic test. Kept as-is: the explicit form covers the same space.
 fn leftover_shape(leftovers: usize, levels: usize) -> String {
     fn innermost(s: &mut impl ParseStream<Atom = Atom>, leftovers: usize) {
         let _: Result<(), &str> = s.dup(|i| {
@@ -531,33 +531,84 @@ fn dup_nesting_does_not_grow_the_stream_type() {
     );
 }
 
-/// (3) `Parse::parse` takes `impl IntoParseStream` — a generic parameter, which
-/// MOVES rather than reborrows — so every descent adds a `&mut` layer.
+/// The COMPILE-time half of the above, and the stronger statement: a
+/// DEPTH-GENERIC recursive nest, which only type-checks if `dup`'s closure
+/// parameter is a fixed point. This was `dup_growth_repro/dup_nesting.rs` and it
+/// could not be a `#[test]` at all, because `dup` handed the closure
+/// `Dup<&mut Self>`:
+///
+///     error[E0275]: overflow evaluating the requirement
+///       = note: required for `Dup<&mut Dup<&mut Dup<&mut ...>>>` to implement
+///               `ParseStream`
+///
+/// The assertion at the end is almost beside the point — that this function
+/// compiles is the test.
 #[test]
-fn descent_does_not_accumulate_references() {
-    // Explicit levels, NOT a depth-generic recursive fn: such a helper
-    // monomorphizes `descend::<&mut &mut &mut ...>` without bound and fails to
-    // compile ("reached the recursion limit while instantiating"), which is
-    // growth source (2) blocking its own test. See dup_growth_repro/mut_flood.rs.
-    fn lvl<S: ParseStream<Atom = Atom>>(s: &mut S) {
+fn dup_nests_to_arbitrary_depth_generically() {
+    fn nest<S: ParseStream<Atom = Atom>>(s: &mut S, depth: u32) {
+        if depth == 0 {
+            return;
+        }
+        let _: Result<(), ()> = s.dup(|d| {
+            nest(d, depth - 1);
+            Ok(())
+        });
+    }
+    let mut s = stream_of("abcd");
+    nest(&mut s, 40);
+    assert_eq!(
+        drain(&mut s),
+        "abcd",
+        "40 nested dups that consume nothing and all commit are a no-op"
+    );
+}
+
+/// (3) `Parse::parse` takes `impl IntoParseStream` — a generic parameter, which
+/// MOVES rather than reborrows — so a descent that passes `&mut local` at each
+/// level asks for `parse::<&mut &mut …>` without bound. `erase` is the fix, and
+/// this pins that it works: the set of stream types a descent instantiates must
+/// be BOUNDED, i.e. identical at depth 3 and at depth 30.
+///
+/// Note what is *not* asserted: that the set has one element. The entry stream
+/// is a concrete `Stream` and everything below it is `&mut dyn ParseStream`, so
+/// two is correct and unavoidable. An earlier version of this test demanded one,
+/// by hand-building `lvl(&mut r1)` towers in the test body — but a caller that
+/// writes `&mut r1` where `r1: &mut Stream` has itself created `&mut &mut Stream`,
+/// so that assertion was about the test's own code rather than about the library,
+/// and no stream design that keeps the `&mut T` blanket could satisfy it.
+#[test]
+fn erased_descent_does_not_accumulate_references() {
+    // Depth-GENERIC, unlike the `dup` probes above: that is the whole point.
+    // Without the `erase` call this fails to compile with E0275 — growth source
+    // (2), see dup_growth_repro/mut_flood.rs.
+    fn note_stream<S: ParseStream<Atom = Atom>>(_s: &mut S) {
         note::<S>();
     }
-    let mut base = stream_of("abcd");
-    lvl(&mut base);
-    {
-        let mut r1 = &mut base;
-        lvl(&mut r1);
-        {
-            let mut r2 = &mut r1;
-            lvl(&mut r2);
+    fn descend(stream: impl IntoParseStream<Atom = Atom>, depth: u32) {
+        let mut stream = stream.into_parse_stream();
+        note_stream(&mut stream);
+        let _ = stream.next();
+        if depth > 0 {
+            descend(syan::parse::erase(&mut stream), depth - 1);
         }
     }
-    let seen = taken();
+
+    descend(stream_of("abcdefghij"), 3);
+    let shallow = taken();
+    descend(stream_of("abcdefghij"), 30);
+    let deep = taken();
+
     assert_eq!(
-        seen.len(),
-        1,
+        shallow, deep,
+        "the set of stream types must not grow with descent depth\n{}\n{}",
+        report("depth 3", &shallow),
+        report("depth 30", &deep)
+    );
+    assert_eq!(
+        deep.len(),
+        2,
         "{}",
-        report("descent must not accumulate &mut layers", &seen)
+        report("expected exactly {entry stream, erased stream}", &deep)
     );
 }
 
@@ -587,13 +638,12 @@ fn substream_does_not_nest() {
 }
 
 /// (6) The COST, not the mechanism: at realistic grammar depth the type names
-/// themselves become enormous (measured in rustyfi-syntax: up to 5,129 chars,
-/// `.debug_str` 1.145 GB of a 2.4 GB rlib). Deep monomorphization makes this
-/// slow to COMPILE, so it is ignored by default.
-///
-///     cargo test --test dup_transaction -- --ignored
+/// themselves used to become enormous (measured in rustyfi-syntax: up to 5,129
+/// chars, `.debug_str` 1.145 GB of a 2.4 GB rlib), because each `dup` level added
+/// a `Dup<…>` wrapper. It was `#[ignore]`d as too slow to compile for that reason.
+/// Since `dup` hands the closure `&mut Self`, all eight levels below are ONE type
+/// and the monomorphization is trivial, so it runs by default.
 #[test]
-#[ignore = "heavy: deep monomorphization; run explicitly with --ignored"]
 fn deep_nesting_keeps_type_names_bounded() {
     fn note_stream<S: ParseStream<Atom = Atom>>(_s: &mut S) {
         note::<S>();

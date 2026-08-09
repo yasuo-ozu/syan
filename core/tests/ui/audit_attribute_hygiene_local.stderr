@@ -6,7 +6,6 @@ error[E0277]: the trait bound `syan::source::proc_macro2::literal::Integer: Pars
    |
    = help: the following other types implement trait `ParseStream`:
              &mut T
-             Dup<S, A>
              syan::source::proc_macro2::Stream
              syan::source::string::Stream
    = note: required for `&mut syan::source::proc_macro2::literal::Integer` to implement `ParseStream`

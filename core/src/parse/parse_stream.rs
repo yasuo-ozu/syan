@@ -4,7 +4,12 @@ use crate::span::{Span, Spanned};
 /// type (needed to type-erase the stream at the unbounded-`#[recurse]` re-entry boundary). The generic
 /// conveniences `dup`/`validate_spacing` carry `where Self: Sized`, which keeps them off the vtable (not
 /// callable on `dyn ParseStream`) while preserving object safety — and they're callable on every real
-/// (sized) stream (`Stream`, `Dup<…>`, `&mut T`).
+/// (sized) stream (`Stream`, `&mut T`).
+///
+/// Backtracking is expressed by the **checkpoint trio** below rather than by a wrapper type. That is
+/// what keeps the stream type fixed across a `dup` scope: `dup` hands the closure `&mut Self`, not a
+/// `Dup<&mut Self>`, so nesting transactions cannot grow the type. See [`erase`] for the *other*
+/// growth source, which this does not address.
 pub trait ParseStream {
     type Atom;
     type Error;
@@ -13,6 +18,27 @@ pub trait ParseStream {
     fn next(&mut self) -> Option<Self::Atom>;
     fn peek(&mut self) -> Option<&Self::Atom>;
     fn push(&mut self, _: Self::Atom);
+
+    /// Open a transaction; the returned token identifies it.
+    ///
+    /// Every token must be handed to exactly one of [`rollback_raw`](Self::rollback_raw) or
+    /// [`commit_raw`](Self::commit_raw), and scopes must nest (LIFO). Prefer [`dup`](Self::dup),
+    /// which enforces both; reach for the raw trio only when implementing a stream or a combinator
+    /// whose control flow `dup` cannot express.
+    ///
+    /// The token is **opaque and stream-specific** — it is not a position, and passing one stream's
+    /// token to another is meaningless.
+    ///
+    /// The trio is deliberately *required*, with no default. A defaulted rewind primitive would let
+    /// a wrapper type silently inherit a broken one, which is exactly the hole `get_error`/`skip_sep`
+    /// still have (see the notes on the `&mut T` blanket below).
+    fn checkpoint_raw(&mut self) -> u64;
+
+    /// Undo everything consumed since `raw` was taken, and close that scope.
+    fn rollback_raw(&mut self, raw: u64);
+
+    /// Keep everything consumed since `raw` was taken, and close that scope.
+    fn commit_raw(&mut self, raw: u64);
 
     fn get_error(&mut self) -> Result<(), Self::Error> {
         todo!()
@@ -48,46 +74,32 @@ pub trait ParseStream {
         }
     }
 
-    /// Run sub parser with a duplicated stream.
-    /// If the given closure returns Error, then the duplicated stream is discarded and the
-    /// position is not advanced in the original stream.
-    /// If it returns Ok, then it replaces the duplicated stream is replaced with original one, and
-    /// the original is discarded.
-    fn dup<'a, T, E, F: FnOnce(&mut Dup<&'a mut Self, Self::Atom>) -> std::result::Result<T, E>>(
-        &'a mut self,
+    /// Run a sub-parser as a transaction on **this** stream.
+    ///
+    /// If the closure returns `Err`, everything it consumed is rolled back and the stream is exactly
+    /// where it started. If it returns `Ok`, the consumption is kept.
+    ///
+    /// The closure receives `&mut Self` — the same stream type, not a wrapper — so `dup` scopes can
+    /// nest arbitrarily without changing the type a recursive descent instantiates.
+    fn dup<T, E, F: FnOnce(&mut Self) -> std::result::Result<T, E>>(
+        &mut self,
         f: F,
     ) -> std::result::Result<T, E>
     where
         Self: Sized,
-        Self::Atom: Clone,
     {
-        let mut dup = Dup {
-            slot: self,
-            take_buf: Vec::new(),
-            push_buf: Vec::new(),
-        };
-        let result = f(&mut dup);
-        let Dup {
-            slot,
-            mut take_buf,
-            mut push_buf,
-        } = dup;
-        match result {
+        let raw = self.checkpoint_raw();
+        // A panic escaping `f` leaves the scope open. That is deliberate: the alternative is a drop
+        // guard that rewinds during unwind, which turns "this parse panicked" into "this parse
+        // panicked and then quietly rewound", and can abort the process if the rewind itself
+        // asserts. An abandoned scope is only a bounded leak in `saves`.
+        match f(self) {
             Ok(ok) => {
-                // Replay in insertion order. `pop()` here drained the buffer BACKWARDS onto a
-                // LIFO parent, which reversed two or more leftover pushbacks: a stream of
-                // `[1,2,3,4]` whose inner attempt consumed 1,2 and failed came back as
-                // `[2,1,3,4]` once the enclosing scope committed. Invisible in practice only
-                // because an attempt almost always dies on its first atom, leaving at most one.
-                for item in push_buf.drain(..) {
-                    slot.push(item);
-                }
+                self.commit_raw(raw);
                 Ok(ok)
             }
             Err(err) => {
-                while let Some(item) = take_buf.pop() {
-                    slot.push(item);
-                }
+                self.rollback_raw(raw);
                 Err(err)
             }
         }
@@ -96,12 +108,20 @@ pub trait ParseStream {
 
 /// Type-erase a concrete stream to **one fixed `&mut dyn ParseStream` layer**.
 ///
-/// `#[recurse]` wraps every field-parse call of a cycle member's derived `Parse` in this. Without it
-/// each backtracking `dup(…)` inside a recursive descent adds a `Dup<…>` wrapper to the *stream type*,
-/// so `Expr::parse::<S>` would call `Expr::parse::<Dup<&mut S>>` — an infinite monomorphization chain
-/// (E0275) that no trait-obligation engine can break. Erasing at the call site pins the callee's stream
-/// type to `&mut dyn ParseStream<…>`, whose own `dup` erases back to the same type — a fixed point, so
-/// the instantiation set is finite while recursion depth stays bounded only by the call stack.
+/// `#[recurse]` wraps every field-parse call of a cycle member's derived `Parse` in this. The reason is
+/// that [`Parse::parse`](crate::parse::Parse::parse) takes `impl IntoParseStream` — a generic parameter,
+/// which *moves* rather than reborrows — so a recursive descent that passes `&mut local` at each level
+/// asks for `Expr::parse::<&mut &mut …>`: an infinite monomorphization chain (E0275) that no
+/// trait-obligation engine can break. Erasing at the call site pins the callee's stream type to
+/// `&mut dyn ParseStream<…>`, and erasing *that* yields the same type again — a fixed point, so the
+/// instantiation set is finite while recursion depth stays bounded only by the call stack.
+///
+/// `erase` is also a *depth normaliser*: whatever `&mut` tower the caller happens to hold, the callee
+/// sees exactly one layer.
+///
+/// Backtracking used to be a second, independent growth source — `dup` wrapped the stream in a `Dup<…>`
+/// that was itself a `ParseStream`. The checkpoint trio removed that one; this function addresses only
+/// the `Parse::parse`-by-value one, which remains.
 ///
 /// The blanket `impl<T: ?Sized + ParseStream> ParseStream for &mut T` (plus the blanket
 /// `T: ParseStream ⇒ T: IntoParseStream`) is what makes the erased stream usable as a parser input.
@@ -112,53 +132,6 @@ where
     S: ParseStream<Atom = Atom>,
 {
     stream
-}
-
-pub struct Dup<Slot, Atom> {
-    slot: Slot,
-    take_buf: Vec<Atom>,
-    push_buf: Vec<Atom>,
-}
-
-impl<S, A> ParseStream for Dup<S, A>
-where
-    S: ParseStream<Atom = A>,
-    A: Clone,
-{
-    type Atom = A;
-    type Error = S::Error;
-    fn next(&mut self) -> Option<Self::Atom> {
-        if let Some(item) = self.push_buf.pop() {
-            Some(item)
-        } else {
-            let item = self.slot.next()?;
-            self.take_buf.push(item.clone());
-            Some(item)
-        }
-    }
-
-    fn peek(&mut self) -> Option<&Self::Atom> {
-        if let Some(last) = self.push_buf.last() {
-            Some(last)
-        } else {
-            self.slot.peek()
-        }
-    }
-
-    fn push(&mut self, token: Self::Atom) {
-        self.push_buf.push(token);
-    }
-
-    // Forward, do not inherit. The trait's defaults for these two are `todo!()`, so a wrapper
-    // that omits them turns any call reaching it into a panic — reachable today, since a leaf
-    // parser calls `skip_sep`/`validate_spacing` on whatever stream it is handed.
-    fn get_error(&mut self) -> std::result::Result<(), Self::Error> {
-        self.slot.get_error()
-    }
-
-    fn skip_sep(&mut self) -> bool {
-        self.slot.skip_sep()
-    }
 }
 
 impl<T: ?Sized> ParseStream for &'_ mut T
@@ -180,7 +153,21 @@ where
         T::push(self, item)
     }
 
-    // See the note on `Dup`: omitting these inherits the trait's `todo!()` defaults.
+    fn checkpoint_raw(&mut self) -> u64 {
+        T::checkpoint_raw(self)
+    }
+
+    fn rollback_raw(&mut self, raw: u64) {
+        T::rollback_raw(self, raw)
+    }
+
+    fn commit_raw(&mut self, raw: u64) {
+        T::commit_raw(self, raw)
+    }
+
+    // Forward, do not inherit: the trait's defaults for these two are `todo!()`, so a wrapper that
+    // omits them turns any call reaching it into a panic — reachable, since a leaf parser calls
+    // `skip_sep`/`validate_spacing` on whatever stream it is handed.
     fn get_error(&mut self) -> std::result::Result<(), Self::Error> {
         T::get_error(self)
     }
