@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! `#[recurse(structural)]` — route the cycle through decycle's **structural** engine instead of the
 //! default ranked one.
 //!

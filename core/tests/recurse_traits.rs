@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! Group-free vs group-ful `#[recurse]` Unparse/Spanned (unbounded via re-entry) + the
 //! `#[ignore_bounds]` primitive.
 #![allow(dead_code)]

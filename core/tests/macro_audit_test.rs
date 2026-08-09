@@ -32,6 +32,9 @@ fn macro_audit_compile_fail() {
     // Unparse on a zero-variant enum → E0004 (non-exhaustive empty match).
     t.compile_fail("tests/ui/audit_unparse_empty_enum.rs");
     // Generated parse-stream local `__syan_stream` is not hygienic (collides with a like-named field).
+    // Its atom is `proc_macro2::TokenTree`, so without the optional dependency it fails on the import
+    // (E0433) rather than on the hygiene collision the golden .stderr pins — a different finding.
+    #[cfg(feature = "proc_macro2")]
     t.compile_fail("tests/ui/audit_attribute_hygiene_local.rs");
 
     // ── symbol! ─────────────────────────────────────────────────────────────────────────────────

@@ -13,6 +13,10 @@ pub struct Group<T, O, C> {
 // `Unparse` to a `TokenTree`: a delimited group is a *single* `TokenTree::Group` (the delimiters aren't
 // standalone tokens), so `Group` is hand-written per real delimiter rather than `#[derive(Unparse)]`d —
 // the slot is unparsed into a sub-stream wrapped in the matching `Delimiter`.
+//
+// This whole block names `proc_macro2` types directly, so it is gated on the optional dependency —
+// like `source::proc_macro2`. `Group` itself is atom-agnostic and stays available either way.
+#[cfg(feature = "proc_macro2")]
 macro_rules! impl_group_unparse_tt {
     ($open:ident, $close:ident, $delim:ident) => {
         impl<T, S> Unparse<proc_macro2::TokenTree>
@@ -49,6 +53,7 @@ macro_rules! impl_group_unparse_tt {
 }
 
 /// Emit `slot` into a sub-stream and write it as one delimited `TokenTree::Group`.
+#[cfg(feature = "proc_macro2")]
 fn emit_tt_group<T, E>(
     slot: &T,
     delim: proc_macro2::Delimiter,
@@ -66,8 +71,11 @@ where
         delim, stream,
     )))
 }
+#[cfg(feature = "proc_macro2")]
 impl_group_unparse_tt!(OpenParen, CloseParen, Parenthesis);
+#[cfg(feature = "proc_macro2")]
 impl_group_unparse_tt!(OpenBrace, CloseBrace, Brace);
+#[cfg(feature = "proc_macro2")]
 impl_group_unparse_tt!(OpenBracket, CloseBracket, Bracket);
 
 // A group's span is the range its delimiters cover; the slot's content lies *between* `open` and

@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! `#[recurse]` end-to-end behaviour: natural types, generic/non-generic cycles, cycles deriving no
 //! routed trait, where-clause threading, and the cycle-detection scoping rules.
 #![allow(dead_code)]
@@ -490,4 +494,3 @@ mod no_root {
         assert_eq!(out.len(), 3, "round-trips all three literals");
     }
 }
-

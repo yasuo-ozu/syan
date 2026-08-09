@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 use proc_macro2::{TokenStream, TokenTree};
 use syan::parse::{Parse, Unparse};
 use syan::source::proc_macro2::literal::*;

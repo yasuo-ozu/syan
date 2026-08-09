@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! `#[derive(Parse)]` prefix-dedup: when enum variants share a leading field (`E | E!`), the shared
 //! prefix is parsed ONCE up front, not re-parsed inside each variant's backtracking attempt.
 #![allow(dead_code)] // variants are matched, not field-read

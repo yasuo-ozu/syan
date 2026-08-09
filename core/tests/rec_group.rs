@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 use syan::nested::punctuated::Punctuated;
 use syan::parse::Parse;
 use syan::symbol::Token;
@@ -89,4 +93,3 @@ fn test_simple_container_basic() {
     assert!(format!("{}", container.bracket_group.open).contains('['));
     assert!(format!("{}", container.bracket_group.close).contains(']'));
 }
-

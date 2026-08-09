@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! `source::proc_macro2::Stream` as a *stream*, specifically the state that is not the cursor.
 //!
 //! The token stream carries one piece of derived state beyond its position: `is_joint`, the spacing

@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! `Unordered<T, U>` parses `T` and `U` in either order, keeps both, and unparses back in the order it
 //! saw them.
 use syan::nested::Unordered;

@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! `#[seq]`/`#[opt]` structural-edit views over fields that are ALSO `#[group(...)]` parse groups: the
 //! grouped `Vec`/`Option` is edited in place through its `SeqView`/`OptView`, and the group delimiters
 //! survive an `Unparse` round-trip. Exercises `#[group]` + `#[seq]`/`#[opt]` together.

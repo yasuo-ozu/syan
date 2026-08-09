@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! Regression tests for three `#[derive(Parse/Unparse/Spanned)]` audit fixes:
 //!  - #1: a `where`-clause on a Parse derive used to PANIC the macro
 //!    (`assert!(generics.where_clause.is_none())`). It now expands and compiles.

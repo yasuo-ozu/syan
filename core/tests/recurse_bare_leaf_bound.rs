@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! A leaf bound written BARE in the user's own `where`-clause must still work.
 //!
 //! `#[recurse]` signals "leaf, not a cycle edge" to `decycle` by spelling the bound with a

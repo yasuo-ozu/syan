@@ -1,3 +1,7 @@
+// Parses `proc_macro2` tokens throughout; the whole suite is skipped without the optional
+// dependency that provides them.
+#![cfg(feature = "proc_macro2")]
+
 //! `Parse::attempt()` (and its field-type form `Attempt<T>`) parses atomically: on failure it **rewinds**
 //! the stream (unlike a plain `T`, which leaves it half-consumed) while still **propagating the error**
 //! (unlike `Option<T>`, which becomes `None`).
