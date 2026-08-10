@@ -284,7 +284,9 @@ where
     Item: Parse<Atom>,
     Punct: Parse<Atom>,
     Item::Error: crate::error::UnionWith<Punct::Error>,
-    <Item::Error as crate::error::UnionWith<Punct::Error>>::Output: Into<ParseError>,
+    <Item::Error as crate::error::UnionWith<Punct::Error>>::Output:
+        Into<ParseError<crate::span::SpanOf<Atom>>>,
+    <Item::Error as crate::error::UnionWith<Punct::Error>>::Output: Into<ParseError<crate::span::SpanOf<Atom>>>,
 {
     type Error = <Item::Error as crate::error::UnionWith<Punct::Error>>::Output;
 

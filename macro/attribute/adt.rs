@@ -107,7 +107,11 @@ pub(crate) trait Adt {
 
         where_predicates.push(parse_quote!(#tp_atom: #syan::span::Spanned));
         where_predicates.push(parse_quote!(#tp_atom: ::core::clone::Clone));
-        let tp_error_final: Type = parse_quote!(#syan::error::ParseError);
+        // `ParseError` is generic over the span now, and the span of an error raised while parsing
+        // `Atom` is `<Atom as Spanned>::Span`. `Atom: Spanned` is already a bound of this impl
+        // (pushed a few lines above), so the projection is in scope for free.
+        let tp_error_final: Type =
+            parse_quote!(#syan::error::ParseError<#syan::span::SpanOf<#tp_atom>>);
         let mut substructs: Vec<ItemStruct> = Vec::new();
 
         let field_phantom: Ident = parse_quote!(_syan_phantom);
@@ -160,7 +164,7 @@ pub(crate) trait Adt {
                             #field_phantom: _
                         }, #field_ident) = ::core::result::Result::map_err(
                             <#field_ty as #group_shape>::parse_group::<#slot_ty, _>(&mut *#v_stream),
-                            |err| <_ as #syan::error::Error>::into_parse_error(err)
+                            ::core::convert::identity,
                         )?;
                     ));
 
@@ -186,7 +190,13 @@ pub(crate) trait Adt {
                         }
                         let #field_ident = ::core::result::Result::map_err(
                             <#to_parse_ty as #trait_fullpath>::parse_stream(&mut *#v_stream),
-                            |err| <_ as #syan::error::Error>::into_parse_error(err)
+                            // Spelled in full: `Into::into` alone leaves the source as an
+                            // un-normalised projection and both `From<Infallible>` and the
+                            // reflexive `From<T> for T` look applicable (E0283). The bound that
+                            // makes this hold is on `Parse::Error` itself, so use `Into`, not
+                            // `From` — the compiler will not run the blanket backwards.
+                            <<#to_parse_ty as #trait_fullpath>::Error
+                                as ::core::convert::Into<#tp_error_final>>::into,
                         )?;
                     ));
                 }

@@ -37,9 +37,7 @@ fn report(shape: &str, src: &str, nodes: usize) {
     let _ = nom_impl::parse(src);
     let _ = chumsky_impl::parse(src);
     let _ = syan_char::ranked::parse(src);
-    let _ = syan_char::structural::parse(src);
     let _ = syan_token::ranked::lex_then_parse(src);
-    let _ = syan_token::structural::lex_then_parse(src);
 
     let ts = syan_token::tokenise(src);
     let rows = vec![
@@ -52,17 +50,14 @@ fn report(shape: &str, src: &str, nodes: usize) {
         row("syan-char ranked", || {
             syan_char::ranked::parse(src).unwrap();
         }),
-        row("syan-char structural", || {
-            syan_char::structural::parse(src).unwrap();
-        }),
         row("syan-token rk lex+parse", || {
             syan_token::ranked::lex_then_parse(src).unwrap();
         }),
-        row("syan-token st lex+parse", || {
-            syan_token::structural::lex_then_parse(src).unwrap();
-        }),
         row("syan-token rk parse-only", || {
             syan_token::ranked::parse_pretokenised(ts.clone()).unwrap();
+        }),
+        row("syan-char structural", || {
+            syan_char::structural::parse(src).unwrap();
         }),
         row("syan-token st parse-only", || {
             syan_token::structural::parse_pretokenised(ts.clone()).unwrap();
@@ -118,9 +113,7 @@ fn main() {
         let _ = nom_impl::parse(&src);
         let _ = chumsky_impl::parse(&src);
         let _ = syan_char::ranked::parse(&src);
-        let _ = syan_char::structural::parse(&src);
         let _ = syan_token::ranked::lex_then_parse(&src);
-        let _ = syan_token::structural::lex_then_parse(&src);
         for r in [
             row("nom", || {
                 nom_impl::parse(&src).unwrap_err();
@@ -131,11 +124,11 @@ fn main() {
             row("syan-char ranked", || {
                 syan_char::ranked::parse(&src).unwrap_err();
             }),
-            row("syan-char structural", || {
-                syan_char::structural::parse(&src).unwrap_err();
-            }),
             row("syan-token rk lex+parse", || {
                 syan_token::ranked::lex_then_parse(&src).unwrap_err();
+            }),
+            row("syan-char structural", || {
+                syan_char::structural::parse(&src).unwrap_err();
             }),
             row("syan-token st lex+parse", || {
                 syan_token::structural::lex_then_parse(&src).unwrap_err();

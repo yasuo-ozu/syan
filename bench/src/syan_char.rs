@@ -42,7 +42,7 @@ impl<T: Parse<Atom>> Parse<Atom> for Ws<T> {
 pub struct Int(pub i64);
 
 impl Parse<Atom> for Int {
-    type Error = ParseError;
+    type Error = ParseError<Span>;
     fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
         let s = stream.into_parse_stream();
         let mut buf = String::new();
@@ -55,11 +55,11 @@ impl Parse<Atom> for Int {
             s.next();
         }
         if buf.is_empty() {
-            return Err(ParseError::new(Span::default(), "expected a digit"));
+            return Err(ParseError::expected(Span::default(), "a digit"));
         }
         buf.parse::<i64>()
             .map(Int)
-            .map_err(|e| ParseError::new(Span::default(), e))
+            .map_err(|e| ParseError::other(Span::default(), e.to_string()))
     }
 }
 

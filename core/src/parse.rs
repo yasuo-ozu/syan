@@ -20,7 +20,7 @@ use crate::span::Span;
 macro_rules! impl_for_collection {
     () => {};
     ([$item:ident $($p:tt)*] $self:ty, $($t:tt)*) => {
-        impl<Atom: Clone, $item $($p)*> Parse<Atom> for $self
+        impl<Atom: Clone + crate::span::Spanned, $item $($p)*> Parse<Atom> for $self
         where
             $item: Parse<Atom>,
         {

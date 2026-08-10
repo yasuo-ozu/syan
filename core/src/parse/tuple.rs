@@ -53,7 +53,8 @@ macro_rules! __syan_tuple_parse_impl_one {
             // Infallible: UnionWith<Infallible, Output = last M>
             ::core::convert::Infallible:
                 crate::error::UnionWith<::core::convert::Infallible, Output = $MLast>,
-            __SyanError: crate::error::Error + Into<ParseError>,
+            __SyanError: crate::error::Error
+                + Into<ParseError<crate::span::SpanOf<__SyanMacroAtom>>>,
         {
             type Error = __SyanError;
             fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = __SyanMacroAtom>>(__syan_stream: &mut __S) -> ::core::result::Result<Self, Self::Error> {
@@ -102,7 +103,7 @@ impl_for_tup!(
     [__SyanErrorMerged0 __SyanErrorMerged1 __SyanErrorMerged2 __SyanErrorMerged3 __SyanErrorMerged4 __SyanErrorMerged5 __SyanErrorMerged6 __SyanErrorMerged7 __SyanErrorMerged8 __SyanErrorMerged9 __SyanErrorMerged10 __SyanErrorMerged11 __SyanErrorMerged12 __SyanErrorMerged13]
 );
 
-impl<Atom> Parse<Atom> for () {
+impl<Atom: crate::span::Spanned> Parse<Atom> for () {
     type Error = core::convert::Infallible;
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(_: &mut __S) -> Result<Self, Self::Error> {
         Ok(())
@@ -115,7 +116,7 @@ impl<Atom> Unparse<Atom> for () {
     }
 }
 
-impl<T, Atom> Parse<Atom> for (T,)
+impl<T, Atom: crate::span::Spanned> Parse<Atom> for (T,)
 where
     T: Parse<Atom>,
 {

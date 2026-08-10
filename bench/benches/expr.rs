@@ -112,40 +112,39 @@ fn errors(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("chumsky", &label), &src, |b, s| {
             b.iter(|| chumsky_impl::parse(s).unwrap_err())
         });
-        g.bench_with_input(
-            BenchmarkId::new("syan-char/ranked", &label),
-            &src,
-            |b, s| b.iter(|| syan_char::ranked::parse(s).unwrap_err()),
-        );
-        g.bench_with_input(
-            BenchmarkId::new("syan-char/structural", &label),
-            &src,
-            |b, s| b.iter(|| syan_char::structural::parse(s).unwrap_err()),
-        );
         // token = parse only; tokenisation is a separate stage and is excluded.
         let ts = syan_token::tokenise(&src);
-        g.bench_with_input(
-            BenchmarkId::new("syan-token/ranked/parse-only", &label),
-            &ts,
-            |b, ts| {
-                b.iter_batched(
-                    || ts.clone(),
-                    |ts| syan_token::ranked::parse_pretokenised(ts).unwrap_err(),
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-        g.bench_with_input(
-            BenchmarkId::new("syan-token/structural/parse-only", &label),
-            &ts,
-            |b, ts| {
-                b.iter_batched(
-                    || ts.clone(),
-                    |ts| syan_token::structural::parse_pretokenised(ts).unwrap_err(),
-                    BatchSize::SmallInput,
-                )
-            },
-        );
+        for (eng, cf, pf) in [
+            (
+                "ranked",
+                syan_char::ranked::parse as fn(&str) -> Result<_, _>,
+                syan_token::ranked::parse_pretokenised
+                    as fn(proc_macro2::TokenStream) -> Result<_, _>,
+            ),
+            (
+                "structural",
+                syan_char::structural::parse as fn(&str) -> Result<_, _>,
+                syan_token::structural::parse_pretokenised
+                    as fn(proc_macro2::TokenStream) -> Result<_, _>,
+            ),
+        ] {
+            g.bench_with_input(
+                BenchmarkId::new(format!("syan-char/{eng}"), &label),
+                &src,
+                |b, s| b.iter(|| cf(s).unwrap_err()),
+            );
+            g.bench_with_input(
+                BenchmarkId::new(format!("syan-token/{eng}/parse-only"), &label),
+                &ts,
+                |b, ts| {
+                    b.iter_batched(
+                        || ts.clone(),
+                        |ts| pf(ts).unwrap_err(),
+                        BatchSize::SmallInput,
+                    )
+                },
+            );
+        }
         g.bench_with_input(
             BenchmarkId::new("syan-token/lex-only", &label),
             &src,

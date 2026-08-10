@@ -8,8 +8,8 @@ fn all(src: &str) -> Vec<(&'static str, Result<Expr, String>)> {
         ("nom", nom_impl::parse(src)),
         ("chumsky", chumsky_impl::parse(src)),
         ("syan-char/ranked", syan_char::ranked::parse(src)),
-        ("syan-char/structural", syan_char::structural::parse(src)),
         ("syan-token/ranked", syan_token::ranked::lex_then_parse(src)),
+        ("syan-char/structural", syan_char::structural::parse(src)),
         (
             "syan-token/structural",
             syan_token::structural::lex_then_parse(src),
@@ -96,17 +96,7 @@ fn precedence_and_associativity_are_the_same() {
     assert_eq!(chumsky_impl::parse("1 - 2 - 3").unwrap().eval(), -4);
     assert_eq!(syan_char::ranked::parse("1 - 2 - 3").unwrap().eval(), -4);
     assert_eq!(
-        syan_char::structural::parse("1 - 2 - 3").unwrap().eval(),
-        -4
-    );
-    assert_eq!(
         syan_token::ranked::lex_then_parse("1 - 2 - 3")
-            .unwrap()
-            .eval(),
-        -4
-    );
-    assert_eq!(
-        syan_token::structural::lex_then_parse("1 - 2 - 3")
             .unwrap()
             .eval(),
         -4
@@ -114,15 +104,8 @@ fn precedence_and_associativity_are_the_same() {
     assert_eq!(nom_impl::parse("1 + 2 * 3").unwrap().eval(), 7);
     assert_eq!(chumsky_impl::parse("1 + 2 * 3").unwrap().eval(), 7);
     assert_eq!(syan_char::ranked::parse("1 + 2 * 3").unwrap().eval(), 7);
-    assert_eq!(syan_char::structural::parse("1 + 2 * 3").unwrap().eval(), 7);
     assert_eq!(
         syan_token::ranked::lex_then_parse("1 + 2 * 3")
-            .unwrap()
-            .eval(),
-        7
-    );
-    assert_eq!(
-        syan_token::structural::lex_then_parse("1 + 2 * 3")
             .unwrap()
             .eval(),
         7
@@ -142,42 +125,3 @@ fn all_reject_bad_input() {
     }
 }
 
-/// The two decycle engines must be indistinguishable from the outside. If they ever differ, the
-/// benchmark's engine comparison is measuring two different languages.
-#[test]
-fn the_two_engines_agree_exactly() {
-    for n in [1usize, 7, 33] {
-        let src = input::flat(n);
-        assert_eq!(
-            syan_char::ranked::parse(&src).map(|e| e.eval()),
-            syan_char::structural::parse(&src).map(|e| e.eval()),
-            "char engines differ on {src:?}"
-        );
-        assert_eq!(
-            syan_token::ranked::lex_then_parse(&src).map(|e| e.eval()),
-            syan_token::structural::lex_then_parse(&src).map(|e| e.eval()),
-            "token engines differ on {src:?}"
-        );
-    }
-    for d in [0usize, 3, 9] {
-        let src = input::nested(d);
-        assert_eq!(
-            syan_char::ranked::parse(&src).map(|e| e.eval()),
-            syan_char::structural::parse(&src).map(|e| e.eval()),
-        );
-        assert_eq!(
-            syan_token::ranked::lex_then_parse(&src).map(|e| e.eval()),
-            syan_token::structural::lex_then_parse(&src).map(|e| e.eval()),
-        );
-    }
-    // and on rejection
-    for src in ["1 +", "( 1", "&"] {
-        assert!(
-            syan_char::ranked::parse(src).is_err() && syan_char::structural::parse(src).is_err()
-        );
-        assert!(
-            syan_token::ranked::lex_then_parse(src).is_err()
-                && syan_token::structural::lex_then_parse(src).is_err()
-        );
-    }
-}

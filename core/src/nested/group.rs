@@ -94,18 +94,22 @@ where
     }
 }
 
-impl<Atom, T, O, C> Parse<Atom> for Group<T, O, C>
+impl<Atom: crate::span::Spanned, T, O, C> Parse<Atom> for Group<T, O, C>
 where
+    Atom: crate::span::Spanned,
     T: Parse<Atom>,
+    T::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
     O: Parse<Atom>,
+    O::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
     C: Parse<Atom>,
+    C::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
 {
-    type Error = ParseError;
+    type Error = ParseError<crate::span::SpanOf<Atom>>;
 
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
-        let open = O::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
-        let slot = T::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
-        let close = C::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
+        let open = O::parse_stream(&mut *stream).map_err(Into::into)?;
+        let slot = T::parse_stream(&mut *stream).map_err(Into::into)?;
+        let close = C::parse_stream(&mut *stream).map_err(Into::into)?;
         Ok(Group { open, slot, close })
     }
 }
@@ -130,12 +134,13 @@ where
 /// - **delimiter-specific** impls (see `crate::source::proc_macro2`) — for a token source a group is a
 ///   *single* atom, so the impl consumes one `TokenTree::Group`, parses the content from its inner
 ///   stream, and synthesizes the delimiter spans. The delimiters are never parsed as tokens there.
-pub trait GroupShape<Atom>: Sized {
+pub trait GroupShape<Atom: crate::span::Spanned>: Sized {
     fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
         stream: &mut __S,
-    ) -> Result<(Slot, Self), ParseError>
+    ) -> Result<(Slot, Self), ParseError<crate::span::SpanOf<Atom>>>
     where
-        Slot: Parse<Atom>;
+        Slot: Parse<Atom>,
+        Slot::Error: Into<ParseError<crate::span::SpanOf<Atom>>>;
 }
 
 /// The [`GroupShape`] counterpart for emitting: write the delimited group back out around `slot`.
@@ -154,20 +159,23 @@ pub trait GroupUnparse<Atom> {
 }
 
 // Generic sequencing: correct whenever the delimiters really are atoms of their own.
-impl<Atom, O, C> GroupShape<Atom> for Group<(), O, C>
+impl<Atom: crate::span::Spanned, O, C> GroupShape<Atom> for Group<(), O, C>
 where
     O: Parse<Atom>,
+    O::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
     C: Parse<Atom>,
+    C::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
 {
     fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
         stream: &mut __S,
-    ) -> Result<(Slot, Self), ParseError>
+    ) -> Result<(Slot, Self), ParseError<crate::span::SpanOf<Atom>>>
     where
         Slot: Parse<Atom>,
+        Slot::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
     {
-        let open = O::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
-        let slot = Slot::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
-        let close = C::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
+        let open = O::parse_stream(&mut *stream).map_err(Into::into)?;
+        let slot = Slot::parse_stream(&mut *stream).map_err(Into::into)?;
+        let close = C::parse_stream(&mut *stream).map_err(Into::into)?;
         Ok((
             slot,
             Group {

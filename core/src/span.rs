@@ -2,6 +2,10 @@ use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
 use newer_type::{implement, traits};
 pub use syan_macro::Spanned;
 
+/// The span type an atom carries — `ParseError<SpanOf<Atom>>` is the error type of any parser over
+/// `Atom`, so this alias keeps those signatures readable.
+pub type SpanOf<Atom> = <Atom as Spanned>::Span;
+
 pub trait Span: Clone + core::fmt::Debug + Default {
     fn migrate(self, other: Self) -> Self;
 }

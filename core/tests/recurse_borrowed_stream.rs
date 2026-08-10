@@ -6,13 +6,15 @@
 //! `&'a str` into the caller's buffer — and parses a mutually recursive `Expr` ↔ `Stmt` cycle out of
 //! it.
 //!
-//! The part that could plausibly break is `syan::parse::erase`, which `#[recurse]` wraps around every
-//! field-parse call to pin the callee's stream type to one `&mut dyn ParseStream` layer. A trait
-//! object defaults to a `'static` bound, so an `erase` returning `&mut dyn ParseStream<…>` rather than
-//! `&mut (dyn ParseStream<…> + 'a)` would reject every borrowed stream — and only at the recursion
-//! boundary, which no owned-source test reaches. The signatures in `parse_expr`/`parse_stmt` below are
-//! the assertion: they are written in terms of a caller-chosen `'a` with no `'static` anywhere, so
-//! they do not compile unless the borrow threads all the way through the cycle.
+//! The part that could plausibly break is the recursion boundary. It used to be `syan::parse::erase`,
+//! which `#[recurse]` wrapped around every field-parse call to pin the callee's stream type to one
+//! `&mut dyn ParseStream` layer — and a trait object defaults to a `'static` bound, so an erasure
+//! returning `&mut dyn ParseStream<…>` rather than `&mut (dyn ParseStream<…> + 'a)` would have
+//! rejected every borrowed stream. The boundary is now a plain reborrow (`&mut *stream`), which has no
+//! `'static` default to get wrong, but the test still earns its keep: it is the only one where the
+//! stream, the atom and the span all carry a caller-chosen `'a`. The signatures in
+//! `parse_expr`/`parse_stmt` below are the assertion — written with no `'static` anywhere, they do not
+//! compile unless the borrow threads all the way through the cycle.
 
 use syan::error::ParseError;
 use syan::parse::{recurse, Parse, ParseStream};
@@ -58,12 +60,21 @@ pub fn lex(src: &str) -> Vec<Tok<'_>> {
 }
 
 /// The stream's own error type — it **borrows** the offending text, so `Self::Error` carries a
-/// lifetime too. `erase` pins the stream behind `dyn ParseStream<Atom = …, Error = S::Error>`, and
+/// lifetime too. The recursion boundary reborrows the stream as `&mut S`, so `S::Error` travels with it, and
 /// `Error` is a binding on that trait object exactly like `Atom` is; giving it a lifetime is what
 /// checks that the binding survives erasure rather than being quietly required to be `'static`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LexError<'a> {
     pub at: &'a str,
+}
+
+/// Third-party errors reach the universal error through `From`, which replaced the old
+/// `Error::into_parse_error` — that method named `ParseError` concretely and could not survive it
+/// gaining a span parameter.
+impl<'a> From<LexError<'a>> for ParseError<Sp<'a>> {
+    fn from(e: LexError<'a>) -> Self {
+        ParseError::other(Sp { text: e.at }, "lex error")
+    }
 }
 
 impl<'a> syan::error::Error for LexError<'a> {
@@ -72,9 +83,7 @@ impl<'a> syan::error::Error for LexError<'a> {
         cause.into_iter().next().unwrap_or(LexError { at: "" })
     }
 
-    fn into_parse_error(self) -> ParseError {
-        ParseError::new(Sp { text: self.at }, "lex error")
-    }
+
 }
 
 /// A stream over a borrowed slice. TWO independent non-`'static` lifetimes: `'s` borrows the token
@@ -106,7 +115,7 @@ impl<'s, 'a> SliceStream<'s, 'a> {
 
 // Both lifetimes are named in the impl header, and BOTH associated types carry one: `Atom = Tok<'a>`
 // and `Error = LexError<'a>`. `'s` (the token-slice borrow) appears only in `Self` and is therefore
-// erased away completely by `erase` — all that survives of it is the well-formedness obligation that
+// never named at the recursion boundary — all that survives of it is the well-formedness obligation that
 // the stream outlive the `&mut` borrow.
 impl<'s, 'a> ParseStream for SliceStream<'s, 'a> {
     type Atom = Tok<'a>;
@@ -172,9 +181,9 @@ macro_rules! literal_leaf {
         }
 
         impl<'a> Parse<Tok<'a>> for $name<Sp<'a>> {
-            type Error = ParseError;
+            type Error = ParseError<Sp<'a>>;
 
-            fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError> {
+            fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError<Sp<'a>>> {
                 match stream.next() {
                     Some(tok) if tok.text == $text => Ok($name {
                         span: Sp { text: tok.text },
@@ -182,9 +191,9 @@ macro_rules! literal_leaf {
                     Some(tok) => {
                         // Put it back so an enclosing `dup` sees an untouched stream.
                         stream.push(tok);
-                        Err(ParseError::new(Sp::default(), concat!("expected `", $text, "`")))
+                        Err(ParseError::other(Sp::default(), concat!("expected `", $text, "`")))
                     }
-                    None => Err(ParseError::new(
+                    None => Err(ParseError::other(
                         Sp::default(),
                         concat!("expected `", $text, "`, found end of input"),
                     )),
@@ -205,9 +214,9 @@ pub struct Word<S> {
 }
 
 impl<'a> Parse<Tok<'a>> for Word<Sp<'a>> {
-    type Error = ParseError;
+    type Error = ParseError<Sp<'a>>;
 
-    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError> {
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError<Sp<'a>>> {
         match stream.next() {
             Some(tok) if tok.text.chars().all(char::is_alphanumeric) => Ok(Word {
                 text: tok.text.to_string(),
@@ -215,9 +224,9 @@ impl<'a> Parse<Tok<'a>> for Word<Sp<'a>> {
             }),
             Some(tok) => {
                 stream.push(tok);
-                Err(ParseError::new(Sp::default(), "expected a word"))
+                Err(ParseError::other(Sp::default(), "expected a word"))
             }
-            None => Err(ParseError::new(
+            None => Err(ParseError::other(
                 Sp::default(),
                 "expected a word, found end of input",
             )),
@@ -234,9 +243,9 @@ pub struct Ref<'a, S> {
 }
 
 impl<'a> Parse<Tok<'a>> for Ref<'a, Sp<'a>> {
-    type Error = ParseError;
+    type Error = ParseError<Sp<'a>>;
 
-    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError> {
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError<Sp<'a>>> {
         match stream.next() {
             Some(tok) if tok.text.chars().all(char::is_alphanumeric) => Ok(Ref {
                 text: tok.text,
@@ -244,9 +253,9 @@ impl<'a> Parse<Tok<'a>> for Ref<'a, Sp<'a>> {
             }),
             Some(tok) => {
                 stream.push(tok);
-                Err(ParseError::new(Sp::default(), "expected a word"))
+                Err(ParseError::other(Sp::default(), "expected a word"))
             }
-            None => Err(ParseError::new(
+            None => Err(ParseError::other(
                 Sp::default(),
                 "expected a word, found end of input",
             )),
@@ -314,13 +323,13 @@ mod ast_lt {
 // ---------------------------------------------------------------------------------------------
 
 // These two signatures ARE the test: `'a` is the caller's, there is no `'static` anywhere, and the
-// returned AST borrows from the same buffer the stream did. If `erase` (or anything else on the
+// returned AST borrows from the same buffer the stream did. If anything on the
 // recursion path) demanded `'static`, neither would compile.
-fn parse_expr<'a>(toks: &[Tok<'a>]) -> Result<ast::Expr<Sp<'a>>, ParseError> {
+fn parse_expr<'a>(toks: &[Tok<'a>]) -> Result<ast::Expr<Sp<'a>>, ParseError<Sp<'a>>> {
     Parse::parse(SliceStream::new(toks))
 }
 
-fn parse_stmt<'a>(toks: &[Tok<'a>]) -> Result<ast::Stmt<Sp<'a>>, ParseError> {
+fn parse_stmt<'a>(toks: &[Tok<'a>]) -> Result<ast::Stmt<Sp<'a>>, ParseError<Sp<'a>>> {
     Parse::parse(SliceStream::new(toks))
 }
 
@@ -354,7 +363,7 @@ fn one_level_of_recursion() {
 #[test]
 fn deep_recursion_through_the_cycle() {
     // Each `( … )` is one full Expr -> Stmt -> Expr turn of the cycle, so the borrow has to survive
-    // an arbitrary number of erased re-entries, not just one.
+    // an arbitrary number of re-entries, not just one.
     const DEPTH: usize = 40;
     let src = format!("{} core {}", "( ".repeat(DEPTH), ") ".repeat(DEPTH));
     let toks = lex(&src);
@@ -398,7 +407,7 @@ fn entry_at_the_other_cycle_member() {
 fn the_ast_outlives_the_token_buffer() {
     // The stream is dropped inside `parse_expr` and the token slice right after; only `src` — the
     // buffer the spans actually point into — has to stay alive. This is the property a
-    // `'static`-bounded erase would make impossible to express.
+    // a `'static`-bounded recursion boundary would make impossible to express.
     let src = String::from("( kept )");
     let toks = lex(&src);
     let expr = parse_expr(&toks).unwrap();
@@ -418,20 +427,20 @@ fn the_ast_outlives_the_token_buffer() {
 
 // Entry through `&mut stream` rather than by value: the top-level stream type is then
 // `&'m mut SliceStream<'s, 'a>` — a THIRD non-`'static` lifetime, resolved by the blanket
-// `impl<T: ?Sized + ParseStream> ParseStream for &mut T`. This is also the shape `erase` produces
+// `impl<T: ?Sized + ParseStream> ParseStream for &mut T`. This is also the shape a reborrow produces
 // internally, so it checks that the entry point and the recursion boundary agree on it.
 fn parse_expr_borrowed<'m, 's, 'a>(
     stream: &'m mut SliceStream<'s, 'a>,
-) -> Result<ast::Expr<Sp<'a>>, ParseError> {
+) -> Result<ast::Expr<Sp<'a>>, ParseError<Sp<'a>>> {
     Parse::parse(stream)
 }
 
 // The cycle whose types declare `'a` themselves.
-fn parse_expr_lt<'a>(toks: &[Tok<'a>]) -> Result<ast_lt::Expr<'a, Sp<'a>>, ParseError> {
+fn parse_expr_lt<'a>(toks: &[Tok<'a>]) -> Result<ast_lt::Expr<'a, Sp<'a>>, ParseError<Sp<'a>>> {
     Parse::parse(SliceStream::new(toks))
 }
 
-fn parse_stmt_lt<'a>(toks: &[Tok<'a>]) -> Result<ast_lt::Stmt<'a, Sp<'a>>, ParseError> {
+fn parse_stmt_lt<'a>(toks: &[Tok<'a>]) -> Result<ast_lt::Stmt<'a, Sp<'a>>, ParseError<Sp<'a>>> {
     Parse::parse(SliceStream::new(toks))
 }
 

@@ -28,7 +28,7 @@ type-leak = "0.2.0"
 itertools = "0.14.0"
 # The public facade, not `decycle-impl`: everything `#[recurse]` needs (`ranked`,
 # `analysis`, `safegraph`) is re-exported there, and that is the documented surface.
-decycle = "0.5.0"
+decycle = "0.5.1"
 
 [dependencies.syn]
 version = "2.0"

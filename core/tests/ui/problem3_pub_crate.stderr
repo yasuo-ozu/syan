@@ -45,5 +45,5 @@ error[E0391]: cycle detected when computing drop-check constraints for `m::Expr`
    |     ^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: ...which immediately requires computing drop-check constraints for `m::Expr` again
-   = note: cycle used when computing dropck types for `core::result::Result<m::Expr<S>, syan::error::ParseError>`
+   = note: cycle used when computing dropck types for `core::result::Result<m::Expr<S>, syan::error::ParseError<<__SyanMacro_Atom as syan::decycle_traits::Spanned>::Span>>`
    = note: see https://rustc-dev-guide.rust-lang.org/overview.html#queries and https://rustc-dev-guide.rust-lang.org/query.html for more information

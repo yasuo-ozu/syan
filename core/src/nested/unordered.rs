@@ -39,20 +39,20 @@ impl<T: Default, U: Default> Default for Unordered<T, U> {
     }
 }
 
-impl<Atom, T, U> Parse<Atom> for Unordered<T, U>
+impl<Atom: crate::span::Spanned, T, U> Parse<Atom> for Unordered<T, U>
 where
     Atom: Clone,
     T: Parse<Atom>,
     U: Parse<Atom>,
-    T::Error: Into<ParseError>,
-    U::Error: Into<ParseError>,
+    T::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
+    U::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
 {
-    type Error = ParseError;
+    type Error = ParseError<crate::span::SpanOf<Atom>>;
 
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
         // Try `T U` on a duplicated stream; on failure `dup` backtracks (the original is untouched), so
         // we can then try `U T` from the same starting position.
-        let t_then_u = stream.dup(|s| -> Result<(T, U), ParseError> {
+        let t_then_u = stream.dup(|s| -> Result<(T, U), ParseError<crate::span::SpanOf<Atom>>> {
             let t = T::parse_stream(&mut *s).map_err(Into::into)?;
             let u = U::parse_stream(&mut *s).map_err(Into::into)?;
             Ok((t, u))

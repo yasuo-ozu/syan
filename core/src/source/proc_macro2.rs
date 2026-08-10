@@ -1,4 +1,4 @@
-use crate::error::{Error, ParseError};
+use crate::error::ParseError;
 use crate::nested::group::{Group, GroupBrace, GroupBracket, GroupParen, GroupShape};
 use crate::parse::{unparse::Emitter, Parse, ParseStream, Tape, Unparse};
 use crate::span::WithSpan;
@@ -162,7 +162,7 @@ impl crate::parse::unparse::Emitter<proc_macro2::TokenTree> for proc_macro2::Tok
 }
 
 impl<T: Default + core::fmt::Display> Parse<proc_macro2::TokenTree> for Symbol<T> {
-    type Error = ParseError;
+    type Error = ParseError<Span>;
 
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
         match stream.next() {
@@ -179,9 +179,9 @@ impl<T: Default + core::fmt::Display> Parse<proc_macro2::TokenTree> for Symbol<T
             Some(token) => {
                 let __span = crate::span::Spanned::span(&token);
                 stream.push(token);
-                Err(ParseError::new(__span, "expected symbol"))
+                Err(ParseError::expected(__span, "a symbol"))
             }
-            None => Err(ParseError::new(Span::default(), "unexpected end of input")),
+            None => Err(ParseError::eof(Span::default())),
         }
     }
 }
@@ -212,14 +212,15 @@ macro_rules! impl_for_group {
             impl GroupShape<proc_macro2::TokenTree> for $t0 $(::$t)*<(), Span> {
                 fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
                     stream: &mut __S,
-                ) -> Result<(Slot, Self), ParseError>
+                ) -> Result<(Slot, Self), ParseError<Span>>
                 where
                     Slot: Parse<proc_macro2::TokenTree>,
+                    Slot::Error: Into<ParseError<Span>>,
                 {
                     match stream.next() {
                         Some(proc_macro2::TokenTree::Group(group)) if group.delimiter() == $delim => {
                             let mut inner_stream = Stream::new(group.stream());
-                            let slot = Slot::parse_stream(&mut inner_stream).map_err(|e| e.into_parse_error())?;
+                            let slot = Slot::parse_stream(&mut inner_stream).map_err(Into::into)?;
                             Ok((slot, Group {
                                 open: WithSpan { span: group.span_open().into(), slot: Default::default() },
                                 slot: (),
@@ -229,9 +230,9 @@ macro_rules! impl_for_group {
                         Some(token) => {
                             let __span = crate::span::Spanned::span(&token);
                             stream.push(token);
-                            Err(ParseError::new(__span, "expected group"))
+                            Err(ParseError::group(__span))
                         }
-                        None => Err(ParseError::new(Span::default(), "unexpected end of input")),
+                        None => Err(ParseError::eof(Span::default())),
                     }
                 }
             }
@@ -239,14 +240,15 @@ macro_rules! impl_for_group {
             impl<T> Parse<proc_macro2::TokenTree> for $t0 $(::$t)*<T, Span>
             where
                 T: Parse<proc_macro2::TokenTree>,
+                T::Error: Into<ParseError<Span>>,
             {
-                type Error = ParseError;
+                type Error = ParseError<Span>;
 
                 fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
                     match stream.next() {
                         Some(proc_macro2::TokenTree::Group(group)) if group.delimiter() == $delim => {
                             let mut inner_stream = Stream::new(group.stream());
-                            let slot = T::parse_stream(&mut inner_stream).map_err(|e| e.into_parse_error())?;
+                            let slot = T::parse_stream(&mut inner_stream).map_err(Into::into)?;
                             return Ok(Group {
                                 open: WithSpan {
                                     span: group.span_open().into(),
@@ -262,9 +264,9 @@ macro_rules! impl_for_group {
                         Some(token) => {
                             let __span = crate::span::Spanned::span(&token);
                             stream.push(token);
-                            Err(ParseError::new(__span, "expected group"))
+                            Err(ParseError::group(__span))
                         }
-                        None => Err(ParseError::new(Span::default(), "unexpected end of input")),
+                        None => Err(ParseError::eof(Span::default())),
                     }
                 }
             }

@@ -26,8 +26,9 @@ fn random() -> u64 {
 ///
 /// A **mutually recursive** AST needs `#[recurse]` on the enclosing module: the per-field bounds this
 /// derive synthesizes would otherwise make each type's impl conditional on its sibling's, so neither
-/// is usable. `#[recurse]` routes `Parse` through `decycle`, which contracts the cyclic bound, and
-/// separately fixes the stream-monomorphization cycle with `syan::parse::erase`.
+/// is usable. `#[recurse]` routes `Parse` through `decycle`, which contracts the cyclic bound. The
+/// stream type needs no separate fix: `Parse::parse_stream` takes `&mut S` and recursive calls
+/// reborrow, so `S` is a fixed point.
 #[proc_macro_error]
 #[proc_macro_derive(Parse, attributes(group, syan, joint, alone,))]
 pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
@@ -141,11 +142,12 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// **`Parse`, `Unparse` and `Spanned`** all go through `decycle`. Depth is **unbounded** modulo the
 /// OS call stack: a recursive call re-enters through the un-ranked delegating impl at full height, so
 /// decycle's rank ladder only discharges the *obligation*. (Deriving `Parse` naively cannot work —
-/// the per-field bounds form an E0275 cycle, and `Parse::parse` takes `impl IntoParseStream` — a
-/// generic parameter, which *moves* rather than reborrows, so each descent level asks for
-/// `parse::<&mut &mut …>`, an infinite *monomorphization* chain no obligation engine can break. The
-/// latter is fixed by wrapping every recursive call's stream in `syan::parse::erase`, pinning it to
-/// one fixed `&mut dyn ParseStream` layer.) As for any recursive-descent parser, a *left-recursive*
+/// the per-field bounds form an E0275 cycle. A *second*, independent cycle used to exist as well:
+/// `Parse::parse` took `impl IntoParseStream` — a generic parameter, which *moves* rather than
+/// reborrows, so each descent level asked for `parse::<&mut &mut …>`, an infinite *monomorphization*
+/// chain no obligation engine can break. The required method is now `parse_stream(&mut S)` and
+/// recursive calls reborrow (`&mut *stream`), so `S` is a genuine fixed point and no erasure is
+/// involved.) As for any recursive-descent parser, a *left-recursive*
 /// grammar recurses forever rather than being truncated. `Spanned`'s `Span = _` associated-type
 /// constraint travels through unchanged — verbatim on the peeled cyclic bounds (admitted when the
 /// target is a cycle self head), and bound through the `SpannedBound` supertrait alias on the leaf

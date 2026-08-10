@@ -34,7 +34,7 @@ impl<T> From<T> for Attempt<T> {
     }
 }
 
-impl<Atom: Clone, T: Parse<Atom>> Parse<Atom> for Attempt<T> {
+impl<Atom: Clone + crate::span::Spanned, T: Parse<Atom>> Parse<Atom> for Attempt<T> {
     type Error = T::Error;
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
         // `dup` commits the consumed tokens on `Ok` and rewinds on `Err`, so the parse is all-or-nothing.

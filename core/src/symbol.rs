@@ -48,7 +48,7 @@ pub mod chars {
                 }
             )*
 
-            unsafe impl<Atom> AtomParsedToAllChars for Atom
+            unsafe impl<Atom: crate::span::Spanned> AtomParsedToAllChars for Atom
             where
                 $($name: crate::parse::Parse<Atom>,)*
             {}

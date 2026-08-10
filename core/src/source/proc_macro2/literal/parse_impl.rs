@@ -1,7 +1,7 @@
 use super::*;
 
 impl Parse<proc_macro2::TokenTree> for Bool {
-    type Error = ParseError;
+    type Error = ParseError<Span>;
 
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
         match stream.next() {
@@ -13,16 +13,16 @@ impl Parse<proc_macro2::TokenTree> for Bool {
                     _ => {
                         let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Ident(ident.clone()));
                         stream.push(proc_macro2::TokenTree::Ident(ident));
-                        Err(ParseError::new(__span, "parse failed"))
+                        Err(ParseError::literal(__span, crate::error::LitKind::Bool))
                     }
                 }
             }
             Some(token) => {
                 let __span = crate::span::Spanned::span(&token);
                 stream.push(token);
-                Err(ParseError::new(__span, "parse failed"))
+                Err(ParseError::literal(__span, crate::error::LitKind::Bool))
             }
-            None => Err(ParseError::new(Span::default(), "parse failed")),
+            None => Err(ParseError::eof(Span::default())),
         }
     }
 }
@@ -41,7 +41,7 @@ fn unescape(rest: &str) -> Option<char> {
 }
 
 impl Parse<proc_macro2::TokenTree> for ByteChar {
-    type Error = ParseError;
+    type Error = ParseError<Span>;
 
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
         match stream.next() {
@@ -55,29 +55,29 @@ impl Parse<proc_macro2::TokenTree> for ByteChar {
                     } else if let Some(rest) = inner.strip_prefix('\\') {
                         match unescape(rest) {
                             Some(c) => Ok(ByteChar { value: c as u8 }),
-                            None => Err(ParseError::new(Span::default(), "parse failed")),
+                            None => Err(ParseError::eof(Span::default())),
                         }
                     } else {
-                        Err(ParseError::new(Span::default(), "parse failed"))
+                        Err(ParseError::eof(Span::default()))
                     }
                 } else {
                     let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
-                    Err(ParseError::new(__span, "parse failed"))
+                    Err(ParseError::literal(__span, crate::error::LitKind::ByteChar))
                 }
             }
             Some(token) => {
                 let __span = crate::span::Spanned::span(&token);
                 stream.push(token);
-                Err(ParseError::new(__span, "parse failed"))
+                Err(ParseError::literal(__span, crate::error::LitKind::ByteChar))
             }
-            None => Err(ParseError::new(Span::default(), "parse failed")),
+            None => Err(ParseError::eof(Span::default())),
         }
     }
 }
 
 impl Parse<proc_macro2::TokenTree> for Char {
-    type Error = ParseError;
+    type Error = ParseError<Span>;
 
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
         match stream.next() {
@@ -92,23 +92,23 @@ impl Parse<proc_macro2::TokenTree> for Char {
                     } else if let Some(rest) = inner.strip_prefix('\\') {
                         match unescape(rest) {
                             Some(c) => Ok(Char { value: c }),
-                            None => Err(ParseError::new(Span::default(), "parse failed")),
+                            None => Err(ParseError::eof(Span::default())),
                         }
                     } else {
-                        Err(ParseError::new(Span::default(), "parse failed"))
+                        Err(ParseError::eof(Span::default()))
                     }
                 } else {
                     let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
-                    Err(ParseError::new(__span, "parse failed"))
+                    Err(ParseError::literal(__span, crate::error::LitKind::Char))
                 }
             }
             Some(token) => {
                 let __span = crate::span::Spanned::span(&token);
                 stream.push(token);
-                Err(ParseError::new(__span, "parse failed"))
+                Err(ParseError::literal(__span, crate::error::LitKind::Char))
             }
-            None => Err(ParseError::new(Span::default(), "parse failed")),
+            None => Err(ParseError::eof(Span::default())),
         }
     }
 }
@@ -118,8 +118,9 @@ impl Parse<proc_macro2::TokenTree> for Char {
 /// the stream and fail — mirrors the existing push-back-on-failure behavior.
 fn parse_lit<T, S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
     stream: &mut S,
+    kind: crate::error::LitKind,
     f: impl FnOnce(&str) -> Option<T>,
-) -> Result<T, ParseError> {
+) -> Result<T, ParseError<Span>> {
     match stream.next() {
         Some(proc_macro2::TokenTree::Literal(lit)) => {
             let lit_str = lit.to_string();
@@ -128,26 +129,26 @@ fn parse_lit<T, S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::T
                 None => {
                     let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
-                    Err(ParseError::new(__span, "parse failed"))
+                    Err(ParseError::literal(__span, kind))
                 }
             }
         }
         Some(token) => {
             let __span = crate::span::Spanned::span(&token);
             stream.push(token);
-            Err(ParseError::new(__span, "parse failed"))
+            Err(ParseError::literal(__span, kind))
         }
-        None => Err(ParseError::new(Span::default(), "parse failed")),
+        None => Err(ParseError::eof(Span::default())),
     }
 }
 
 macro_rules! impl_parse_lit {
-    ($Ty:ident, $body:expr) => {
+    ($Ty:ident, $kind:expr, $body:expr) => {
         impl Parse<proc_macro2::TokenTree> for $Ty {
-            type Error = ParseError;
+            type Error = ParseError<Span>;
 
             fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
-                parse_lit(&mut *stream, $body)
+                parse_lit(&mut *stream, $kind, $body)
             }
         }
     };
@@ -174,7 +175,7 @@ fn parse_raw(rest: &str) -> Option<(String, usize)> {
     }
 }
 
-impl_parse_lit!(Str, |s: &str| {
+impl_parse_lit!(Str, crate::error::LitKind::Str, |s: &str| {
     (s.starts_with('"')
         && s.ends_with('"')
         && !s.starts_with('r')
@@ -185,24 +186,24 @@ impl_parse_lit!(Str, |s: &str| {
     })
 });
 
-impl_parse_lit!(ByteStr, |s: &str| {
+impl_parse_lit!(ByteStr, crate::error::LitKind::ByteStr, |s: &str| {
     (s.starts_with("b\"") && s.ends_with('"') && !s.starts_with("br")).then(|| ByteStr {
         value: s[2..s.len() - 1].bytes().collect(),
     })
 });
 
-impl_parse_lit!(CStr, |s: &str| {
+impl_parse_lit!(CStr, crate::error::LitKind::CStr, |s: &str| {
     (s.starts_with("c\"") && s.ends_with('"') && !s.starts_with("cr")).then(|| CStr {
         value: s[2..s.len() - 1].to_string(),
     })
 });
 
-impl_parse_lit!(StrRaw, |s: &str| {
+impl_parse_lit!(StrRaw, crate::error::LitKind::Str, |s: &str| {
     let (value, hash_count) = parse_raw(s.strip_prefix('r')?)?;
     Some(StrRaw { value, hash_count })
 });
 
-impl_parse_lit!(ByteStrRaw, |s: &str| {
+impl_parse_lit!(ByteStrRaw, crate::error::LitKind::ByteStr, |s: &str| {
     let (value, hash_count) = parse_raw(s.strip_prefix("br")?)?;
     Some(ByteStrRaw {
         value: value.bytes().collect(),
@@ -210,12 +211,12 @@ impl_parse_lit!(ByteStrRaw, |s: &str| {
     })
 });
 
-impl_parse_lit!(CStrRaw, |s: &str| {
+impl_parse_lit!(CStrRaw, crate::error::LitKind::CStr, |s: &str| {
     let (value, hash_count) = parse_raw(s.strip_prefix("cr")?)?;
     Some(CStrRaw { value, hash_count })
 });
 
-impl_parse_lit!(Integer, |s: &str| {
+impl_parse_lit!(Integer, crate::error::LitKind::Int, |s: &str| {
     const SUFFIXES: &[&str] = &[
         "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
     ];
@@ -244,7 +245,7 @@ impl_parse_lit!(Integer, |s: &str| {
     })
 });
 
-impl_parse_lit!(Float, |s: &str| {
+impl_parse_lit!(Float, crate::error::LitKind::Float, |s: &str| {
     const SUFFIXES: &[&str] = &["f32", "f64"];
     if !s.contains('.') {
         return None;

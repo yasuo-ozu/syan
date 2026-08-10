@@ -33,8 +33,14 @@
     allowed_paths = [::syan, ::core, ::std],
     alter_macro_name = __syan_decycle_Parse
 )]
-pub trait Parse<Atom>: ::core::marker::Sized {
-    type Error: ::syan::error::Error;
+pub trait Parse<Atom: ::syan::span::Spanned>: ::core::marker::Sized {
+    /// Every error must be convertible to the universal one, so a field's failure can become the
+    /// enclosing type's failure with no per-field where-predicate. Stating it HERE rather than at
+    /// each derived impl is what keeps it out of the obligation graph: a per-field
+    /// `<FieldTy as Parse<Atom>>::Error: Into<…>` predicate re-creates a projection cycle on a
+    /// recursive field (E0275), which decycle's bound-peeling does not break.
+    type Error: ::syan::error::Error
+        + ::core::convert::Into<::syan::error::ParseError<::syan::span::SpanOf<Atom>>>;
 
     /// Parse from a **reborrowable** stream.
     ///

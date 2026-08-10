@@ -99,18 +99,15 @@ pub struct Block<S, Expr0 = DefaultExpr<S>> {
 }
 
 pub struct ExpressionTerm;
-impl<Atom> Parse<Atom> for ExpressionTerm
+impl<Atom: syan::span::Spanned> Parse<Atom> for ExpressionTerm
 where
     Atom: syan::span::Spanned,
 {
-    type Error = syan::error::ParseError;
+    type Error = syan::error::ParseError<syan::span::SpanOf<Atom>>;
     fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(
         _stream: &mut __S,
     ) -> Result<Self, Self::Error> {
-        Err(syan::error::ParseError::new(
-            (),
-            "expression recursion limit",
-        ))
+        Err(syan::error::ParseError::other(Default::default(), "expression recursion limit"))
     }
 }
 

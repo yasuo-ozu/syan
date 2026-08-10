@@ -36,7 +36,7 @@ fn punct_is(tt: &TokenTree, ch: char) -> bool {
 impl GroupShape<TokenTree> for Angle {
     fn parse_group<Slot, __S: ParseStream<Atom = TokenTree>>(
         stream: &mut __S,
-    ) -> Result<(Slot, Self), syan::error::ParseError>
+    ) -> Result<(Slot, Self), syan::error::ParseError<Span>>
     where
         Slot: Parse<TokenTree>,
     {
@@ -44,24 +44,18 @@ impl GroupShape<TokenTree> for Angle {
             Some(tt) if punct_is(&tt, '<') => {}
             Some(tt) => {
                 stream.push(tt);
-                return Err(syan::error::ParseError::new(
-                    Span::default(),
-                    "expected `<`",
-                ));
+                return Err(syan::error::ParseError::other(Span::default(), "expected `<`"));
             }
-            None => return Err(syan::error::ParseError::new(Span::default(), "eof")),
+            None => return Err(syan::error::ParseError::other(Span::default(), "eof")),
         }
-        let slot = Slot::parse_stream(&mut *stream).map_err(syan::error::Error::into_parse_error)?;
+        let slot = Slot::parse_stream(&mut *stream).map_err(Into::into)?;
         match stream.next() {
             Some(tt) if punct_is(&tt, '>') => Ok((slot, Angle)),
             Some(tt) => {
                 stream.push(tt);
-                Err(syan::error::ParseError::new(
-                    Span::default(),
-                    "expected `>`",
-                ))
+                Err(syan::error::ParseError::other(Span::default(), "expected `>`"))
             }
-            None => Err(syan::error::ParseError::new(Span::default(), "eof")),
+            None => Err(syan::error::ParseError::other(Span::default(), "eof")),
         }
     }
 }

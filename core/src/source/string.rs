@@ -118,7 +118,7 @@ macro_rules! impl_parse_for_char {
     ($($name:ident),* $(,)?) => {
         $(
             impl Parse<WithSpan<char, Span>> for Symbol<crate::symbol::chars::$name> {
-                type Error = ParseError;
+                type Error = ParseError<Span>;
 
                 fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = WithSpan<char, Span>>>(
                     stream: &mut __S,
@@ -132,9 +132,9 @@ macro_rules! impl_parse_for_char {
                         Some(atom) => {
                             let span = atom.span.clone();
                             stream.push(atom);
-                            Err(ParseError::new(span, "expected character"))
+                            Err(ParseError::expected(span, concat!("the character `", stringify!($name), "`")))
                         }
-                        None => Err(ParseError::new(Span::default(), "unexpected end of input")),
+                        None => Err(ParseError::eof(Span::default())),
                     }
                 }
             }

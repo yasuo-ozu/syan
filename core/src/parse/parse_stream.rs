@@ -1,15 +1,17 @@
 use crate::span::{Span, Spanned};
 
 /// The core token stream. **Object-safe** — so `&mut dyn ParseStream<Atom = A, Error = E>` is a usable
-/// type (needed to type-erase the stream at the unbounded-`#[recurse]` re-entry boundary). The generic
-/// conveniences `dup`/`validate_spacing` carry `where Self: Sized`, which keeps them off the vtable (not
-/// callable on `dyn ParseStream`) while preserving object safety — and they're callable on every real
-/// (sized) stream (`Stream`, `&mut T`).
+/// type. Nothing in syan needs that any more (`#[recurse]` no longer erases at the re-entry boundary;
+/// it reborrows), but it is cheap to keep and lets a caller hold a stream behind a trait object. The
+/// generic conveniences `dup`/`validate_spacing` carry `where Self: Sized`, which keeps them off the
+/// vtable (not callable on `dyn ParseStream`) while preserving object safety — and they're callable on
+/// every real (sized) stream (`Stream`, `&mut T`).
 ///
 /// Backtracking is expressed by the **checkpoint trio** below rather than by a wrapper type. That is
 /// what keeps the stream type fixed across a `dup` scope: `dup` hands the closure `&mut Self`, not a
-/// `Dup<&mut Self>`, so nesting transactions cannot grow the type. See [`erase`] for the *other*
-/// growth source, which this does not address.
+/// `Dup<&mut Self>`, so nesting transactions cannot grow the type. The other former growth source —
+/// the per-level `&mut dyn` tower that `erase` built — is gone: recursion reborrows (`&mut *stream`),
+/// which is a genuine fixed point.
 pub trait ParseStream {
     type Atom;
     type Error;
@@ -56,7 +58,7 @@ pub trait ParseStream {
     fn validate_spacing<S: Span + 'static>(
         &mut self,
         is_joint: bool,
-    ) -> Result<(), crate::error::ParseError>
+    ) -> Result<(), crate::error::ParseError<S>>
     where
         Self: Sized,
         Self::Atom: Spanned<Span = S>,
@@ -66,9 +68,9 @@ pub trait ParseStream {
             let last_peek = self.peek().map(|a| a.span()).unwrap_or_default();
             let span = first_peek.migrate(last_peek);
             if is_joint {
-                Err(crate::error::ParseError::new(span, "not joint"))
+                Err(crate::error::ParseError::spacing(span, true))
             } else {
-                Err(crate::error::ParseError::new(span, "not alone"))
+                Err(crate::error::ParseError::spacing(span, false))
             }
         } else {
             Ok(())

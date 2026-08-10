@@ -616,7 +616,7 @@ fn descent_instantiates_exactly_one_stream_type() {
 fn substream_does_not_nest() {
     struct Probe;
     impl syan::parse::Parse<Atom> for Probe {
-        type Error = syan::error::ParseError;
+        type Error = syan::error::ParseError<Span>;
         fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
             note::<Atom>();
             let _ = stream.next();

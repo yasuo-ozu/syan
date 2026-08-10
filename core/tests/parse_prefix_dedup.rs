@@ -16,7 +16,7 @@ static PREFIX_PARSES: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug)]
 struct Counted(Integer);
 impl Parse<proc_macro2::TokenTree> for Counted {
-    type Error = syan::error::ParseError;
+    type Error = syan::error::ParseError<syan::source::proc_macro2::Span>;
     fn parse_stream<__S: syan::parse::ParseStream<Atom = proc_macro2::TokenTree>>(
             stream: &mut __S,
     ) -> Result<Self, Self::Error> {

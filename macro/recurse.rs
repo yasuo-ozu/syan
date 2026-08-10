@@ -507,10 +507,11 @@ fn make_natural_item(item: &Item) -> Item {
 //    opt-out and leaves it alone, while a bare single-segment reference is a cycle edge to contract.
 //    So `Integer: ::syan::parse::parse::Parse<A>` and `__SyanMacro_Atom: ::syan::span::Spanned`
 //    survive untouched, with no supertrait-alias laundering.
-// 3. **Every field-parse call's stream argument is wrapped in `syan::parse::erase(…)`** — see
-//    [`syan::parse::erase`]. This is the one thing no obligation engine can do for us: the growth is
-//    in the *stream type* (`&mut &mut …`, one layer per descent level), a monomorphization cycle
-//    rather than a trait cycle.
+// (There used to be a third rewrite here: every field-parse call's stream argument was wrapped in
+// `syan::parse::erase(…)`, because the growth was in the *stream type* — `&mut &mut …`, one layer per
+// descent level — a monomorphization cycle rather than a trait cycle. `Parse`'s required method now
+// takes `&mut S` and recursive calls reborrow, so the stream type no longer grows and the rewrite is
+// gone.)
 //
 // Bodies are otherwise emitted **verbatim**, still calling the **fully-qualified** trait. That is NOT
 // redundancy — the module does import the trait, so a bare `Parse` would resolve to the same item.
