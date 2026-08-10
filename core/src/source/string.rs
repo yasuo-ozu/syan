@@ -131,8 +131,9 @@ macro_rules! impl_parse_for_char {
                             Ok(Default::default())
                         }
                         Some(atom) => {
+                            let span = atom.span.clone();
                             stream.push(atom);
-                            Err(ParseError::new(Span::default(), "expected character"))
+                            Err(ParseError::new(span, "expected character"))
                         }
                         None => Err(ParseError::new(Span::default(), "unexpected end of input")),
                     }

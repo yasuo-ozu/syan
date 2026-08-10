@@ -180,8 +180,9 @@ impl<T: Default + core::fmt::Display> Parse<proc_macro2::TokenTree> for Symbol<T
                 Ok(Default::default())
             }
             Some(token) => {
+                let __span = crate::span::Spanned::span(&token);
                 stream.push(token);
-                Err(ParseError::new(Span::default(), "expected symbol"))
+                Err(ParseError::new(__span, "expected symbol"))
             }
             None => Err(ParseError::new(Span::default(), "unexpected end of input")),
         }
@@ -230,8 +231,9 @@ macro_rules! impl_for_group {
                             }))
                         }
                         Some(token) => {
+                            let __span = crate::span::Spanned::span(&token);
                             stream.push(token);
-                            Err(ParseError::new(Span::default(), "expected group"))
+                            Err(ParseError::new(__span, "expected group"))
                         }
                         None => Err(ParseError::new(Span::default(), "unexpected end of input")),
                     }
@@ -265,8 +267,9 @@ macro_rules! impl_for_group {
                             });
                         }
                         Some(token) => {
+                            let __span = crate::span::Spanned::span(&token);
                             stream.push(token);
-                            Err(ParseError::new(Span::default(), "expected group"))
+                            Err(ParseError::new(__span, "expected group"))
                         }
                         None => Err(ParseError::new(Span::default(), "unexpected end of input")),
                     }

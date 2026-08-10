@@ -32,13 +32,29 @@ impl Error for Infallible {
 
 #[derive(Debug, Clone)]
 pub struct ParseError {
+    /// The `Debug` rendering of the span the error was reported at, or `None` for an unspanned one.
+    ///
+    /// Why a rendering rather than the span itself: `ParseError` is a single concrete type used as
+    /// the error of every `Parse` impl, so it cannot be generic over the span without infecting the
+    /// whole trait; and it cannot hold `Box<dyn Span>` because [`Span::migrate`] takes `self` by
+    /// value and names `Self`, so `Span` is not object-safe. Erasing to `Box<dyn Any>` instead would
+    /// force `'static`, which rules out a borrowed span like `Sp<'a>` in
+    /// `tests/recurse_borrowed_stream.rs` — a case the crate deliberately supports.
+    ///
+    /// A previous attempt left `// span: Box<dyn Span>` commented out in this struct for exactly
+    /// that reason. If typed recovery is wanted later it needs `ParseError<'a, S>` or a lifetime,
+    /// which is a much larger change; this keeps the position reportable in the meantime.
+    span: Option<String>,
     message: String,
     sub_errors: Vec<Self>,
 }
 
 impl ParseError {
-    pub fn new(_span: impl Span, message: impl core::fmt::Display) -> Self {
+    pub fn new<S: Span>(span: S, message: impl core::fmt::Display) -> Self {
         Self {
+            // `()` is the span of an unspanned atom; rendering it would prefix every message with
+            // a useless "()".
+            span: (core::any::type_name::<S>() != "()").then(|| format!("{span:?}")),
             message: format!("{message}"),
             sub_errors: Vec::new(),
         }
@@ -48,13 +64,39 @@ impl ParseError {
         self.sub_errors.push(error);
         self
     }
+
+    /// The `Debug` rendering of the span this error was reported at, if it had one.
+    pub fn span_debug(&self) -> Option<&str> {
+        self.span.as_deref()
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The alternatives that failed, for an error built by [`Error::from_cause`]. An aggregate
+    /// carries no span of its own — the positions live on these.
+    pub fn sub_errors(&self) -> &[Self] {
+        &self.sub_errors
+    }
 }
 
 impl std::error::Error for ParseError {}
 
 impl core::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        match &self.span {
+            Some(span) => write!(f, "{span}: {}", self.message)?,
+            None => f.write_str(&self.message)?,
+        }
+        // An aggregate from `from_cause` is unspanned, so without this the position of every
+        // alternative that actually failed would be invisible.
+        for sub in &self.sub_errors {
+            for line in format!("{sub}").lines() {
+                write!(f, "\n  {line}")?;
+            }
+        }
+        Ok(())
     }
 }
 

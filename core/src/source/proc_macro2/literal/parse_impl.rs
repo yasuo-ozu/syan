@@ -14,14 +14,16 @@ impl Parse<proc_macro2::TokenTree> for Bool {
                     "true" => Ok(Bool { value: true }),
                     "false" => Ok(Bool { value: false }),
                     _ => {
+                        let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Ident(ident.clone()));
                         stream.push(proc_macro2::TokenTree::Ident(ident));
-                        Err(ParseError::new(Span::default(), "parse failed"))
+                        Err(ParseError::new(__span, "parse failed"))
                     }
                 }
             }
             Some(token) => {
+                let __span = crate::span::Spanned::span(&token);
                 stream.push(token);
-                Err(ParseError::new(Span::default(), "parse failed"))
+                Err(ParseError::new(__span, "parse failed"))
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
@@ -65,13 +67,15 @@ impl Parse<proc_macro2::TokenTree> for ByteChar {
                         Err(ParseError::new(Span::default(), "parse failed"))
                     }
                 } else {
+                    let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
-                    Err(ParseError::new(Span::default(), "parse failed"))
+                    Err(ParseError::new(__span, "parse failed"))
                 }
             }
             Some(token) => {
+                let __span = crate::span::Spanned::span(&token);
                 stream.push(token);
-                Err(ParseError::new(Span::default(), "parse failed"))
+                Err(ParseError::new(__span, "parse failed"))
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
@@ -103,13 +107,15 @@ impl Parse<proc_macro2::TokenTree> for Char {
                         Err(ParseError::new(Span::default(), "parse failed"))
                     }
                 } else {
+                    let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
-                    Err(ParseError::new(Span::default(), "parse failed"))
+                    Err(ParseError::new(__span, "parse failed"))
                 }
             }
             Some(token) => {
+                let __span = crate::span::Spanned::span(&token);
                 stream.push(token);
-                Err(ParseError::new(Span::default(), "parse failed"))
+                Err(ParseError::new(__span, "parse failed"))
             }
             None => Err(ParseError::new(Span::default(), "parse failed")),
         }
@@ -130,14 +136,16 @@ fn parse_lit<T>(
             match f(&lit_str) {
                 Some(value) => Ok(value),
                 None => {
+                    let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
-                    Err(ParseError::new(Span::default(), "parse failed"))
+                    Err(ParseError::new(__span, "parse failed"))
                 }
             }
         }
         Some(token) => {
+            let __span = crate::span::Spanned::span(&token);
             stream.push(token);
-            Err(ParseError::new(Span::default(), "parse failed"))
+            Err(ParseError::new(__span, "parse failed"))
         }
         None => Err(ParseError::new(Span::default(), "parse failed")),
     }
