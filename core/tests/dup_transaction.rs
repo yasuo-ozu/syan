@@ -446,14 +446,14 @@ fn dup_error_type_is_fully_generic() {
 
 // ---------------------------------------------------------------------------
 // A FOURTH defect, adjacent to dup and found while auditing it: the wrapper
-// types do not forward every trait method, so a caller reaching one through a
-// wrapper hits the trait's `todo!()` default and PANICS.
+// types did not forward every trait method, so a caller reaching one through a
+// wrapper hit the trait's `todo!()` default and PANICKED. It affected all three
+// wrappers of the time — `Dup`, the `&mut T` blanket, and `SubStream`.
 //
-// `grep -c 'fn skip_sep\|fn get_error'` over the impls returns 0 for all three
-// wrappers: `Dup` (parse_stream.rs), the `&mut T` blanket (parse_stream.rs),
-// and `SubStream` (span.rs). Whatever replaces `Dup` must forward EVERY
-// method — and any new required method (e.g. a checkpoint primitive) must be
-// REQUIRED rather than defaulted, or it will silently acquire this same hole.
+// `get_error`/`skip_sep` are now REQUIRED, like the checkpoint trio, so a
+// forgotten forward is a compile error and this can no longer regress silently.
+// The test is kept as the behavioural half of that: required-ness only stops an
+// omission, not a forward that reaches the wrong stream.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -465,8 +465,7 @@ fn wrappers_forward_every_method() {
     }));
     assert!(
         r.is_ok(),
-        "skip_sep through the `&mut T` blanket hit the trait's todo!() default \
-         — the blanket forwards only next/peek/push"
+        "skip_sep through the `&mut T` blanket must reach the base stream"
     );
 }
 

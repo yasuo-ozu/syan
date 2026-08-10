@@ -127,7 +127,6 @@ where
                 self.0.commit_raw(raw)
             }
 
-            // Forward rather than inherit the trait's `todo!()` defaults.
             fn get_error(&mut self) -> Result<(), Self::Error> {
                 self.0.get_error()
             }

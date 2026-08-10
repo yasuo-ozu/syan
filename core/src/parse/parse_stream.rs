@@ -29,9 +29,10 @@ pub trait ParseStream {
     /// The token is **opaque and stream-specific** — it is not a position, and passing one stream's
     /// token to another is meaningless.
     ///
-    /// The trio is deliberately *required*, with no default. A defaulted rewind primitive would let
-    /// a wrapper type silently inherit a broken one, which is exactly the hole `get_error`/`skip_sep`
-    /// still have (see the notes on the `&mut T` blanket below).
+    /// The trio is deliberately *required*, with no default: a defaulted rewind primitive would let a
+    /// wrapper type silently inherit a broken one. `get_error`/`skip_sep` are required for the same
+    /// reason — they used to default to `todo!()`, which turned a forgotten forward into a runtime
+    /// panic instead of a compile error.
     fn checkpoint_raw(&mut self) -> u64;
 
     /// Undo everything consumed since `raw` was taken, and close that scope.
@@ -40,17 +41,17 @@ pub trait ParseStream {
     /// Keep everything consumed since `raw` was taken, and close that scope.
     fn commit_raw(&mut self, raw: u64);
 
-    fn get_error(&mut self) -> Result<(), Self::Error> {
-        todo!()
-    }
+    /// Report an error the *source* has accumulated (a lexer that failed mid-stream, say), as opposed
+    /// to a parse failure. `Ok(())` for a source that cannot fail.
+    ///
+    /// Required — see the note on [`checkpoint_raw`](Self::checkpoint_raw).
+    fn get_error(&mut self) -> Result<(), Self::Error>;
 
     /// Skip the separator atoms if exists. Returns whether we skipped some separators.
     ///
     /// This function may or may not returns `true` with multiple calling.
     /// If the input streams fall into an error, it returns `true`.
-    fn skip_sep(&mut self) -> bool {
-        todo!()
-    }
+    fn skip_sep(&mut self) -> bool;
 
     fn validate_spacing<S: Span + 'static>(
         &mut self,
@@ -165,9 +166,6 @@ where
         T::commit_raw(self, raw)
     }
 
-    // Forward, do not inherit: the trait's defaults for these two are `todo!()`, so a wrapper that
-    // omits them turns any call reaching it into a panic — reachable, since a leaf parser calls
-    // `skip_sep`/`validate_spacing` on whatever stream it is handed.
     fn get_error(&mut self) -> std::result::Result<(), Self::Error> {
         T::get_error(self)
     }
