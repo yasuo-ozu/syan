@@ -22,19 +22,14 @@ fn random() -> u64 {
 ///
 /// # Field attributes
 ///
-/// - **`#[ignore_bounds]`** — suppress the `FieldTy: Parse<_>` where-predicate this derive would
-///   otherwise synthesize for the field. The field is still parsed (the obligation is just not added to
-///   the impl's `where`-clause), so its type must implement `Parse` at the call site by other means.
-///   The intended use is a **naturally-recursive child** (e.g. `Box<Expr<S>>` in a mutually-recursive
-///   AST), where the per-field bound would otherwise form an infinite `where`-clause cycle
-///   (`Expr: Parse ⇐ … ⇐ Expr: Parse`, E0275); with the bound dropped the recursion is discharged
-///   coinductively via the sibling type's own impl. (Caveat for `Parse` specifically: a
-///   *generic* field type with no other impl in scope, e.g. a bare `T`, will then fail to parse — the
-///   bound was the only thing satisfying it.) `#[recurse]` routes `Parse` through `decycle` rather than
-///   using this, and separately fixes the stream-monomorphization cycle with `syan::parse::erase`.
 /// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
+///
+/// A **mutually recursive** AST needs `#[recurse]` on the enclosing module: the per-field bounds this
+/// derive synthesizes would otherwise make each type's impl conditional on its sibling's, so neither
+/// is usable. `#[recurse]` routes `Parse` through `decycle`, which contracts the cyclic bound, and
+/// separately fixes the stream-monomorphization cycle with `syan::parse::erase`.
 #[proc_macro_error]
-#[proc_macro_derive(Parse, attributes(group, syan, joint, alone, ignore_bounds,))]
+#[proc_macro_derive(Parse, attributes(group, syan, joint, alone,))]
 pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
     let input: DeriveInput = parse_macro_input!(input);
     let syan = input.attrs.get_syan();
@@ -54,18 +49,12 @@ pub fn parse_derive(input: TokenStream1) -> TokenStream1 {
 ///
 /// # Field attributes
 ///
-/// - **`#[ignore_bounds]`** — suppress the `FieldTy: Unparse<_>` where-predicate this derive would
-///   otherwise synthesize for the field. The field is still unparsed (`.unparse(sink)` is still called),
-///   so its type must implement `Unparse`; the bound is merely omitted from the impl's `where`-clause.
-///   The intended use is a **naturally-recursive child**, where the per-field bound would form an
-///   infinite `where`-clause cycle (E0275); with it dropped, the recursive `.unparse()` resolves
-///   coinductively against the sibling type's own (leaf-only-bounded) impl. This makes a hand-written
-///   natural recursive `Unparse` compile (arbitrary depth — `Unparse` has no backtracking).
-///   `#[recurse]` no longer needs it: every structural trait (`Unparse`, `Parse` and `Spanned`
-///   alike) is routed through `decycle`, which contracts the cyclic bound rather than dropping it.
 /// - `#[group(self.field)]`, `#[joint]`, `#[alone]`, `#[default]` — grouping/spacing/skip controls.
+///
+/// As for `Parse`, a **mutually recursive** AST needs `#[recurse]` on the enclosing module — the
+/// per-field bounds synthesized here would otherwise make each impl conditional on its sibling's.
 #[proc_macro_error]
-#[proc_macro_derive(Unparse, attributes(group, syan, joint, alone, ignore_bounds, predicate_unparse,))]
+#[proc_macro_derive(Unparse, attributes(group, syan, joint, alone,))]
 pub fn unparse(input: TokenStream1) -> TokenStream1 {
     let input: DeriveInput = parse_macro_input!(input);
     let syan = input.attrs.get_syan();
@@ -74,7 +63,6 @@ pub fn unparse(input: TokenStream1) -> TokenStream1 {
         &input.ident,
         &input.generics,
         &input.data,
-        &input.attrs,
         random(),
         &syan,
         &trait_path,
@@ -94,20 +82,12 @@ pub fn ast_derive(input: TokenStream1) -> TokenStream1 {
 ///
 /// # Field attributes
 ///
-/// - **`#[ignore_bounds]`** — suppress the `FieldTy: Spanned<Span = _>` where-predicate this derive
-///   would otherwise synthesize. The field is **still folded** into the span, exactly as for
-///   `Parse`/`Unparse` — only the predicate is dropped, and the field's associated `Span` is then pinned
-///   by inference at the call site instead (which is why `#[ignore_bounds]` on a `Spanned` field only
-///   type-checks when that `Span` is otherwise inferable — for a `#[recurse]` child it is, since the
-///   child's own impl fixes it). The intended use is a **naturally-recursive child**,
-///   whose per-field bound would otherwise form an infinite `where`-clause cycle (E0275); dropping it
-///   lets a hand-written natural recursive `Spanned` compile (the resulting span covers the non-ignored
-///   leaves plus, by inference, the recursive children). (`#[recurse]` itself no longer needs this:
-///   it routes `Spanned` through `decycle` like `Parse`/`Unparse`, which contracts the cyclic bound
-///   instead of dropping it.)
-/// - `#[default]` — also excludes a field from the span fold.
+/// - `#[default]` — excludes a field from the span fold (and from the synthesized predicate).
+///
+/// Every folded field gets a `FieldTy: Spanned<Span = __Syan_Span>` predicate, which is what pins the
+/// invented span param. As for `Parse`/`Unparse`, a mutually recursive AST needs `#[recurse]`.
 #[proc_macro_error]
-#[proc_macro_derive(Spanned, attributes(group, syan, joint, alone, ignore_bounds, predicate_spanned,))]
+#[proc_macro_derive(Spanned, attributes(group, syan, joint, alone,))]
 pub fn spanned(input: TokenStream1) -> TokenStream1 {
     let input: DeriveInput = parse_macro_input!(input);
     let syan = input.attrs.get_syan();

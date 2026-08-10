@@ -33,22 +33,20 @@ pub fn parse(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn unparse(
     ident: &Ident,
     generics: &Generics,
     input: &Data,
-    attrs: &[Attribute],
     nonce: u64,
     syan: &Path,
     trait_path: &Path,
 ) -> TokenStream {
     match &input {
         Data::Struct(data_struct) => {
-            data_struct.extract_unparse(syan, generics, ident, attrs, nonce, trait_path)
+            data_struct.extract_unparse(syan, generics, ident, nonce, trait_path)
         }
         Data::Enum(data_enum) => {
-            data_enum.extract_unparse(syan, generics, ident, attrs, nonce, trait_path)
+            data_enum.extract_unparse(syan, generics, ident, nonce, trait_path)
         }
         _ => abort!(ident, "Bad data"),
     }
@@ -58,10 +56,10 @@ pub fn spanned(input: &DeriveInput, trait_path: Path) -> TokenStream {
     let syan = input.attrs.get_syan();
     match &input.data {
         Data::Struct(data_struct) => {
-            data_struct.extract_spanned(&syan, &input.generics, &input.ident, &input.attrs, &trait_path)
+            data_struct.extract_spanned(&syan, &input.generics, &input.ident, &trait_path)
         }
         Data::Enum(data_enum) => {
-            data_enum.extract_spanned(&syan, &input.generics, &input.ident, &input.attrs, &trait_path)
+            data_enum.extract_spanned(&syan, &input.generics, &input.ident, &trait_path)
         }
         _ => abort!(input, "Bad data"),
     }

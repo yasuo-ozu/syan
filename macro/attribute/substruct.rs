@@ -85,7 +85,6 @@ pub(crate) fn generate_substruct(
                     .cloned()
                     .chain(core::iter::once(parse_quote!(
                         #[default]
-                        #[ignore_bounds]
                         #field_phantom: ::core::marker::PhantomData<#phantom_ty>
                     )))
                     .collect(),

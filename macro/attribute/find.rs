@@ -41,19 +41,11 @@ pub(crate) trait FindAttribute {
         self.find_attribute("default").is_some()
     }
 
-    /// `#[ignore_bounds]` on a field suppresses the synthesized `field_ty: Trait` where-predicate in
-    /// the `Parse`/`Unparse`/`Spanned` derives. This lets a *naturally* mutually-recursive type carry
-    /// leaf-only bounds (the recursive children are resolved coinductively via their sibling impls'
-    /// call sites, not via a where-bound cycle that would overflow with E0275). `#[recurse]` injects it
-    /// on every recursive-child field of a natural cycle type.
-    fn has_ignore_bounds(&self) -> bool {
-        self.find_attribute("ignore_bounds").is_some()
-    }
 }
 
 fn is_derive_helper_attr(attr: &Attribute) -> bool {
     [
-        "group", "syan", "joint", "alone", "ignore_bounds", "default", "predicate_unparse",
+        "group", "syan", "joint", "alone", "default",
         // `#[derive(Ast)]`'s view markers: strip them off a `#[group]`-cloned substruct (which carries no
         // `Ast` derive to register them), else `#[group] #[seq] Punctuated<..>` fails with "cannot find
         // attribute `seq`".
@@ -132,28 +124,6 @@ pub(crate) fn append_user_where_predicates(
             where_predicates.push(predicate.clone());
         }
     }
-}
-
-/// Collect the types listed in every `#[<name>(Ty0, Ty1, …)]` item attribute (`predicate_unparse` /
-/// `predicate_spanned`). The caller turns each `Ty` into a trait bound (`Ty: Unparse<atom>` /
-/// `Ty: Spanned<Span = span>`) and adds it to the impl. `#[recurse]` uses this to inject the cross-cycle
-/// *union* of leaf bounds onto a member's natural `Unparse`/`Spanned` impl, so the body's calls into
-/// sibling cycle types resolve — the per-field bounds for the recursive children are suppressed by
-/// `#[ignore_bounds]`, which is what avoids the E0275 where-cycle.
-pub(crate) fn predicate_tys(attrs: &[Attribute], name: &str) -> Vec<Type> {
-    let mut out = Vec::new();
-    for a in attrs {
-        if a.path().is_ident(name) {
-            if let Meta::List(ml) = &a.meta {
-                if let Ok(tys) =
-                    ml.parse_args_with(Punctuated::<Type, Token![,]>::parse_terminated)
-                {
-                    out.extend(tys);
-                }
-            }
-        }
-    }
-    out
 }
 
 impl FindAttribute for Field {

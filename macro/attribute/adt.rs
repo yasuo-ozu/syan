@@ -105,12 +105,10 @@ pub(crate) trait Adt {
                     continue;
                 }
 
-                if !field.has_ignore_bounds() {
-                    let field_ty = & field.ty;
-                    where_predicates.push(parse_quote!{
-                        #field_ty: #trait_fullpath
-                    });
-                }
+                let field_ty = & field.ty;
+                where_predicates.push(parse_quote!{
+                    #field_ty: #trait_fullpath
+                });
 
                 if let Some(group_member) = field.find_group() {
                     abort!(
@@ -200,7 +198,6 @@ pub(crate) trait Adt {
         syan: &Path,
         generics: &Generics,
         ident: &Ident,
-        attrs: &[Attribute],
         nonce: u64,
         trait_path: &Path,
     ) -> TokenStream {
@@ -228,12 +225,10 @@ pub(crate) trait Adt {
                     continue;
                 }
 
-                if !field.has_ignore_bounds() {
-                    let field_ty = &field.ty;
-                    where_predicates.push(parse_quote!{
-                        #field_ty: #trait_fullpath
-                    });
-                }
+                let field_ty = &field.ty;
+                where_predicates.push(parse_quote!{
+                    #field_ty: #trait_fullpath
+                });
 
                 let field_ty = &field.ty;
                 if let Some((substruct, subfields)) = generate_substruct(
@@ -284,11 +279,8 @@ pub(crate) trait Adt {
         });
 
         let substruct_defs = substruct_items(&substructs, |data_struct, generics, ident| {
-            data_struct.extract_unparse(syan, generics, ident, &[], nonce, trait_path)
+            data_struct.extract_unparse(syan, generics, ident, nonce, trait_path)
         });
-        for ty in predicate_tys(attrs, "predicate_unparse") {
-            where_predicates.push(parse_quote!(#ty: #trait_fullpath));
-        }
         append_user_where_predicates(&mut where_predicates, generics);
         quote! {
             #substruct_defs
@@ -310,7 +302,6 @@ pub(crate) trait Adt {
         syan: &Path,
         generics: &Generics,
         ident: &Ident,
-        attrs: &[Attribute],
         trait_path: &Path,
     ) -> TokenStream {
         let trait_fullpath: Path = trait_path.clone();
@@ -345,14 +336,6 @@ pub(crate) trait Adt {
                 if field.has_default() {
                     continue;
                 }
-                // `#[ignore_bounds]` suppresses the synthesized predicate (for a naturally-recursive
-                // child whose bound would otherwise cycle). NOTE: `Spanned` carries an associated `Span`
-                // type, and the dropped predicate is what pins it to `__Syan_Span`; without it the
-                // child's `Span` is unconstrained in the `migrate` fold below, so `#[ignore_bounds]` on
-                // a `Spanned` field only type-checks when the field's `Span` is otherwise inferable.
-                if field.has_ignore_bounds() {
-                    continue;
-                }
                 // Every folded field must report the impl's span type `__Syan_Span`. Constraining it
                 // here pins the invented span param (fixes E0207 "unconstrained") and makes the
                 // `Span::migrate(acc, Spanned::span(field))` fold type-check (fixes E0308) for
@@ -377,9 +360,6 @@ pub(crate) trait Adt {
             ret
         });
 
-        for ty in predicate_tys(attrs, "predicate_spanned") {
-            where_predicates.push(parse_quote!(#ty: #syan::span::Spanned<Span = #tp_span>));
-        }
         append_user_where_predicates(&mut where_predicates, generics);
         quote! {
             #[automatically_derived]

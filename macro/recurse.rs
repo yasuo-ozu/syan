@@ -452,8 +452,8 @@ fn strip_structural_derives(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
                 let name = Ident::new(name, Span::call_site());
                 (!kept.is_empty()).then(|| syn::parse_quote!( #[#name(#(#kept),*)] ))
             }
-            // An item-level `#[predicate_unparse(..)]`/`#[predicate_spanned(..)]` is consumed by the
-            // derive just removed; leaving it would be "cannot find attribute".
+            // A helper attribute is consumed by the derive just removed; leaving it behind would be
+            // "cannot find attribute".
             None => (!is_structural_helper(attr)).then(|| attr.clone()),
         })
         .collect()
@@ -464,19 +464,9 @@ fn strip_structural_derives(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
 /// visitor markers `#[subast]`/`#[seq]`/`#[opt]` are NOT in this list: `#[derive(Ast)]` stays on the
 /// natural type and consumes them.
 fn is_structural_helper(attr: &syn::Attribute) -> bool {
-    [
-        "group",
-        "joint",
-        "alone",
-        "ignore_bounds",
-        "default",
-        "predicate",
-        "predicate_parse",
-        "predicate_unparse",
-        "predicate_spanned",
-    ]
-    .iter()
-    .any(|n| attr.path().is_ident(n))
+    ["group", "joint", "alone", "default"]
+        .iter()
+        .any(|n| attr.path().is_ident(n))
 }
 
 /// Strip the structural-derive field helper attributes from a field set.
@@ -687,13 +677,12 @@ fn expand_routed(item: &Item, tr: &(&'static str, Path), syan: &Path, nonce: u64
             &input.ident,
             &input.generics,
             &input.data,
-            &input.attrs,
             nonce,
             syan,
             qualified,
         ),
         // `Spanned` generates no substruct, so the salted nonce is unused; the entry point takes the
-        // whole `DeriveInput` (it reads `#[predicate_spanned]` and `#[syan]` off the item itself).
+        // whole `DeriveInput` because it reads `#[syan]` off the item itself.
         "Spanned" => attribute::spanned(&input, qualified.clone()),
         other => abort!(&input.ident, "#[recurse]: unroutable trait `{}`", other),
     };

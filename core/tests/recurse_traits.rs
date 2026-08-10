@@ -2,8 +2,7 @@
 // dependency that provides them.
 #![cfg(feature = "proc_macro2")]
 
-//! Group-free vs group-ful `#[recurse]` Unparse/Spanned (unbounded via re-entry) + the
-//! `#[ignore_bounds]` primitive.
+//! Group-free vs group-ful `#[recurse]` Unparse/Spanned (unbounded via re-entry).
 #![allow(dead_code)]
 
 // Group-free `#[recurse]` cycles derive Unparse/Spanned DIRECTLY on the natural type (unbounded).
@@ -104,8 +103,10 @@ mod unparse_spanned {
     }
 
     // MULTI-TYPE cycle: members' leaf bounds differ (`Expr` has an `Integer` leaf, `Stmt` does not), so
-    // `#[recurse]` injects the *union* of all members' leaf bounds as `#[predicate_unparse(…)]` on every
-    // member — so each impl can build/unparse its siblings, DIRECT on the natural type (unbounded).
+    // each impl still has to be able to unparse a sibling whose leaves it does not bound. `#[recurse]`
+    // used to handle that by injecting the *union* of all members' leaf bounds onto every member as
+    // `#[predicate_unparse(…)]`; that attribute is gone, and decycle now contracts the cyclic bound
+    // instead. Either way the call is DIRECT on the natural type (unbounded).
     #[recurse]
     mod mt {
         use core::marker::PhantomData;
@@ -336,49 +337,5 @@ mod group_ful {
             full.to_string(),
             "round-trips after the deep backtrack",
         );
-    }
-}
-
-// `#[ignore_bounds]` drops the synthesized `field_ty: Trait` where-bound so a mutually-recursive pair's
-// Unparse derive carries only leaf bounds (no E0275 where-cycle); child calls resolve coinductively.
-mod ignore_bounds {
-    use core::marker::PhantomData;
-    use syan::parse::Unparse;
-
-    #[derive(Unparse)]
-    pub enum Expr<S> {
-        Lit(::syan::source::proc_macro2::literal::Integer, PhantomData<S>),
-        Nest {
-            #[ignore_bounds]
-            inner: Box<Stmt<S>>,
-        },
-    }
-
-    #[derive(Unparse)]
-    pub enum Stmt<S> {
-        One(::syan::source::proc_macro2::literal::Integer, PhantomData<S>),
-        Two {
-            #[ignore_bounds]
-            e: Box<Expr<S>>,
-        },
-    }
-
-    #[test]
-    fn recursive_unparse_compiles_with_leaf_only_bounds() {
-        use syan::source::proc_macro2::literal::Integer;
-        // A tree deeper than any fixed bound — natural recursion, no depth limit.
-        let deep: Expr<proc_macro2::TokenTree> = Expr::Nest {
-            inner: Box::new(Stmt::Two {
-                e: Box::new(Expr::Nest {
-                    inner: Box::new(Stmt::One(
-                        Integer { value: "7".into(), suffix: None },
-                        PhantomData,
-                    )),
-                }),
-            }),
-        };
-        let mut out = Vec::<proc_macro2::TokenTree>::new();
-        deep.unparse(&mut (&mut out)).unwrap();
-        assert_eq!(out.len(), 1, "the single `7` literal at the bottom of the tree");
     }
 }
