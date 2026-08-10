@@ -5,6 +5,9 @@ pub(crate) fn generate_substruct(
     member: &Member,
     generics: &Generics,
     ident: &Ident,
+    // The enum variant these fields came from, or `None` for a struct — and for an enum's
+    // prefix-dedup prefix, which is parsed once for all variants. See the naming note below.
+    variant: Option<&Ident>,
     field_ident: &Ident,
     field_phantom: &Ident,
     fields: &mut VecDeque<(Member, Ident, &Field)>,
@@ -45,9 +48,20 @@ pub(crate) fn generate_substruct(
         // an ident. Encoding it here is what lets a caller driving BOTH derives from one expansion
         // (`#[recurse]`) use a single nonce; the distinction is semantic, so it belongs in the name
         // rather than hidden in a per-trait nonce perturbation.
+        // The VARIANT is part of the name too. Without it the name was a function of
+        // `(shape, group-field name, enum name)` only, so two variants of one enum whose `#[group]`
+        // holders share a field name were indistinguishable: the second definition redefined the
+        // first (E0428), their impls collided (E0119), and the survivor carried the other variant's
+        // fields — surfacing as `struct … does not have a field named 'x'` on a line that is
+        // perfectly correct. Worse, when the two variants' subfield lists happened to be identical
+        // NOTHING errored and one variant silently drove the other's generated code.
         let shape = if by_ref { "Ref" } else { "Own" };
+        let scope = match variant {
+            Some(v) => format!("{ident}_{v}"),
+            None => format!("{ident}"),
+        };
         let substruct_ident = Ident::new(
-            &format!("__SyanSubstructOf{shape}_{field_ident}_{ident}_{nonce}"),
+            &format!("__SyanSubstructOf{shape}_{field_ident}_{scope}_{nonce}"),
             member.span(),
         );
         let phantom_args: Punctuated<Type, Token![,]> = generics

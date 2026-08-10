@@ -21,6 +21,24 @@ fn atom_impl_header<'g>(
     (tp_atom, trait_fullpath, generic_params, ty_generics)
 }
 
+/// Peel `&'a` / `&'a mut` off a type before naming it in a where-predicate.
+///
+/// `generate_substruct` wraps every field of an **`Unparse`** substruct in a reference
+/// (`substruct.rs:30`), so a substruct's own derive sees `&'syan_substruct_ref T`. `&T: Unparse<A>`
+/// follows from `T: Unparse<A>` by the blanket at `parse/unparse.rs:6`, so the two are equivalent as
+/// bounds — but only the unwrapped form is recognisable to `decycle` as naming a cycle member. Leave
+/// the reference on and an SCC member reached *through* a group substruct is classified as an outside
+/// leaf: its bound is never contracted and its own premises are never hoisted, so the substruct's
+/// obligation reduces to `SomeLeafTok: Unparse<__SyanMacro_Atom>` at a universally quantified atom —
+/// which a leaf implementing `Unparse` at one concrete atom can never satisfy.
+fn peel_refs(ty: &Type) -> &Type {
+    let mut ty = ty;
+    while let Type::Reference(r) = ty {
+        ty = &r.elem;
+    }
+    ty
+}
+
 /// Emits a `#[group]` substruct's own item definition (stripped of derive-helper attrs) plus its
 /// derived impl, for every substruct collected while walking a struct/enum's fields.
 fn substruct_items(
@@ -54,14 +72,14 @@ pub(crate) trait Adt {
         syan: &Path,
         ident: &Ident,
         tp_error_final: &Type,
-        f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        f: impl FnMut(&[(Member, Ident, &Field)], Option<&Ident>) -> TokenStream,
     ) -> TokenStream;
 
     fn extract_inner(
         &self,
         ident: &Ident,
         v_self: &TokenStream,
-        f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        f: impl FnMut(&[(Member, Ident, &Field)], Option<&Ident>) -> TokenStream,
     ) -> TokenStream;
 
     fn extract_parse(
@@ -93,7 +111,7 @@ pub(crate) trait Adt {
         let mut substructs: Vec<ItemStruct> = Vec::new();
 
         let field_phantom: Ident = parse_quote!(_syan_phantom);
-        let inner = self.extract_parse_inner(syan, ident,&tp_error_final, |fields| {
+        let inner = self.extract_parse_inner(syan, ident, &tp_error_final, |fields, variant| {
             let mut ret = quote!();
 
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
@@ -104,11 +122,6 @@ pub(crate) trait Adt {
                     ));
                     continue;
                 }
-
-                let field_ty = & field.ty;
-                where_predicates.push(parse_quote!{
-                    #field_ty: #trait_fullpath
-                });
 
                 if let Some(group_member) = field.find_group() {
                     abort!(
@@ -125,7 +138,7 @@ pub(crate) trait Adt {
                     (Some(o1), Some(o2)) => abort!(quote!{#o1, #o2}, "Cannot implement both #[joint] and #[alone] to field `{}`", quote!{#{&field.ident}}),
                 };
 
-                let substruct = generate_substruct(&member, generics, ident, &field_ident, &field_phantom, &mut fields, nonce, false);
+                let substruct = generate_substruct(&member, generics, ident, variant, &field_ident, &field_phantom, &mut fields, nonce, false);
                     let field_ty = &field.ty;
 
                 if let Some((substruct, subfields)) = substruct {
@@ -155,6 +168,14 @@ pub(crate) trait Adt {
                     where_predicates.push(parse_quote!(#field_ty: #group_shape));
                     where_predicates.push(parse_quote!(#slot_ty: #trait_fullpath));
                 } else {
+                    // Mirror of the `Unparse` side: only a field that really is parsed gets the
+                    // bound. A `#[group(..)]` holder is built by `GroupShape::parse_group`, covered
+                    // by the two predicates pushed above. `Group` does have a generic `Parse` impl,
+                    // so the spurious bound was satisfiable for syan's own holders — but not for a
+                    // consumer-defined one, which need only implement `GroupShape`/`GroupUnparse`.
+                    where_predicates.push(parse_quote! {
+                        #field_ty: #trait_fullpath
+                    });
                     let to_parse_ty = field.ty.clone();
                     ret.extend(quote!(
                         #(if let Some(spacing) = spacing) {
@@ -216,7 +237,7 @@ pub(crate) trait Adt {
         let v_self: TokenStream = quote!(self);
         let mut substructs = Vec::new();
         let field_phantom: Ident = parse_quote!(_syan_phantom);
-        let inner = self.extract_inner(ident, &v_self, |fields| {
+        let inner = self.extract_inner(ident, &v_self, |fields, variant| {
             let mut ret = quote!();
             let mut fields: VecDeque<_> = fields.iter().cloned().collect();
 
@@ -226,15 +247,11 @@ pub(crate) trait Adt {
                 }
 
                 let field_ty = &field.ty;
-                where_predicates.push(parse_quote!{
-                    #field_ty: #trait_fullpath
-                });
-
-                let field_ty = &field.ty;
                 if let Some((substruct, subfields)) = generate_substruct(
                     &member,
                     generics,
                     ident,
+                    variant,
                     &field_ident,
                     &field_phantom,
                     &mut fields,
@@ -266,10 +283,19 @@ pub(crate) trait Adt {
                     where_predicates.push(parse_quote!(#field_ty: #group_unparse));
                     where_predicates.push(parse_quote!(for<'syan_substruct_ref> #slot_ty: #trait_fullpath));
                     substructs.push(substruct);
-                } else  {
-                ret.extend(quote!(
-                    <_ as #trait_fullpath>::unparse(#field_ident, #v_sink)?;
-                ));
+                } else {
+                    // Only a field that really is unparsed gets the bound. A `#[group(..)]` holder
+                    // leaves through `GroupUnparse::unparse_group`, covered by the two predicates
+                    // pushed above; the extra `FieldTy: Unparse<Atom>` is not merely redundant but
+                    // unsatisfiable at any atom for a holder like `Group<(), LParenTok, RParenTok>`,
+                    // which has no generic `Unparse` impl.
+                    let bound_ty = peel_refs(field_ty);
+                    where_predicates.push(parse_quote! {
+                        #bound_ty: #trait_fullpath
+                    });
+                    ret.extend(quote!(
+                        <_ as #trait_fullpath>::unparse(#field_ident, #v_sink)?;
+                    ));
                 }
             }
             quote! {
@@ -331,7 +357,7 @@ pub(crate) trait Adt {
         }
         let v_self: TokenStream = quote!(self);
 
-        let span_impl = self.extract_inner(ident, &v_self, |fields| {
+        let span_impl = self.extract_inner(ident, &v_self, |fields, _variant| {
             for (_, _, field) in fields {
                 if field.has_default() {
                     continue;
@@ -454,10 +480,10 @@ impl Adt for DataStruct {
         _syan: &Path,
         ident: &Ident,
         _tp_error_final: &Type,
-        mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        mut f: impl FnMut(&[(Member, Ident, &Field)], Option<&Ident>) -> TokenStream,
     ) -> TokenStream {
         let fields = map_fields_to_idents(&self.fields);
-        let inner = f(&fields[..]);
+        let inner = f(&fields[..], None);
         quote! {
             #inner
 
@@ -471,10 +497,10 @@ impl Adt for DataStruct {
         &self,
         ident: &Ident,
         v_self: &TokenStream,
-        mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        mut f: impl FnMut(&[(Member, Ident, &Field)], Option<&Ident>) -> TokenStream,
     ) -> TokenStream {
         let fields = map_fields_to_idents(&self.fields);
-        let inner = f(&fields[..]);
+        let inner = f(&fields[..], None);
         quote! {
             let #ident #{fields_pattern(&self.fields, &fields)} = #v_self;
             #inner
@@ -492,7 +518,7 @@ impl Adt for DataEnum {
         syan: &Path,
         ident: &Ident,
         tp_error_final: &Type,
-        mut f: impl FnMut(&[MappedField]) -> TokenStream,
+        mut f: impl FnMut(&[MappedField], Option<&Ident>) -> TokenStream,
     ) -> TokenStream {
         let variants: Vec<VariantFields> = self
             .variants
@@ -512,12 +538,28 @@ impl Adt for DataEnum {
         // zero (or <2 variants) — the common case, e.g. variants distinguished by their first token, incl.
         // every recurse-engine enum — codegen is the per-variant-`dup` scheme, unchanged.
         let lcp = common_field_prefix_len(&variants);
+        // A `#[group]` holder and the fields it absorbs must not be split across the prefix/suffix
+        // boundary. `generate_substruct` swallows the contiguous run of `#[group(..)]`-carrying
+        // fields FOLLOWING the holder, and it can only see the fields in the slice it is handed —
+        // so a prefix ending mid-run would parse the holder as an ordinary field up front and then
+        // abort on its content with "Cannot find member ... in struct ...". Walk the split point
+        // back out of any such run; at worst this reaches 0 and the per-variant scheme is used.
+        let mut lcp = lcp;
+        while lcp > 0
+            && variants.iter().any(|(_, fs)| {
+                fs.get(lcp)
+                    .is_some_and(|(_, _, f)| f.find_group().is_some())
+            })
+        {
+            lcp -= 1;
+        }
+        let lcp = lcp;
 
         if lcp == 0 || variants.len() < 2 {
             let blocks: Vec<TokenStream> = variants
                 .iter()
                 .map(|(variant, fields)| {
-                    let inner = f(&fields[..]);
+                    let inner = f(&fields[..], Some(&variant.ident));
                     let construct = construct_of(variant, fields);
                     quote! {
                         match #syan::parse::ParseStream::dup(&mut __syan_stream, |mut __syan_stream| {
@@ -544,7 +586,9 @@ impl Adt for DataEnum {
         // the "enum parse rewinds on failure" property of the per-variant scheme); the prefix is parsed
         // once inside it, and each non-empty suffix gets its own inner `dup` so a failed variant rewinds
         // only the suffix and the next variant is tried from the post-prefix position.
-        let prefix_parse = f(&variants[0].1[..lcp]);
+        // The prefix is parsed ONCE for all variants, so its substructs belong to no single
+        // variant and must not be named after one.
+        let prefix_parse = f(&variants[0].1[..lcp], None);
 
         // A variant whose fields are exactly the prefix is an unconditional fallback (empty suffix); the
         // FIRST such variant ends the chain (later variants are unreachable). It becomes the closure's tail
@@ -559,7 +603,7 @@ impl Adt for DataEnum {
             .map(|(variant, fields)| {
                 let construct = construct_of(variant, fields);
                 let suffix = &fields[lcp..]; // non-empty (the first empty one is the fallback, excluded)
-                let suffix_parse = f(suffix);
+                let suffix_parse = f(suffix, Some(&variant.ident));
                 let suffix_ids: Vec<&Ident> = suffix.iter().map(|(_, id, _)| id).collect();
                 let on_err = if has_fallback {
                     quote!( ::core::result::Result::Err(_) => {} )
@@ -612,11 +656,11 @@ impl Adt for DataEnum {
         &self,
         ident: &Ident,
         v_self: &TokenStream,
-        mut f: impl FnMut(&[(Member, Ident, &Field)]) -> TokenStream,
+        mut f: impl FnMut(&[(Member, Ident, &Field)], Option<&Ident>) -> TokenStream,
     ) -> TokenStream {
         let variants = self.variants.iter().map(|v| {
             let fields = map_fields_to_idents(&v.fields);
-            let inner = f(&fields[..]);
+            let inner = f(&fields[..], Some(&v.ident));
             (v, fields, inner)
         });
         quote! {
