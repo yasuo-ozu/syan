@@ -104,7 +104,23 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 
 /// Turn a module of mutually-recursive AST types (a *cycle*) into **natural recursive public types**
 /// whose circular trait obligations are broken by the external
-/// [`decycle`](https://docs.rs/decycle) crate. Takes **no arguments**.
+/// [`decycle`](https://docs.rs/decycle) crate.
+///
+/// # Arguments
+///
+/// - **`#[recurse]`** — decycle's **ranked** engine (the default): twin `TrRanked<Rank>` traits and a
+///   rank ladder, with unbounded depth via decycle's re-entry registry. The ladder discharges the
+///   *obligation* only; a recursive call re-enters through the un-ranked delegating impl at full
+///   height, so runtime depth is bounded only by the OS call stack.
+/// - **`#[recurse(structural)]`** — decycle's **structural** engine: a compile-time unroll with a
+///   `#[repr(transparent)]` terminator, so there is no runtime registry and no `type-leak`. Narrower
+///   scope in exchange — see the *structural* entry under *Known gaps* in `CLAUDE.md`.
+///
+/// Both produce the same public types and the same parse results; they differ in how the cyclic
+/// obligation is discharged, and therefore in compile time and in generated-code shape.
+/// `bench/` measures both against `nom` and `chumsky`.
+///
+/// (`limit = N` was removed; the ranked ladder's height is not user-tunable.)
 ///
 /// The user's types are emitted verbatim — genuine recursive enums/structs, one type at all depths, no
 /// engine type and no depth parameter. `#[derive(Ast)]`, `Debug`, `#[subast]`, user `impl`s and every
