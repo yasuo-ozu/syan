@@ -1,6 +1,6 @@
 use crate::error::{Error, ParseError};
 use crate::nested::group::{Group, GroupBrace, GroupBracket, GroupParen, GroupShape};
-use crate::parse::{unparse::Emitter, IntoParseStream, Parse, ParseStream, Tape, Unparse};
+use crate::parse::{unparse::Emitter, Parse, ParseStream, Tape, Unparse};
 use crate::span::WithSpan;
 use crate::symbol::Symbol;
 
@@ -164,10 +164,7 @@ impl crate::parse::unparse::Emitter<proc_macro2::TokenTree> for proc_macro2::Tok
 impl<T: Default + core::fmt::Display> Parse<proc_macro2::TokenTree> for Symbol<T> {
     type Error = ParseError;
 
-    fn parse(
-        stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
-    ) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
         match stream.next() {
             Some(proc_macro2::TokenTree::Ident(ident))
                 if ident == Self::default().to_string() =>
@@ -213,17 +210,16 @@ macro_rules! impl_for_group {
             // type is a METHOD generic, so the resulting obligation never mentions it. This is what
             // `#[derive(Parse)]` uses for a `#[group]` field — see `nested::group::GroupShape`.
             impl GroupShape<proc_macro2::TokenTree> for $t0 $(::$t)*<(), Span> {
-                fn parse_group<Slot>(
-                    stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
+                fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
+                    stream: &mut __S,
                 ) -> Result<(Slot, Self), ParseError>
                 where
                     Slot: Parse<proc_macro2::TokenTree>,
                 {
-                    let mut stream = stream.into_parse_stream();
                     match stream.next() {
                         Some(proc_macro2::TokenTree::Group(group)) if group.delimiter() == $delim => {
-                            let inner_stream = Stream::new(group.stream());
-                            let slot = Slot::parse(inner_stream).map_err(|e| e.into_parse_error())?;
+                            let mut inner_stream = Stream::new(group.stream());
+                            let slot = Slot::parse_stream(&mut inner_stream).map_err(|e| e.into_parse_error())?;
                             Ok((slot, Group {
                                 open: WithSpan { span: group.span_open().into(), slot: Default::default() },
                                 slot: (),
@@ -246,14 +242,11 @@ macro_rules! impl_for_group {
             {
                 type Error = ParseError;
 
-                fn parse(
-                    stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
-                ) -> Result<Self, Self::Error> {
-                    let mut stream = stream.into_parse_stream();
+                fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
                     match stream.next() {
                         Some(proc_macro2::TokenTree::Group(group)) if group.delimiter() == $delim => {
-                            let inner_stream = Stream::new(group.stream());
-                            let slot = T::parse(inner_stream).map_err(|e| e.into_parse_error())?;
+                            let mut inner_stream = Stream::new(group.stream());
+                            let slot = T::parse_stream(&mut inner_stream).map_err(|e| e.into_parse_error())?;
                             return Ok(Group {
                                 open: WithSpan {
                                     span: group.span_open().into(),

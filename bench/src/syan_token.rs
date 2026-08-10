@@ -124,7 +124,7 @@ macro_rules! engine {
             pub fn parse_pretokenised(ts: TokenStream) -> Result<Expr, String> {
                 let mut stream = Stream::new(ts);
                 let parsed =
-                    <g::Expr as Parse<Atom>>::parse(&mut stream).map_err(|e| e.to_string())?;
+                    <g::Expr as Parse<Atom>>::parse_stream(&mut stream).map_err(|e| e.to_string())?;
                 if syan::parse::ParseStream::peek(&mut stream).is_some() {
                     return Err("trailing input".into());
                 }

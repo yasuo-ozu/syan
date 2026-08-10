@@ -186,7 +186,7 @@ fn test_parse_with_newlines_and_spaces() {
     let mut stream = Stream::new("a\n b\tc".to_string());
     
     // Parse 'a'
-    let result = Symbol::<chars::_a>::parse(&mut stream);
+    let result = Symbol::<chars::_a>::parse_stream(&mut stream);
     assert!(result.is_ok());
     
     // Parse newline
@@ -194,11 +194,11 @@ fn test_parse_with_newlines_and_spaces() {
     assert_eq!(atom.slot, '\n');
     
     // Parse space
-    let result = Symbol::<chars::Space>::parse(&mut stream);
+    let result = Symbol::<chars::Space>::parse_stream(&mut stream);
     assert!(result.is_ok());
     
     // Parse 'b'
-    let result = Symbol::<chars::_b>::parse(&mut stream);
+    let result = Symbol::<chars::_b>::parse_stream(&mut stream);
     assert!(result.is_ok());
 }
 
@@ -208,18 +208,18 @@ fn test_complex_parsing_sequence() {
     let mut stream = input.into_parse_stream();
     
     // Parse each character in sequence
-    assert!(Symbol::<chars::_h>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_e>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_l>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_l>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_o>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::Space>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_w>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_o>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_r>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_l>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::_d>::parse(&mut stream).is_ok());
-    assert!(Symbol::<chars::Not>::parse(&mut stream).is_ok()); // '!'
+    assert!(Symbol::<chars::_h>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_e>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_l>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_l>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_o>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::Space>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_w>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_o>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_r>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_l>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::_d>::parse_stream(&mut stream).is_ok());
+    assert!(Symbol::<chars::Not>::parse_stream(&mut stream).is_ok()); // '!'
     
     // Should be end of stream
     assert!(stream.next().is_none());
@@ -231,19 +231,19 @@ fn test_parse_pushback_functionality() {
     let mut stream = input.into_parse_stream();
     
     // Try to parse 'b' (should fail)
-    let result = Symbol::<chars::_b>::parse(&mut stream);
+    let result = Symbol::<chars::_b>::parse_stream(&mut stream);
     assert!(result.is_err());
     
     // The 'a' should have been pushed back, so we can parse it now
-    let result = Symbol::<chars::_a>::parse(&mut stream);
+    let result = Symbol::<chars::_a>::parse_stream(&mut stream);
     assert!(result.is_ok());
     
     // Now we can parse 'b'
-    let result = Symbol::<chars::_b>::parse(&mut stream);
+    let result = Symbol::<chars::_b>::parse_stream(&mut stream);
     assert!(result.is_ok());
     
     // And finally 'c'
-    let result = Symbol::<chars::_c>::parse(&mut stream);
+    let result = Symbol::<chars::_c>::parse_stream(&mut stream);
     assert!(result.is_ok());
 }
 

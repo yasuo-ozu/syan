@@ -13,7 +13,7 @@
 //!   an explicit wrapper.
 
 use syan::error::ParseError;
-use syan::parse::{IntoParseStream, Parse, ParseStream};
+use syan::parse::{IntoParseStream, Parse};
 use syan::source::string::Span;
 use syan::span::WithSpan;
 
@@ -24,8 +24,8 @@ pub struct Ws<T>(pub T);
 
 impl<T: Parse<Atom>> Parse<Atom> for Ws<T> {
     type Error = T::Error;
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        let mut s = stream.into_parse_stream();
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+        let s = stream.into_parse_stream();
         loop {
             let ws = matches!(s.peek(), Some(a) if a.slot.is_whitespace());
             if ws {
@@ -34,7 +34,7 @@ impl<T: Parse<Atom>> Parse<Atom> for Ws<T> {
                 break;
             }
         }
-        T::parse(&mut s).map(Ws)
+        T::parse_stream(&mut *s).map(Ws)
     }
 }
 
@@ -43,8 +43,8 @@ pub struct Int(pub i64);
 
 impl Parse<Atom> for Int {
     type Error = ParseError;
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        let mut s = stream.into_parse_stream();
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+        let s = stream.into_parse_stream();
         let mut buf = String::new();
         loop {
             let d = match s.peek() {
@@ -162,7 +162,7 @@ macro_rules! engine {
             pub fn parse(src: &str) -> Result<Expr, String> {
                 let mut stream = Stream::new(src.to_string());
                 let parsed =
-                    <g::Expr as Parse<Atom>>::parse(&mut stream).map_err(|e| e.to_string())?;
+                    <g::Expr as Parse<Atom>>::parse_stream(&mut stream).map_err(|e| e.to_string())?;
                 // require full consumption, minus trailing whitespace
                 loop {
                     let ws = matches!(stream.peek(), Some(a) if a.slot.is_whitespace());

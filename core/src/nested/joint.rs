@@ -1,5 +1,5 @@
 use crate::error::ParseError;
-use crate::parse::{IntoParseStream, Parse, ParseStream};
+use crate::parse::Parse;
 use crate::span::Spanned;
 use crate::tuple::PopHeadRef;
 use newer_type::{implement, traits};
@@ -43,14 +43,13 @@ where
 {
     type Error = ParseError;
 
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
-        let head = Head::parse(&mut stream).map_err(Into::into)?;
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+        let head = Head::parse_stream(&mut *stream).map_err(Into::into)?;
         if stream.skip_sep() {
             // TODO:
             panic!();
         }
-        let rem = <Joint<Rem>>::parse(&mut stream)?.0;
+        let rem = <Joint<Rem>>::parse_stream(&mut *stream)?.0;
         Ok(Joint(Tuple::unsplit(head, rem)))
     }
 }
@@ -61,8 +60,8 @@ where
     T::Error: Into<ParseError>,
 {
     type Error = ParseError;
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        Ok(Joint((T::parse(stream).map_err(Into::into)?,)))
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+        Ok(Joint((T::parse_stream(&mut *stream).map_err(Into::into)?,)))
     }
 }
 

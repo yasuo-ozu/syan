@@ -53,9 +53,9 @@ fn a_leaf_failure_reports_where_it_failed_not_byte_zero() {
     // `aaab` — the `_a` parser succeeds three times, then fails ON THE FOURTH atom.
     let mut stream = syan::parse::IntoParseStream::into_parse_stream("aaab".to_string());
     for _ in 0..3 {
-        Symbol::<chars::_a>::parse(&mut stream).expect("the first three are `a`");
+        Symbol::<chars::_a>::parse_stream(&mut stream).expect("the first three are `a`");
     }
-    let e = Symbol::<chars::_a>::parse(&mut stream).unwrap_err();
+    let e = Symbol::<chars::_a>::parse_stream(&mut stream).unwrap_err();
     let s = e.span_debug().expect("a leaf failure is spanned");
     assert!(
         s.contains("loc: 3"),
@@ -72,10 +72,10 @@ fn a_token_failure_reports_the_offending_token() {
     use syan::source::proc_macro2::literal::Integer;
     let tokens = "1 2 oops".parse::<proc_macro2::TokenStream>().unwrap();
     let mut stream = syan::parse::IntoParseStream::into_parse_stream(tokens);
-    Integer::parse(&mut stream).unwrap();
-    Integer::parse(&mut stream).unwrap();
+    Integer::parse_stream(&mut stream).unwrap();
+    Integer::parse_stream(&mut stream).unwrap();
     // Fails on `oops`, whose span is not the start of the stream.
-    let e = Integer::parse(&mut stream).unwrap_err();
+    let e = Integer::parse_stream(&mut stream).unwrap_err();
     assert!(
         e.span_debug().is_some(),
         "a token-level failure must carry the offending token's span"

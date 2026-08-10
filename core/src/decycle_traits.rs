@@ -36,9 +36,33 @@
 pub trait Parse<Atom>: ::core::marker::Sized {
     type Error: ::syan::error::Error;
 
+    /// Parse from a **reborrowable** stream.
+    ///
+    /// This is the required method and the one recursion goes through. `S` is a genuine fixed
+    /// point: a recursive call reborrows (`Inner::parse_stream(&mut *stream)`), so the callee is
+    /// instantiated at the *same* `S` and the instantiation set stays finite no matter how deep the
+    /// grammar recurses.
+    ///
+    /// It replaces an earlier design in which `parse` took `impl IntoParseStream` **by value**.
+    /// That moved rather than reborrowed, so each descent level asked for
+    /// `parse::<&mut &mut …>` — an infinite monomorphisation chain — and `#[recurse]` had to
+    /// paper over it by rewriting every recursive call's argument to `erase(…)`, pinning the callee
+    /// to `&mut dyn ParseStream`. That worked, but it made every stream operation a virtual call and
+    /// the erasure was not idempotent: the trait-object tower grew one layer per recursion level.
+    fn parse_stream<S: ::syan::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut S,
+    ) -> ::core::result::Result<Self, Self::Error>;
+
+    /// Parse from anything that can become a stream — `String`, `TokenStream`, an existing stream.
+    ///
+    /// Provided, so implementors only write [`parse_stream`](Self::parse_stream).
     fn parse(
         stream: impl ::syan::parse::into_parse_stream::IntoParseStream<Atom = Atom>,
-    ) -> ::core::result::Result<Self, Self::Error>;
+    ) -> ::core::result::Result<Self, Self::Error> {
+        Self::parse_stream(
+            &mut ::syan::parse::into_parse_stream::IntoParseStream::into_parse_stream(stream),
+        )
+    }
 
     /// Wrap this value in [`Attempt`](::syan::nested::Attempt), the **atomic-parse** marker: parsing
     /// an `Attempt<Self>` parses `Self` but rewinds the stream on failure (it requires

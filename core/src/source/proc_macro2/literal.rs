@@ -1,7 +1,7 @@
 use super::Span;
 use crate::error::ParseError;
 use crate::parse::unparse::Emitter;
-use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
+use crate::parse::{Parse, Unparse};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Bool {

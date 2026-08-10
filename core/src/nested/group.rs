@@ -1,5 +1,5 @@
 use crate::error::ParseError;
-use crate::parse::{IntoParseStream, Parse, Unparse};
+use crate::parse::{Parse, Unparse};
 use crate::span::Spanned;
 use crate::span::WithSpan;
 use crate::symbol::chars as punct;
@@ -102,11 +102,10 @@ where
 {
     type Error = ParseError;
 
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
-        let open = O::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
-        let slot = T::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
-        let close = C::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+        let open = O::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
+        let slot = T::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
+        let close = C::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
         Ok(Group { open, slot, close })
     }
 }
@@ -132,8 +131,8 @@ where
 ///   *single* atom, so the impl consumes one `TokenTree::Group`, parses the content from its inner
 ///   stream, and synthesizes the delimiter spans. The delimiters are never parsed as tokens there.
 pub trait GroupShape<Atom>: Sized {
-    fn parse_group<Slot>(
-        stream: impl IntoParseStream<Atom = Atom>,
+    fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
     ) -> Result<(Slot, Self), ParseError>
     where
         Slot: Parse<Atom>;
@@ -160,16 +159,15 @@ where
     O: Parse<Atom>,
     C: Parse<Atom>,
 {
-    fn parse_group<Slot>(
-        stream: impl IntoParseStream<Atom = Atom>,
+    fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
     ) -> Result<(Slot, Self), ParseError>
     where
         Slot: Parse<Atom>,
     {
-        let mut stream = stream.into_parse_stream();
-        let open = O::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
-        let slot = Slot::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
-        let close = C::parse(&mut stream).map_err(crate::error::Error::into_parse_error)?;
+        let open = O::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
+        let slot = Slot::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
+        let close = C::parse_stream(&mut *stream).map_err(crate::error::Error::into_parse_error)?;
         Ok((
             slot,
             Group {

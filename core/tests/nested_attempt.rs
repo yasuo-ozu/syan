@@ -42,9 +42,9 @@ fn failure_rewinds_stream() {
     // REWINDS to the start. A plain `(Integer, Bool)` would leave the stream past `5`; after the rewind a
     // following `(Integer, Integer)` sees both `5` and `6`.
     let mut stream = quote! { 5 6 }.into_parse_stream();
-    let first: Result<Attempt<(Integer, Bool)>, _> = Parse::parse(&mut stream);
+    let first: Result<Attempt<(Integer, Bool)>, _> = Parse::parse_stream(&mut stream);
     assert!(first.is_err());
-    let pair: (Integer, Integer) = Parse::parse(&mut stream).unwrap();
+    let pair: (Integer, Integer) = Parse::parse_stream(&mut stream).unwrap();
     assert_eq!(pair.0.value, "5");
     assert_eq!(pair.1.value, "6");
 }

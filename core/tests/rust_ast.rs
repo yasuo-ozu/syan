@@ -104,8 +104,8 @@ where
     Atom: syan::span::Spanned,
 {
     type Error = syan::error::ParseError;
-    fn parse(
-        _stream: impl syan::parse::into_parse_stream::IntoParseStream<Atom = Atom>,
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(
+        _stream: &mut __S,
     ) -> Result<Self, Self::Error> {
         Err(syan::error::ParseError::new(
             (),

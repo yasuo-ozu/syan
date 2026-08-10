@@ -177,10 +177,8 @@ mod imp {
     {
         type Error = T::Error;
 
-        fn parse(
-            stream: impl crate::parse::IntoParseStream<Atom = Atom>,
-        ) -> Result<Self, Self::Error> {
-            T::parse(stream)?;
+        fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+            T::parse_stream(&mut *stream)?;
             Ok(Self::Symbol)
         }
     }

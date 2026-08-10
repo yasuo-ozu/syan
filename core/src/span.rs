@@ -82,7 +82,7 @@ where
     T: Parse<Atom>,
 {
     type Error = T::Error;
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
         struct SubStream<Slot, S>(Slot, S);
 
         impl<Slot, Atom, S: Span> ParseStream for SubStream<Slot, S>
@@ -136,7 +136,7 @@ where
             }
         }
         let mut stream = SubStream(stream.into_parse_stream(), Atom::Span::default());
-        let slot = T::parse(&mut stream)?;
+        let slot = T::parse_stream(&mut stream)?;
         Ok(WithSpan {
             slot,
             span: stream.1,

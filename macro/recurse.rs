@@ -6,7 +6,9 @@
 //! `#[derive(Parse/Unparse/Spanned)]` itself**, and hands both to
 //! `decycle::ranked::process_module_with_graph`.
 //!
-//! **One** reshape is left here: wrapping parse-call streams in `erase(…)` ([`erase_expanded`]).
+//! **Nothing** is left here beyond routing: the stream reshape this module used to perform — wrapping
+//! every recursive parse call's argument in `erase(…)` — is gone, because `Parse::parse_stream` now
+//! takes `&mut S` and recursion reborrows, so `S` is a fixed point and no erasure is needed.
 //! That one is irreducibly syan's — the growth it breaks is in the *stream type*
 //! (`&mut &mut …`, one layer per descent level, because `Parse::parse` takes its stream by value), a
 //! monomorphization cycle rather than a trait-obligation cycle, and the type it pins to
@@ -27,11 +29,9 @@ use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::{abort, set_dummy};
 use std::collections::HashSet;
-use syn::visit_mut::VisitMut;
 use syn::punctuated::Punctuated;
 use syn::{
-    DeriveInput, Expr, ExprCall, ExprPath, Field, Fields,
-    Item, ItemImpl, ItemMod, Path, Token,
+    DeriveInput, Field, Fields, Item, ItemMod, Path, Token,
 };
 use decycle::analysis::EdgeKind;
 use decycle::safegraph::VecGraph;
@@ -91,7 +91,6 @@ pub fn recurse(attr: TokenStream1, input: TokenStream1, nonce: u64) -> TokenStre
         &trait_idents,
     ));
     expansion.select_cycle_members(&cycles);
-    erase_expanded(&mut expansion, &syan);
 
     let prelude = build_prelude(&expansion, &routed, &syan);
     emit(module, prelude, expansion, engine, &syan)
@@ -242,25 +241,6 @@ impl Expansion {
     }
 }
 
-/// The only reshape left on syan's side: wrap each cycle member's field-`parse` calls in
-/// `erase(…)`.
-///
-/// The bare/qualified trait spelling used to be chosen here too, so that decycle could read syan's
-/// cycle analysis back out of it. `emit` now hands decycle the analysis directly, so decycle re-spells
-/// the impls itself from that graph (`decycle::ranked::contract`) — one encoding of the cycle set
-/// instead of two.
-fn erase_expanded(ex: &mut Expansion, syan: &Path) {
-    use decycle::safegraph::graph::Graph;
-    let members: HashSet<String> = ex.cycle_graph.nodes().map(|n| n.to_string()).collect();
-    for (trait_name, pos) in &ex.contracted {
-        if *trait_name != "Parse" {
-            continue;
-        }
-        if let Item::Impl(im) = &mut ex.items[*pos] {
-            erase_parse_stream_args(im, syan, &members);
-        }
-    }
-}
 
 /// The items that must precede the module's own: when decycle will run, the namespace-split trait
 /// bindings the reshaped impls need. (The aliases that keep decycle's own helper-module nesting from
@@ -585,74 +565,7 @@ fn bare_ident(name: &str) -> Ident {
 
 
 
-/// Wrap the stream argument of every field-`parse` call in `#syan::parse::erase(…)`, pinning the
-/// callee's stream type to one fixed `&mut dyn ParseStream` layer (see the module docs and
-/// `syan::parse::erase`). The derive spells every such call as `<Ty as <Trait>>::parse(<stream>)`, so
-/// matching a qualified (`qself`) call path whose final segment is `parse` hits exactly those and
-/// nothing else (`ParseStream::dup(…)` and `.into_parse_stream()` are spelled differently).
-fn erase_parse_stream_args(item_impl: &mut ItemImpl, syan: &Path, members: &HashSet<String>) {
-    struct V<'a> {
-        syan: &'a Path,
-        members: &'a HashSet<String>,
-    }
-    impl VisitMut for V<'_> {
-        fn visit_expr_call_mut(&mut self, call: &mut ExprCall) {
-            syn::visit_mut::visit_expr_call_mut(self, call);
-            let Expr::Path(ExprPath {
-                qself: Some(qself),
-                path,
-                ..
-            }) = &*call.func
-            else {
-                return;
-            };
-            if path.segments.last().is_none_or(|s| s.ident != "parse") {
-                return;
-            }
-            // Only a call that can **re-enter the cycle** needs its stream pinned. The growth is a
-            // monomorphization cycle: `Expr::parse::<S>` → `Stmt::parse::<&mut S>` →
-            // `Expr::parse::<&mut &mut S>` … and that only closes if the callee leads back here.
-            // A leaf field (`Integer`, `Token![;]`, a `GroupBrace`) adds one instantiation and stops,
-            // so erasing it buys nothing and costs a virtual call per field — which in a real grammar
-            // is most of them.
-            if !mentions_member(&qself.ty, self.members) {
-                return;
-            }
-            let Some(arg) = call.args.first_mut() else {
-                return;
-            };
-            let syan = self.syan;
-            *arg = syn::parse_quote!(#syan::parse::parse_stream::erase(#arg));
-        }
-    }
-    V { syan, members }.visit_item_impl_mut(item_impl);
-}
 
-/// Does `ty` mention a cycle member anywhere — at its head or inside its arguments? A wrapped callee
-/// (`Vec<Box<Stmt<S>>>`) re-enters the cycle through the container's own generic impl, so it counts.
-fn mentions_member(ty: &syn::Type, members: &HashSet<String>) -> bool {
-    struct V<'a> {
-        members: &'a HashSet<String>,
-        hit: bool,
-    }
-    impl syn::visit::Visit<'_> for V<'_> {
-        fn visit_type_path(&mut self, tp: &syn::TypePath) {
-            if tp.qself.is_none()
-                && tp
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|s| self.members.contains(&s.ident.to_string()))
-            {
-                self.hit = true;
-            }
-            syn::visit::visit_type_path(self, tp);
-        }
-    }
-    let mut v = V { members, hit: false };
-    syn::visit::Visit::visit_type(&mut v, ty);
-    v.hit
-}
 /// Run one structural derive over `item`, **unreshaped**.
 ///
 /// The output is a `#[group]` substruct's definition (if any), that substruct's own impl, and the

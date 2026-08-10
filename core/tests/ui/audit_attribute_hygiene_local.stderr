@@ -1,19 +1,7 @@
-error[E0277]: the trait bound `syan::source::proc_macro2::literal::Integer: ParseStream` is not satisfied
+error[E0614]: type `syan::source::proc_macro2::literal::Integer` cannot be dereferenced
   --> tests/ui/audit_attribute_hygiene_local.rs:10:10
    |
 10 | #[derive(Parse, Unparse)]
-   |          ^^^^^ the trait `ParseStream` is not implemented for `syan::source::proc_macro2::literal::Integer`
+   |          ^^^^^ can't be dereferenced
    |
-   = help: the following other types implement trait `ParseStream`:
-             &mut T
-             syan::source::proc_macro2::Stream
-             syan::source::string::Stream
-   = note: required for `&mut syan::source::proc_macro2::literal::Integer` to implement `ParseStream`
-note: required by a bound in `syan::parse::Parse::parse`
-  --> src/decycle_traits.rs
-   |
-   |     fn parse(
-   |        ----- required by a bound in this associated function
-   |         stream: impl ::syan::parse::into_parse_stream::IntoParseStream<Atom = Atom>,
-   |                                                                        ^^^^^^^^^^^ required by this bound in `Parse::parse`
    = note: this error originates in the derive macro `Parse` (in Nightly builds, run with -Z macro-backtrace for more info)

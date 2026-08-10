@@ -1,4 +1,4 @@
-use super::{IntoParseStream, Parse};
+use super::Parse;
 use crate::error::ParseError;
 use crate::parse::unparse::{Emitter, Unparse};
 use crate::span::Spanned;
@@ -19,7 +19,7 @@ macro_rules! __syan_wrap_err {
 macro_rules! __syan_parse_bindings {
     (@inner $stream:ident [$($prev:ident),*]; [$Ehead:ident $(, $Etail:ident)*]; [$ahead:ident $(, $atail:ident)*]) => {
         let $ahead = ::core::result::Result::map_err(
-            Parse::parse(&mut $stream),
+            Parse::parse_stream(&mut *$stream),
             |e| __syan_wrap_err!(e; [ $($prev),* ]; $Ehead),
         )?;
         __syan_parse_bindings!(@inner $stream [ $($prev,)* $Ehead ]; [ $($Etail),* ]; [ $($atail),* ]);
@@ -56,10 +56,7 @@ macro_rules! __syan_tuple_parse_impl_one {
             __SyanError: crate::error::Error + Into<ParseError>,
         {
             type Error = __SyanError;
-            fn parse(
-                __syan_stream: impl IntoParseStream<Atom = __SyanMacroAtom>,
-            ) -> ::core::result::Result<Self, Self::Error> {
-                let mut __syan_stream = __syan_stream.into_parse_stream();
+            fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = __SyanMacroAtom>>(__syan_stream: &mut __S) -> ::core::result::Result<Self, Self::Error> {
                 __syan_parse_bindings!(@inner __syan_stream []; [ $($E),+ ]; [ $($a),+ ]);
                 ::core::result::Result::Ok( ( $($a),+ ) )
             }
@@ -107,7 +104,7 @@ impl_for_tup!(
 
 impl<Atom> Parse<Atom> for () {
     type Error = core::convert::Infallible;
-    fn parse(_: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(_: &mut __S) -> Result<Self, Self::Error> {
         Ok(())
     }
 }
@@ -123,8 +120,8 @@ where
     T: Parse<Atom>,
 {
     type Error = T::Error;
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        Ok((T::parse(stream)?,))
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+        Ok((T::parse_stream(&mut *stream)?,))
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::error::{ParseError, UnionWith};
-use crate::parse::{Parse, ParseStream, Unparse};
+use crate::parse::{Parse, Unparse};
 use crate::span::Spanned;
 use parametrized::{Parametrized, ParametrizedIntoIter, ParametrizedIterMut};
 
@@ -288,11 +288,10 @@ where
 {
     type Error = <Item::Error as crate::error::UnionWith<Punct::Error>>::Output;
 
-    fn parse(stream: impl crate::parse::IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
 
         // Try to parse the first item
-        let first_item = match stream.dup(|stream| Item::parse(stream)) {
+        let first_item = match stream.dup(|stream| Item::parse_stream(&mut *stream)) {
             Ok(item) => item,
             Err(_) => {
                 // No items, return empty punctuated list
@@ -304,10 +303,10 @@ where
 
         // Parse subsequent (punct, item) pairs
         loop {
-            let pair: Result<_, Self::Error> = stream.dup(|mut stream| {
-                let punct = Punct::parse(&mut stream)
+            let pair: Result<_, Self::Error> = stream.dup(|stream| {
+                let punct = Punct::parse_stream(&mut *stream)
                     .map_err(<Item::Error as UnionWith<Punct::Error>>::use_right)?;
-                let item = Item::parse(&mut stream)
+                let item = Item::parse_stream(&mut *stream)
                     .map_err(<Item::Error as UnionWith<Punct::Error>>::use_left)?;
                 Ok((punct, item))
             });

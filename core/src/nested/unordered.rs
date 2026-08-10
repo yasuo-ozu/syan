@@ -1,6 +1,6 @@
 use crate::error::ParseError;
 use crate::parse::unparse::Emitter;
-use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
+use crate::parse::{Parse, Unparse};
 use crate::span::{Span, Spanned};
 
 /// Parse a `T` and a `U` in **either order** — `T U` *or* `U T`.
@@ -49,20 +49,19 @@ where
 {
     type Error = ParseError;
 
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
         // Try `T U` on a duplicated stream; on failure `dup` backtracks (the original is untouched), so
         // we can then try `U T` from the same starting position.
         let t_then_u = stream.dup(|s| -> Result<(T, U), ParseError> {
-            let t = T::parse(&mut *s).map_err(Into::into)?;
-            let u = U::parse(&mut *s).map_err(Into::into)?;
+            let t = T::parse_stream(&mut *s).map_err(Into::into)?;
+            let u = U::parse_stream(&mut *s).map_err(Into::into)?;
             Ok((t, u))
         });
         match t_then_u {
             Ok((t, u)) => Ok(Self { t, u, t_first: true }),
             Err(_) => {
-                let u = U::parse(&mut stream).map_err(Into::into)?;
-                let t = T::parse(&mut stream).map_err(Into::into)?;
+                let u = U::parse_stream(&mut *stream).map_err(Into::into)?;
+                let t = T::parse_stream(&mut *stream).map_err(Into::into)?;
                 Ok(Self { t, u, t_first: false })
             }
         }

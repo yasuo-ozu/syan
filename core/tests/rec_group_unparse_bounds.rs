@@ -18,7 +18,7 @@
 
 use syan::nested::group::{GroupShape, GroupUnparse};
 use syan::parse::unparse::Emitter;
-use syan::parse::{IntoParseStream, Parse, ParseStream, Unparse};
+use syan::parse::{Parse, ParseStream, Unparse};
 use syan::source::proc_macro2::Span;
 use template_quote::quote;
 
@@ -34,13 +34,12 @@ fn punct_is(tt: &TokenTree, ch: char) -> bool {
 }
 
 impl GroupShape<TokenTree> for Angle {
-    fn parse_group<Slot>(
-        stream: impl IntoParseStream<Atom = TokenTree>,
+    fn parse_group<Slot, __S: ParseStream<Atom = TokenTree>>(
+        stream: &mut __S,
     ) -> Result<(Slot, Self), syan::error::ParseError>
     where
         Slot: Parse<TokenTree>,
     {
-        let mut stream = stream.into_parse_stream();
         match stream.next() {
             Some(tt) if punct_is(&tt, '<') => {}
             Some(tt) => {
@@ -52,7 +51,7 @@ impl GroupShape<TokenTree> for Angle {
             }
             None => return Err(syan::error::ParseError::new(Span::default(), "eof")),
         }
-        let slot = Slot::parse(&mut stream).map_err(syan::error::Error::into_parse_error)?;
+        let slot = Slot::parse_stream(&mut *stream).map_err(syan::error::Error::into_parse_error)?;
         match stream.next() {
             Some(tt) if punct_is(&tt, '>') => Ok((slot, Angle)),
             Some(tt) => {

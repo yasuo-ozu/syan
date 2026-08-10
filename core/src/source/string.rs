@@ -120,10 +120,9 @@ macro_rules! impl_parse_for_char {
             impl Parse<WithSpan<char, Span>> for Symbol<crate::symbol::chars::$name> {
                 type Error = ParseError;
 
-                fn parse(
-                    stream: impl IntoParseStream<Atom = WithSpan<char, Span>>,
+                fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = WithSpan<char, Span>>>(
+                    stream: &mut __S,
                 ) -> Result<Self, Self::Error> {
-                    let mut stream = stream.into_parse_stream();
                     match stream.next() {
                         Some(WithSpan { slot: ch, .. })
                             if ch == crate::symbol::chars::$name.to_string().chars().next().unwrap() =>

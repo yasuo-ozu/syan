@@ -95,8 +95,8 @@ pub(crate) trait Adt {
         proc_macro_error::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
                 type Error = ::core::convert::Infallible;
-                fn parse(
-                    _stream: impl #syan::parse::into_parse_stream::IntoParseStream<Atom = #tp_atom>
+                fn parse_stream<__SyanMacro_S: #syan::parse::parse_stream::ParseStream<Atom = #tp_atom>>(
+                    _stream: &mut __SyanMacro_S
                 ) -> ::core::result::Result<Self, Self::Error> {
                     ::core::unimplemented!()
                 }
@@ -159,7 +159,7 @@ pub(crate) trait Adt {
                             #(for subfield in subfields) { #{&subfield.ident.as_ref().unwrap()}, }
                             #field_phantom: _
                         }, #field_ident) = ::core::result::Result::map_err(
-                            <#field_ty as #group_shape>::parse_group::<#slot_ty>(&mut #v_stream),
+                            <#field_ty as #group_shape>::parse_group::<#slot_ty, _>(&mut *#v_stream),
                             |err| <_ as #syan::error::Error>::into_parse_error(err)
                         )?;
                     ));
@@ -180,12 +180,12 @@ pub(crate) trait Adt {
                     ret.extend(quote!(
                         #(if let Some(spacing) = spacing) {
                             let #field_ident = #syan::parse::parse_stream::ParseStream::validate_spacing(
-                                &mut #v_stream,
+                                &mut *#v_stream,
                                 #{spacing == Spacing::Joint}
                             )?;
                         }
                         let #field_ident = ::core::result::Result::map_err(
-                            <#to_parse_ty as #trait_fullpath>::parse(&mut #v_stream),
+                            <#to_parse_ty as #trait_fullpath>::parse_stream(&mut *#v_stream),
                             |err| <_ as #syan::error::Error>::into_parse_error(err)
                         )?;
                     ));
@@ -204,10 +204,9 @@ pub(crate) trait Adt {
             #(if !where_predicates.is_empty()) { where #where_predicates}
             {
                 type Error = #tp_error_final;
-                fn parse(
-                    #v_stream: impl #syan::parse::into_parse_stream::IntoParseStream<Atom = #tp_atom>
+                fn parse_stream<__SyanMacro_S: #syan::parse::parse_stream::ParseStream<Atom = #tp_atom>>(
+                    #v_stream: &mut __SyanMacro_S
                 ) -> ::core::result::Result<Self, Self::Error> {
-                    let mut #v_stream = #v_stream.into_parse_stream();
                     #inner
                 }
             }
@@ -562,7 +561,7 @@ impl Adt for DataEnum {
                     let inner = f(&fields[..], Some(&variant.ident));
                     let construct = construct_of(variant, fields);
                     quote! {
-                        match #syan::parse::ParseStream::dup(&mut __syan_stream, |mut __syan_stream| {
+                        match #syan::parse::ParseStream::dup(&mut *__syan_stream, |__syan_stream| {
                             #inner
                             ::core::result::Result::Ok(#construct)
                         }) {
@@ -613,8 +612,8 @@ impl Adt for DataEnum {
                 quote! {
                     // Turbofish pins the suffix `dup`'s error type (a discarded `Err(_)` arm wouldn't).
                     match #syan::parse::ParseStream::dup::<_, #tp_error_final, _>(
-                        &mut __syan_stream,
-                        |mut __syan_stream| {
+                        &mut *__syan_stream,
+                        |__syan_stream| {
                             #suffix_parse
                             ::core::result::Result::Ok((#(#suffix_ids,)*))
                         },
@@ -643,7 +642,7 @@ impl Adt for DataEnum {
         let errors_decl =
             (!has_fallback).then(|| quote!( let mut __syan_errors = ::std::vec::Vec::new(); ));
         quote! {
-            #syan::parse::ParseStream::dup(&mut __syan_stream, |mut __syan_stream| {
+            #syan::parse::ParseStream::dup(&mut *__syan_stream, |__syan_stream| {
                 #prefix_parse
                 #errors_decl
                 #(#branches)*

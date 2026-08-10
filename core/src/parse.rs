@@ -10,7 +10,7 @@ mod tuple;
 
 pub use into_parse_stream::IntoParseStream;
 pub use parse::Parse;
-pub use parse_stream::{erase, ParseStream};
+pub use parse_stream::ParseStream;
 pub use syan_macro::recurse;
 pub use tape::Tape;
 pub use unparse::Unparse;
@@ -25,10 +25,9 @@ macro_rules! impl_for_collection {
             $item: Parse<Atom>,
         {
             type Error = $item::Error;
-            fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+            fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
                 let mut v: Self = Default::default();
-                let mut stream = stream.into_parse_stream();
-                while let Ok(item) = stream.dup(|stream| $item::parse(stream)) {
+                while let Ok(item) = stream.dup(|stream| $item::parse_stream(&mut *stream)) {
                     v.extend(std::iter::once(item));
                 }
                 Ok(v)

@@ -10,7 +10,7 @@
 //! That is deliberate: it pins a real ordering bug so a fix cannot regress and
 //! a rewrite cannot reintroduce it.
 
-use syan::parse::{IntoParseStream, ParseStream};
+use syan::parse::ParseStream;
 use syan::source::string::{Span, Stream};
 use syan::span::WithSpan;
 
@@ -562,52 +562,50 @@ fn dup_nests_to_arbitrary_depth_generically() {
     );
 }
 
-/// (3) `Parse::parse` takes `impl IntoParseStream` — a generic parameter, which
-/// MOVES rather than reborrows — so a descent that passes `&mut local` at each
-/// level asks for `parse::<&mut &mut …>` without bound. `erase` is the fix, and
-/// this pins that it works: the set of stream types a descent instantiates must
-/// be BOUNDED, i.e. identical at depth 3 and at depth 30.
+/// (3) A recursive descent must instantiate **one** stream type, however deep it goes.
 ///
-/// Note what is *not* asserted: that the set has one element. The entry stream
-/// is a concrete `Stream` and everything below it is `&mut dyn ParseStream`, so
-/// two is correct and unavoidable. An earlier version of this test demanded one,
-/// by hand-building `lvl(&mut r1)` towers in the test body — but a caller that
-/// writes `&mut r1` where `r1: &mut Stream` has itself created `&mut &mut Stream`,
-/// so that assertion was about the test's own code rather than about the library,
-/// and no stream design that keeps the `&mut T` blanket could satisfy it.
+/// `Parse::parse` used to take `impl IntoParseStream` **by value**, so each level asked for
+/// `parse::<&mut &mut …>` — an infinite monomorphisation chain. `#[recurse]` worked around it by
+/// rewriting every recursive call's argument to `erase(…)`, pinning the callee to
+/// `&mut dyn ParseStream`; the old version of this test asserted that the resulting type set was
+/// merely *bounded* (two: the entry stream and the erased one).
+///
+/// `parse_stream` takes `&mut S` and recursion reborrows, so `S` is a genuine fixed point and the
+/// answer is now **one**, not two — and there is no `dyn` in it. Delete the reborrow (pass
+/// `&mut stream` where `stream: &mut S`) and this fails to compile with E0275, exactly as the
+/// by-value version did.
 #[test]
-fn erased_descent_does_not_accumulate_references() {
-    // Depth-GENERIC, unlike the `dup` probes above: that is the whole point.
-    // Without the `erase` call this fails to compile with E0275 — growth source
-    // (2), see dup_growth_repro/mut_flood.rs.
+fn descent_instantiates_exactly_one_stream_type() {
     fn note_stream<S: ParseStream<Atom = Atom>>(_s: &mut S) {
         note::<S>();
     }
-    fn descend(stream: impl IntoParseStream<Atom = Atom>, depth: u32) {
-        let mut stream = stream.into_parse_stream();
-        note_stream(&mut stream);
+    // Depth-GENERIC. Under the old design this could not compile at all.
+    fn descend<S: ParseStream<Atom = Atom>>(stream: &mut S, depth: u32) {
+        note_stream(stream);
         let _ = stream.next();
         if depth > 0 {
-            descend(syan::parse::erase(&mut stream), depth - 1);
+            descend(&mut *stream, depth - 1); // reborrow: the callee is the SAME `S`
         }
     }
 
-    descend(stream_of("abcdefghij"), 3);
+    let mut s = stream_of("abcdefghij");
+    descend(&mut s, 3);
     let shallow = taken();
-    descend(stream_of("abcdefghij"), 30);
+    let mut s = stream_of("abcdefghij");
+    descend(&mut s, 30);
     let deep = taken();
 
     assert_eq!(
         shallow, deep,
-        "the set of stream types must not grow with descent depth\n{}\n{}",
+        "the stream type must not depend on descent depth\n{}\n{}",
         report("depth 3", &shallow),
         report("depth 30", &deep)
     );
-    assert_eq!(
-        deep.len(),
-        2,
-        "{}",
-        report("expected exactly {entry stream, erased stream}", &deep)
+    assert_eq!(deep.len(), 1, "{}", report("expected ONE stream type", &deep));
+    assert!(
+        !deep[0].contains("dyn"),
+        "the descent should be fully monomorphised, got {:?}",
+        deep[0]
     );
 }
 
@@ -619,10 +617,9 @@ fn substream_does_not_nest() {
     struct Probe;
     impl syan::parse::Parse<Atom> for Probe {
         type Error = syan::error::ParseError;
-        fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
-            let mut s = stream.into_parse_stream();
+        fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
             note::<Atom>();
-            let _ = s.next();
+            let _ = stream.next();
             Ok(Probe)
         }
     }

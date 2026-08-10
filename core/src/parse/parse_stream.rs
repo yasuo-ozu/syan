@@ -107,33 +107,6 @@ pub trait ParseStream {
     }
 }
 
-/// Type-erase a concrete stream to **one fixed `&mut dyn ParseStream` layer**.
-///
-/// `#[recurse]` wraps every field-parse call of a cycle member's derived `Parse` in this. The reason is
-/// that [`Parse::parse`](crate::parse::Parse::parse) takes `impl IntoParseStream` — a generic parameter,
-/// which *moves* rather than reborrows — so a recursive descent that passes `&mut local` at each level
-/// asks for `Expr::parse::<&mut &mut …>`: an infinite monomorphization chain (E0275) that no
-/// trait-obligation engine can break. Erasing at the call site pins the callee's stream type to
-/// `&mut dyn ParseStream<…>`, and erasing *that* yields the same type again — a fixed point, so the
-/// instantiation set is finite while recursion depth stays bounded only by the call stack.
-///
-/// `erase` is also a *depth normaliser*: whatever `&mut` tower the caller happens to hold, the callee
-/// sees exactly one layer.
-///
-/// Backtracking used to be a second, independent growth source — `dup` wrapped the stream in a `Dup<…>`
-/// that was itself a `ParseStream`. The checkpoint trio removed that one; this function addresses only
-/// the `Parse::parse`-by-value one, which remains.
-///
-/// The blanket `impl<T: ?Sized + ParseStream> ParseStream for &mut T` (plus the blanket
-/// `T: ParseStream ⇒ T: IntoParseStream`) is what makes the erased stream usable as a parser input.
-pub fn erase<'a, Atom, S>(
-    stream: &'a mut S,
-) -> &'a mut (dyn ParseStream<Atom = Atom, Error = S::Error> + 'a)
-where
-    S: ParseStream<Atom = Atom>,
-{
-    stream
-}
 
 impl<T: ?Sized> ParseStream for &'_ mut T
 where

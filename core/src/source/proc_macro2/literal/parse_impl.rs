@@ -3,10 +3,7 @@ use super::*;
 impl Parse<proc_macro2::TokenTree> for Bool {
     type Error = ParseError;
 
-    fn parse(
-        stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
-    ) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
         match stream.next() {
             Some(proc_macro2::TokenTree::Ident(ident)) => {
                 let ident_str = ident.to_string();
@@ -46,10 +43,7 @@ fn unescape(rest: &str) -> Option<char> {
 impl Parse<proc_macro2::TokenTree> for ByteChar {
     type Error = ParseError;
 
-    fn parse(
-        stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
-    ) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
         match stream.next() {
             Some(proc_macro2::TokenTree::Literal(lit)) => {
                 let lit_str = lit.to_string();
@@ -85,10 +79,7 @@ impl Parse<proc_macro2::TokenTree> for ByteChar {
 impl Parse<proc_macro2::TokenTree> for Char {
     type Error = ParseError;
 
-    fn parse(
-        stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
-    ) -> Result<Self, Self::Error> {
-        let mut stream = stream.into_parse_stream();
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
         match stream.next() {
             Some(proc_macro2::TokenTree::Literal(lit)) => {
                 let lit_str = lit.to_string();
@@ -125,11 +116,10 @@ impl Parse<proc_macro2::TokenTree> for Char {
 /// Shared scaffold for all `Literal`-based `Parse` impls: read one literal token,
 /// hand its string form to `f`; on `None` (or a non-literal token / EOF), restore
 /// the stream and fail — mirrors the existing push-back-on-failure behavior.
-fn parse_lit<T>(
-    stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
+fn parse_lit<T, S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
+    stream: &mut S,
     f: impl FnOnce(&str) -> Option<T>,
 ) -> Result<T, ParseError> {
-    let mut stream = stream.into_parse_stream();
     match stream.next() {
         Some(proc_macro2::TokenTree::Literal(lit)) => {
             let lit_str = lit.to_string();
@@ -156,10 +146,8 @@ macro_rules! impl_parse_lit {
         impl Parse<proc_macro2::TokenTree> for $Ty {
             type Error = ParseError;
 
-            fn parse(
-                stream: impl IntoParseStream<Atom = proc_macro2::TokenTree>,
-            ) -> Result<Self, Self::Error> {
-                parse_lit(stream, $body)
+            fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
+                parse_lit(&mut *stream, $body)
             }
         }
     };

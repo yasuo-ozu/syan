@@ -1,5 +1,5 @@
 use crate::parse::unparse::Emitter;
-use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
+use crate::parse::{Parse, Unparse};
 use crate::span::Spanned;
 use core::ops::{Deref, DerefMut};
 
@@ -36,10 +36,9 @@ impl<T> From<T> for Attempt<T> {
 
 impl<Atom: Clone, T: Parse<Atom>> Parse<Atom> for Attempt<T> {
     type Error = T::Error;
-    fn parse(stream: impl IntoParseStream<Atom = Atom>) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
         // `dup` commits the consumed tokens on `Ok` and rewinds on `Err`, so the parse is all-or-nothing.
-        let mut stream = stream.into_parse_stream();
-        stream.dup(|s| T::parse(s)).map(Attempt)
+        stream.dup(|s| T::parse_stream(&mut *s)).map(Attempt)
     }
 }
 

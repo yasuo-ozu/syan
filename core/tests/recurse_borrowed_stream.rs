@@ -15,7 +15,7 @@
 //! they do not compile unless the borrow threads all the way through the cycle.
 
 use syan::error::ParseError;
-use syan::parse::{recurse, IntoParseStream, Parse, ParseStream};
+use syan::parse::{recurse, Parse, ParseStream};
 
 // ---------------------------------------------------------------------------------------------
 // A borrowed source
@@ -174,8 +174,7 @@ macro_rules! literal_leaf {
         impl<'a> Parse<Tok<'a>> for $name<Sp<'a>> {
             type Error = ParseError;
 
-            fn parse(stream: impl IntoParseStream<Atom = Tok<'a>>) -> Result<Self, ParseError> {
-                let mut stream = stream.into_parse_stream();
+            fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError> {
                 match stream.next() {
                     Some(tok) if tok.text == $text => Ok($name {
                         span: Sp { text: tok.text },
@@ -208,8 +207,7 @@ pub struct Word<S> {
 impl<'a> Parse<Tok<'a>> for Word<Sp<'a>> {
     type Error = ParseError;
 
-    fn parse(stream: impl IntoParseStream<Atom = Tok<'a>>) -> Result<Self, ParseError> {
-        let mut stream = stream.into_parse_stream();
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError> {
         match stream.next() {
             Some(tok) if tok.text.chars().all(char::is_alphanumeric) => Ok(Word {
                 text: tok.text.to_string(),
@@ -238,8 +236,7 @@ pub struct Ref<'a, S> {
 impl<'a> Parse<Tok<'a>> for Ref<'a, Sp<'a>> {
     type Error = ParseError;
 
-    fn parse(stream: impl IntoParseStream<Atom = Tok<'a>>) -> Result<Self, ParseError> {
-        let mut stream = stream.into_parse_stream();
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError> {
         match stream.next() {
             Some(tok) if tok.text.chars().all(char::is_alphanumeric) => Ok(Ref {
                 text: tok.text,
