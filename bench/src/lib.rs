@@ -9,6 +9,7 @@
 pub mod alloc;
 pub mod ast;
 pub mod chumsky_impl;
+pub mod combine_impl;
 pub mod input;
 pub mod nom_impl;
 pub mod syan_char;

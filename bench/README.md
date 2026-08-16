@@ -1,6 +1,6 @@
-# `syan-bench` — nom vs chumsky vs syan, one grammar
+# `syan-bench` — nom vs chumsky vs combine vs syan, one grammar
 
-A like-for-like benchmark of four parser backends over the same arithmetic-expression grammar:
+A like-for-like benchmark of five parser backends over the same arithmetic-expression grammar:
 
 ```text
 expr   := term (('+' | '-') term)*      -- left-associative
@@ -12,6 +12,7 @@ atom   := int | '(' expr ')'
 |---|---|---|
 | `nom` | nom 8 | `&str`, hand-written precedence climbing |
 | `chumsky` | chumsky 0.13 | `&str`, `recursive` + `foldl`, `Rich` errors |
+| `combine` | combine 4.6 | `&str`, Parsec-style `chainl1`, zero-copy `take_while1` |
 | `syan-char` | this repo | `Atom = WithSpan<char, Span>` via `source::string` |
 | `syan-token` | this repo | `Atom = proc_macro2::TokenTree` via `source::proc_macro2` |
 
@@ -70,9 +71,10 @@ cargo test --workspace --exclude syan-bench --no-default-features     # 209
 
 ## Measured results
 
-`rustc 1.90.0`, release, single machine. **One criterion pass** at
-`--warm-up-time 0.3 --measurement-time 1.0 --sample-size 20`, so every cell below is comparable with
-every other. Reproduce, don't trust.
+`rustc 1.90.0`, release, single machine, `taskset -c 6`. **One criterion pass** at
+`--warm-up-time 0.3 --measurement-time 1.0 --sample-size 20` (2026-08-11), so every cell below is
+comparable with every other — and **not** with figures from any other run: absolute times on this
+machine move ±35% with background load. Reproduce, don't trust.
 
 **Token-based numbers exclude tokenisation.** Turning text into a `TokenStream` is a separate stage —
 in a proc macro the compiler has already done it — so the token column is `parse-only`. The
@@ -82,20 +84,20 @@ tokenisation cost is shown separately in the `(lex)` column for context; it is 1
 
 | shape | case | nom | chumsky | char rk | char st | token rk | token st | (lex) | best syan / nom |
 |---|---|---|---|---|---|---|---|---|---|
-| flat | 4ops | **211 ns** | 1.2 µs | 20.9 µs | 5.4 µs | 18.0 µs | 6.5 µs | 694 ns | 26× |
-| flat | 16ops | **1.0 µs** | 4.2 µs | 67.0 µs | 19.3 µs | 63.7 µs | 25.8 µs | 2.6 µs | 19× |
-| flat | 64ops | **4.2 µs** | 16.6 µs | 302.6 µs | 78.5 µs | 274.0 µs | 104.5 µs | 12.6 µs | 19× |
-| flat | 256ops | **20.2 µs** | 78.5 µs | 1.30 ms | 319.2 µs | 1.39 ms | 393.1 µs | 39.0 µs | 16× |
-| nested | depth1 | **132 ns** | 900 ns | 18.4 µs | 5.5 µs | 14.5 µs | 4.3 µs | 287 ns | 33× |
-| nested | depth8 | **496 ns** | 3.2 µs | 84.4 µs | 45.9 µs | 56.1 µs | 17.5 µs | 922 ns | 35× |
-| nested | depth32 | **1.9 µs** | 11.4 µs | 635.6 µs | 548.9 µs | 241.1 µs | 89.5 µs | 5.3 µs | 47× |
-| nested | depth128 | **9.5 µs** | 43.8 µs | 6.16 ms | 5.54 ms | 731.5 µs | 198.3 µs | 15.7 µs | 21× |
-| tree | depth2 | **363 ns** | 2.2 µs | 55.1 µs | 14.7 µs | 33.2 µs | 10.0 µs | 693 ns | 28× |
-| tree | depth4 | **1.5 µs** | 7.7 µs | 278.1 µs | 131.1 µs | 236.7 µs | 45.6 µs | 3.0 µs | 31× |
-| tree | depth6 | **6.4 µs** | 31.4 µs | 1.10 ms | 660.8 µs | 658.4 µs | 192.2 µs | 13.1 µs | 30× |
-| tree | depth8 | **24.7 µs** | 137.2 µs | 5.18 ms | 3.34 ms | 2.53 ms | 798.1 µs | 61.1 µs | 32× |
-| error | 4ops | **0.4 µs** | 1.3 µs | 16.3 µs | 5.4 µs | 17.1 µs | 5.7 µs | 0.6 µs | 13× |
-| error | 64ops | **4.0 µs** | 14.1 µs | 208.9 µs | 64.0 µs | 207.8 µs | 74.8 µs | 9.1 µs | 16× |
+| flat | 4ops | **103 ns** | 649 ns | 7.16 µs | 1.30 µs | 7.14 µs | 1.90 µs | 297 ns | 13× |
+| flat | 16ops | **546 ns** | 2.28 µs | 26.4 µs | 5.52 µs | 27.6 µs | 8.26 µs | 1.37 µs | 10× |
+| flat | 64ops | **2.39 µs** | 9.02 µs | 109.6 µs | 24.8 µs | 111.5 µs | 33.9 µs | 5.90 µs | 10× |
+| flat | 256ops | **9.45 µs** | 35.7 µs | 425.7 µs | 95.3 µs | 453.3 µs | 136.8 µs | 23.1 µs | 10× |
+| nested | depth1 | **94 ns** | 581 ns | 8.19 µs | 1.56 µs | 8.05 µs | 1.68 µs | 190 ns | 17× |
+| nested | depth8 | **287 ns** | 2.06 µs | 29.9 µs | 6.85 µs | 29.7 µs | 5.45 µs | 659 ns | 19× |
+| nested | depth32 | **1.03 µs** | 7.24 µs | 104.2 µs | 25.0 µs | 104.3 µs | 17.8 µs | 2.85 µs | 17× |
+| nested | depth128 | **3.98 µs** | 28.3 µs | 397.4 µs | 92.8 µs | 402.1 µs | 66.6 µs | 11.7 µs | 17× |
+| tree | depth2 | **209 ns** | 1.25 µs | 19.2 µs | 4.09 µs | 19.1 µs | 4.08 µs | 439 ns | 20× |
+| tree | depth4 | **1.03 µs** | 5.53 µs | 86.0 µs | 19.2 µs | 85.4 µs | 18.8 µs | 2.07 µs | 18× |
+| tree | depth6 | **4.27 µs** | 22.5 µs | 347.9 µs | 79.0 µs | 355.6 µs | 79.5 µs | 9.94 µs | 18× |
+| tree | depth8 | **19.5 µs** | 103.5 µs | 1.58 ms | 338.7 µs | 1.63 ms | 370.6 µs | 39.8 µs | 17× |
+| error | 4ops | **278 ns** | 999 ns | 9.57 µs | 1.75 µs | 9.28 µs | 2.39 µs | 430 ns | 6× |
+| error | 64ops | **2.63 µs** | 9.99 µs | 113.9 µs | 22.5 µs | 122.4 µs | 36.7 µs | 6.68 µs | 9× |
 
 `rk` = `#[recurse]` (ranked), `st` = `#[recurse(structural)]`. "best syan" is the fastest of the four
 syan configurations for that row.
@@ -104,88 +106,104 @@ Ratios against nom, across the whole table:
 
 | configuration | vs nom | vs chumsky |
 |---|---|---|
-| chumsky | 4–9× | — |
-| **syan token + structural** (best) | **13–47×** | 3–10× |
-| syan char + structural | 26–583× | 6–126× |
-| syan token + ranked | 51–139× | 12–30× |
-| syan char + ranked | 99–648× | 17–141× |
+| chumsky | 3.6–7.2× | — |
+| **syan char + structural** (best) | **6–24×** | **1.7–3.5×** |
+| syan token + structural | 9–20× | 2.4–3.8× |
+| syan token + ranked | 33–103× | 9.3–15.8× |
+| syan char + ranked | 34–104× | 9.6–15.6× |
 
 ### Allocations per parse
 
 Exact and machine-independent — and **identical between the two engines at every input**, because
 they differ in how the cyclic obligation is discharged, not in the generated parse bodies.
 
-| input | nodes | nom | chumsky | char (rk = st) | token (rk = st) |
-|---|---|---|---|---|---|
-| `flat/4ops` | 7 | **0.86** | 2.29 | 11.29 | 13.29 |
-| `flat/64ops` | 127 | **0.99** | 2.02 | 9.87 | 11.87 |
-| `flat/256ops` | 511 | **1.00** | 2.00 | 9.78 | 11.78 |
-| `tree/depth4` | 31 | **0.97** | 3.00 | 36.39 | 28.90 |
-| `tree/depth8` | 511 | **1.00** | 3.00 | 36.50 | 28.99 |
+Unit: **allocations per AST node** (calls to the global allocator; a `realloc` counts as one).
+
+| input | nodes | nom | chumsky | combine | char (rk = st) | token (rk = st) |
+|---|---|---|---|---|---|---|
+| `flat/4ops` | 7 | **0.86** | 2.29 | **0.86** | 6.14 | 8.86 |
+| `flat/64ops` | 127 | **0.99** | 2.02 | **0.99** | 5.80 | 8.55 |
+| `flat/256ops` | 511 | **1.00** | 2.00 | **1.00** | 5.77 | 8.52 |
+| `tree/depth4` | 31 | **0.97** | 3.00 | **0.97** | 17.90 | 15.39 |
+| `tree/depth8` | 511 | **1.00** | 3.00 | **1.00** | 18.00 | 15.49 |
+
+**combine matches nom byte for byte at every input** — same allocation count *and* same bytes
+(144 / 3 024 / 12 240 B on the flat cases). It hits the inherent floor for this AST exactly: the
+output `Box`es and nothing else. On the failure path it is even below nom (7 vs 9 allocations at
+`error/4ops`, 127 vs 129 at `error/64ops`), since it allocates nothing for the error itself.
+
+That is worth more than one more row. Before combine, the floor was nom alone, and it was arguable
+that nom's is a hand-written precedence climber rather than a combinator library. combine **is** a
+combinator library — Parsec lineage, `chainl1`, full backtracking machinery — and still allocates
+nothing per token. So "combinator library ⇒ per-token allocation" is refuted, and chumsky's 2–3 per
+node is a *choice* (the `Rich` error type), not a structural cost of the style.
 
 `nested/depthN` holds 3 AST nodes at every depth, so per-node is meaningless; per **nesting level**:
 
-| input | nom (total) | chumsky | char | token |
-|---|---|---|---|---|
-| `nested/depth8` | 2 | 23 | 441 | 287 |
-| `nested/depth32` | 2 | 71 | 1 597 | 983 |
-| `nested/depth128` | 2 | 263 | 6 209 | 3 767 |
-| → per paren level | 0.02 | 2.1 | **48.5** | 29.4 |
+| input | nom (total) | chumsky | combine | char | token |
+|---|---|---|---|---|---|
+| `nested/depth8` | 2 | 23 | 2 | 204 | 120 |
+| `nested/depth32` | 2 | 71 | 2 | 736 | 384 |
+| `nested/depth128` | 2 | 263 | 2 | 2 852 | 1 440 |
+| → per paren level | 0.02 | 2.1 | **0.02** | **22.3** | 11.3 |
 
 ### Ranked vs structural
 
-Structural is faster on 13 of the 14 rows, by 1.2–4.4×. The exception is deep char-source recursion:
+Structural is faster on **all 14 rows**, by 4.2–5.5× (char) and 3.3–6.0× (token):
 
 | input | ranked | structural | |
 |---|---|---|---|
-| `token nested/depth32` | 241.1 µs | 89.5 µs | **2.7× faster** |
-| `token nested/depth128` | 731.5 µs | 198.3 µs | **3.7× faster** |
-| `token tree/depth8` | 2.53 ms | 798.1 µs | **3.2× faster** |
-| `char flat/256ops` | 1.30 ms | 319.2 µs | **4.1× faster** |
-| `char nested/depth32` | 635.6 µs | 548.9 µs | 1.16× faster |
-| `char nested/depth128` | 6.16 ms | 5.54 ms | 1.11× faster |
+| `char flat/256ops` | 425.7 µs | 95.3 µs | **4.5× faster** |
+| `char nested/depth32` | 104.2 µs | 25.0 µs | **4.2× faster** |
+| `char nested/depth128` | 397.4 µs | 92.8 µs | **4.3× faster** |
+| `token nested/depth32` | 104.3 µs | 17.8 µs | **5.9× faster** |
+| `token nested/depth128` | 402.1 µs | 66.6 µs | **6.0× faster** |
+| `token tree/depth8` | 1.63 ms | 370.6 µs | **4.4× faster** |
 
-(An earlier, separately-sampled run had char/depth128 going the other way — structural 17% *slower*,
-with non-overlapping CIs. In this single consistent pass it is 11% faster. Treat the deep-char case as
-**a wash**; the two engines are within noise of each other there, and only there.)
+An earlier revision of this file called deep-char "a wash" (1.11–1.16×, with one separately-sampled
+run putting structural 17% *behind*). That is void, and the reason is instructive: at the time both
+engines were dominated by an O(depth²) trait-object tower that `#[recurse]` built around every
+recursive call. With that removed the engines differ only in how the obligation is discharged, and
+the difference is uniform.
 
-Since allocations are equal, the gap is not memory traffic. The plausible mechanism is ranked's
-re-entry registry — a thread-local lookup keyed on `type_name`, performed per recursive call — which
-structural's layout-cast does not need. That would explain why the advantage is largest where
-recursion is densest per unit of input (token/nested: one `#[group]` descent per atom) and smallest
-where each level does the most non-recursive work (char/nested: ~4 atoms of delimiter and whitespace
-handling per level). **The bench establishes the effect, not the mechanism.**
+Since allocations are equal, the gap is not memory traffic. It is ranked's re-entry registry — a
+thread-local lookup keyed on `type_name`, per recursive call — which structural's layout cast does
+not need. `../perf-measurements.md` §3b instruments it: 574–612 registrations per parse, 146–183 ns
+each, ~⅔ of that the 276-byte average key hashed twice.
 
 **Not measured: compile time**, which is the dimension the engines are designed to trade on.
 Isolating it needs one crate per engine, not two modules in one.
 
 ## What the numbers say
 
-1. **The atom model matters more than anything else for recursive input.** token+structural beats
-   char+structural by **28×** at `nested/depth128` (198 µs vs 5.54 ms) and by 4.2× at `tree/depth8`.
-   proc-macro2 collapses `( … )` into a single `TokenTree::Group`, so syan walks far fewer atoms and
-   recurses through `#[group]`. On flat input, with nothing to collapse, the two are within 1.2×.
-   So "char or token?" has no single answer — it depends on how bracketed the input is, and the
-   crossover is steep.
+1. **The atom model matters less than it looked, and the sign flips with shape.** char+structural is
+   *faster* than token+structural on flat and error input (0.61–0.73×) and slower only on deep
+   nesting (1.26–1.40× at `nested/depth32`–`depth128`), where proc-macro2 collapses `( … )` into one
+   `TokenTree::Group` and syan walks far fewer atoms. An earlier revision of this file reported token
+   beating char by **28×** at `nested/depth128`; that gap was the erasure tower, which char paid at
+   `3·depth + 3` layers and token paid at 4, and it is gone. Pick the atom model that fits the input,
+   not for speed.
 
-2. **Engine choice is worth 2–4× at zero cost in results**, and structural is the better default for
-   throughput. What it costs is scope — see the limitation below.
+2. **Engine choice is worth 3.3–6.0× at zero cost in results**, and structural is the better default
+   for throughput. What it costs is scope — see the limitation below.
 
-3. **The best syan configuration is 13–47× slower than nom and 3–10× slower than chumsky.** The worst
-   (char + ranked, deep recursion) is 648× and 141×. The distance between syan's own configurations
-   is larger than the distance between nom and chumsky.
+3. **The best syan configuration is 6–24× slower than nom and 1.7–3.5× slower than chumsky**, and the
+   worst is 104× and 15.8×. Both ends improved by roughly an order of magnitude over the previous
+   revision (13–47× / 3–10× best, 648× / 141× worst), from two changes: deleting the erasure tower
+   and making `ParseError` an enum that renders nothing until printed.
 
-4. **The floor is allocation.** ~10–12 per grammar node against nom's ~1 and chumsky's ~2–3,
-   consistent with `../error-design-vs-chumsky.md` §R5: the cost is per grammar *node* (a `dup`
-   checkpoint plus a `ParseError`), not per atom. No engine choice changes this; only reducing
-   per-node allocation will.
+4. **Allocation is still the floor, and it is still per grammar node** — 5.8/node (char) and
+   8.6/node (token) against nom's ~1 and chumsky's ~2–3. Halving it by deleting the error strings
+   moved wall time by about as much, which is the confirmation that the model is right. The
+   remaining per-node cost is a `dup` checkpoint plus the leaf parsers' own `to_string`s; see
+   `../perf-measurements.md` §7d, where one atom of lookahead removes 41–87% of the checkpoints.
 
 5. **Tokenisation is cheap** — 1–4% of parse time throughout. Any intuition that the token source
-   pays for proc-macro2's lexer is wrong; it more than recovers that by having fewer atoms.
+   pays for proc-macro2's lexer is wrong.
 
-6. **The error path is not disproportionately expensive** (13–16× vs 16–47× for success on comparable
-   input), which bounds what the error-handling redesign can buy: error construction is a slice of a
-   large per-node constant, not the constant itself.
+6. **The error path is not disproportionately expensive** (9.3–12.3× chumsky vs 9.6–15.8× for success
+   on comparable input), which bounds what further error-handling work can buy on *throughput* — the
+   case for it is diagnostic quality, not speed.
 
 ## A `structural` scope limit found while writing this
 
@@ -213,6 +231,7 @@ src/input.rs        deterministic generators: flat, nested, tree, bad_at
 src/alloc.rs        counting global allocator
 src/nom_impl.rs     nom 8
 src/chumsky_impl.rs chumsky 0.13
+src/combine_impl.rs combine 4.6
 src/syan_char.rs    syan, Atom = WithSpan<char, Span>      — `ranked` + `structural`
 src/syan_token.rs   syan, Atom = proc_macro2::TokenTree    — `ranked` + `structural`
 src/bin/allocs.rs   allocation table

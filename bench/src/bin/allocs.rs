@@ -1,11 +1,11 @@
 //! Allocations and bytes per parse, per backend. Run with `cargo run -p syan-bench --release --bin allocs`.
 //!
 //! Criterion measures time; time is noisy and machine-dependent. Allocation counts are exact and
-//! reproducible, and for these four backends they explain most of the time difference — so this is
+//! reproducible, and for these five backends they explain most of the time difference — so this is
 //! the table to quote in a design discussion.
 
 use syan_bench::alloc::{measure, Counting};
-use syan_bench::{chumsky_impl, input, nom_impl, syan_char, syan_token};
+use syan_bench::{chumsky_impl, combine_impl, input, nom_impl, syan_char, syan_token};
 
 #[global_allocator]
 static A: Counting = Counting;
@@ -36,6 +36,7 @@ fn report(shape: &str, src: &str, nodes: usize) {
     // warm-up pass (outside measurement)
     let _ = nom_impl::parse(src);
     let _ = chumsky_impl::parse(src);
+    let _ = combine_impl::parse(src);
     let _ = syan_char::ranked::parse(src);
     let _ = syan_token::ranked::lex_then_parse(src);
 
@@ -46,6 +47,9 @@ fn report(shape: &str, src: &str, nodes: usize) {
         }),
         row("chumsky", || {
             chumsky_impl::parse(src).unwrap();
+        }),
+        row("combine", || {
+            combine_impl::parse(src).unwrap();
         }),
         row("syan-char ranked", || {
             syan_char::ranked::parse(src).unwrap();
@@ -84,7 +88,7 @@ fn nodes_of(src: &str) -> usize {
 }
 
 fn main() {
-    println!("# Allocations per parse — nom vs chumsky vs syan(char) vs syan(token)");
+    println!("# Allocations per parse — nom vs chumsky vs combine vs syan(char) vs syan(token)");
     println!(
         "\nSame grammar, same input, same output AST (gated by `tests/agree.rs`). \
          `allocs/node` is the number to compare: it is independent of input size and \
@@ -112,6 +116,7 @@ fn main() {
         println!("{:<24} {:>10} {:>12}", "backend", "allocs", "bytes");
         let _ = nom_impl::parse(&src);
         let _ = chumsky_impl::parse(&src);
+        let _ = combine_impl::parse(&src);
         let _ = syan_char::ranked::parse(&src);
         let _ = syan_token::ranked::lex_then_parse(&src);
         for r in [
@@ -120,6 +125,9 @@ fn main() {
             }),
             row("chumsky", || {
                 chumsky_impl::parse(&src).unwrap_err();
+            }),
+            row("combine", || {
+                combine_impl::parse(&src).unwrap_err();
             }),
             row("syan-char ranked", || {
                 syan_char::ranked::parse(&src).unwrap_err();

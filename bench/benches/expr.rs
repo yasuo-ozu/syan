@@ -1,4 +1,5 @@
-//! nom vs chumsky vs syan(char) vs syan(token), one grammar, three input shapes plus the error path.
+//! nom vs chumsky vs combine vs syan(char) vs syan(token), one grammar, three input shapes plus the
+//! error path.
 //!
 //! Fairness rules, because they are what make or break a parser comparison:
 //!
@@ -8,7 +9,7 @@
 //!   shown to separate proc-macro2's lexer from syan's parser), plus `lex only` as the baseline.
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
-use syan_bench::{chumsky_impl, input, nom_impl, syan_char, syan_token};
+use syan_bench::{chumsky_impl, combine_impl, input, nom_impl, syan_char, syan_token};
 
 fn bench_shape(c: &mut Criterion, name: &str, cases: Vec<(String, String)>) {
     let mut g = c.benchmark_group(name);
@@ -20,6 +21,9 @@ fn bench_shape(c: &mut Criterion, name: &str, cases: Vec<(String, String)>) {
         });
         g.bench_with_input(BenchmarkId::new("chumsky", label), src, |b, s| {
             b.iter(|| chumsky_impl::parse(s).unwrap())
+        });
+        g.bench_with_input(BenchmarkId::new("combine", label), src, |b, s| {
+            b.iter(|| combine_impl::parse(s).unwrap())
         });
         for (eng, cf, tf, pf) in [
             (
@@ -111,6 +115,9 @@ fn errors(c: &mut Criterion) {
         });
         g.bench_with_input(BenchmarkId::new("chumsky", &label), &src, |b, s| {
             b.iter(|| chumsky_impl::parse(s).unwrap_err())
+        });
+        g.bench_with_input(BenchmarkId::new("combine", &label), &src, |b, s| {
+            b.iter(|| combine_impl::parse(s).unwrap_err())
         });
         // token = parse only; tokenisation is a separate stage and is excluded.
         let ts = syan_token::tokenise(&src);

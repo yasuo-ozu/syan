@@ -1,5 +1,23 @@
 use super::*;
 
+/// ABLATION HOOK (measurement only, not a feature).
+///
+/// With `SYAN_ABLATE_NO_AGGREGATE=1` and `SYAN_ABLATE_CRATE=<crate>`, an enum's failed alternatives
+/// are **dropped as they arrive** instead of being collected into a `Vec` for `Error::from_cause`.
+/// The leaves still construct their `ParseError`; what disappears is the aggregation — the `Vec` and
+/// the `Alternatives` `Box<[Self]>`. That is exactly what the planned `Silent` error-logger policy
+/// can remove, so this measures its ceiling against unchanged parse bodies.
+///
+/// Scoped by `CARGO_CRATE_NAME` so it cannot silently rewrite syan's own impls or a consumer's.
+/// See `perf-measurements.md` §14. Delete once `ErrorLogger` lands, which subsumes it.
+fn ablate_no_aggregate() -> bool {
+    std::env::var("SYAN_ABLATE_NO_AGGREGATE").as_deref() == Ok("1")
+        && matches!(
+            (std::env::var("SYAN_ABLATE_CRATE"), std::env::var("CARGO_CRATE_NAME")),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 /// The `__SyanMacro_Atom`-generic impl header shared by `extract_parse`/`extract_unparse`: the atom
 /// type param, the fully-applied trait path, the impl's generic params (with the atom appended), and
 /// the type generics to instantiate `ident` with.
@@ -570,22 +588,34 @@ impl Adt for DataEnum {
                 .map(|(variant, fields)| {
                     let inner = f(&fields[..], Some(&variant.ident));
                     let construct = construct_of(variant, fields);
+                    let on_err = if ablate_no_aggregate() {
+                        quote!( ::core::result::Result::Err(_err) => {} )
+                    } else {
+                        quote!( ::core::result::Result::Err(err) => { __syan_errors.push(err); } )
+                    };
                     quote! {
                         match #syan::parse::ParseStream::dup(&mut *__syan_stream, |__syan_stream| {
                             #inner
                             ::core::result::Result::Ok(#construct)
                         }) {
-                            ::core::result::Result::Err(err) => { __syan_errors.push(err); }
+                            #on_err
                             ok => { return ok; }
                         }
                     }
                 })
                 .collect();
+            let errors_decl = (!ablate_no_aggregate())
+                .then(|| quote!( let mut __syan_errors = ::std::vec::Vec::new(); ));
+            let causes = if ablate_no_aggregate() {
+                quote!(::std::vec::Vec::new())
+            } else {
+                quote!(__syan_errors)
+            };
             return quote! {
-                let mut __syan_errors = ::std::vec::Vec::new();
+                #errors_decl
                 #(#blocks)*
                 ::core::result::Result::Err(
-                    <#tp_error_final as #syan::error::Error>::from_cause(__syan_errors)
+                    <#tp_error_final as #syan::error::Error>::from_cause(#causes)
                 )
             };
         }
@@ -614,7 +644,7 @@ impl Adt for DataEnum {
                 let suffix = &fields[lcp..]; // non-empty (the first empty one is the fallback, excluded)
                 let suffix_parse = f(suffix, Some(&variant.ident));
                 let suffix_ids: Vec<&Ident> = suffix.iter().map(|(_, id, _)| id).collect();
-                let on_err = if has_fallback {
+                let on_err = if has_fallback || ablate_no_aggregate() {
                     quote!( ::core::result::Result::Err(_) => {} )
                 } else {
                     quote!( ::core::result::Result::Err(err) => { __syan_errors.push(err); } )
@@ -643,14 +673,19 @@ impl Adt for DataEnum {
                 let construct = construct_of(variant, fields);
                 quote!( ::core::result::Result::Ok(#construct) )
             }
+            None if ablate_no_aggregate() => quote! {
+                ::core::result::Result::Err(
+                    <#tp_error_final as #syan::error::Error>::from_cause(::std::vec::Vec::new())
+                )
+            },
             None => quote! {
                 ::core::result::Result::Err(
                     <#tp_error_final as #syan::error::Error>::from_cause(__syan_errors)
                 )
             },
         };
-        let errors_decl =
-            (!has_fallback).then(|| quote!( let mut __syan_errors = ::std::vec::Vec::new(); ));
+        let errors_decl = (!has_fallback && !ablate_no_aggregate())
+            .then(|| quote!( let mut __syan_errors = ::std::vec::Vec::new(); ));
         quote! {
             #syan::parse::ParseStream::dup(&mut *__syan_stream, |__syan_stream| {
                 #prefix_parse

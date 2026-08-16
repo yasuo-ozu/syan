@@ -1,12 +1,13 @@
-//! The benchmark is only meaningful if all four backends parse the same language into the same
+//! The benchmark is only meaningful if all five backends parse the same language into the same
 //! tree. This is the gate: same `eval()`, same node count, same accept/reject decision.
 
-use syan_bench::{ast::Expr, chumsky_impl, input, nom_impl, syan_char, syan_token};
+use syan_bench::{ast::Expr, chumsky_impl, combine_impl, input, nom_impl, syan_char, syan_token};
 
 fn all(src: &str) -> Vec<(&'static str, Result<Expr, String>)> {
     vec![
         ("nom", nom_impl::parse(src)),
         ("chumsky", chumsky_impl::parse(src)),
+        ("combine", combine_impl::parse(src)),
         ("syan-char/ranked", syan_char::ranked::parse(src)),
         ("syan-token/ranked", syan_token::ranked::lex_then_parse(src)),
         ("syan-char/structural", syan_char::structural::parse(src)),
@@ -94,6 +95,7 @@ fn precedence_and_associativity_are_the_same() {
     // pinned values, so a backend cannot be "consistent" by all being wrong together
     assert_eq!(nom_impl::parse("1 - 2 - 3").unwrap().eval(), -4);
     assert_eq!(chumsky_impl::parse("1 - 2 - 3").unwrap().eval(), -4);
+    assert_eq!(combine_impl::parse("1 - 2 - 3").unwrap().eval(), -4);
     assert_eq!(syan_char::ranked::parse("1 - 2 - 3").unwrap().eval(), -4);
     assert_eq!(
         syan_token::ranked::lex_then_parse("1 - 2 - 3")
@@ -103,6 +105,7 @@ fn precedence_and_associativity_are_the_same() {
     );
     assert_eq!(nom_impl::parse("1 + 2 * 3").unwrap().eval(), 7);
     assert_eq!(chumsky_impl::parse("1 + 2 * 3").unwrap().eval(), 7);
+    assert_eq!(combine_impl::parse("1 + 2 * 3").unwrap().eval(), 7);
     assert_eq!(syan_char::ranked::parse("1 + 2 * 3").unwrap().eval(), 7);
     assert_eq!(
         syan_token::ranked::lex_then_parse("1 + 2 * 3")

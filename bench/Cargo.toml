@@ -9,6 +9,7 @@ description = "Like-for-like parser benchmarks: nom vs chumsky vs syan"
 syan = { path = "../core" }
 nom = "8.0"
 chumsky = "0.13"
+combine = "4.6"
 proc-macro2 = "1.0.107"
 
 [dev-dependencies]
