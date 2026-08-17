@@ -22,12 +22,9 @@ pub(crate) fn generate_substruct(
             subfield.ident = Some(subident);
             if &group_member == member {
                 // remove #[group(..)] attribute if is toplevel field of substruct.
-                let _ = subfield
+                subfield
                     .attrs
-                    .extract_if(.., |attr| {
-                        attr.find_group().map(|g| &g == member).unwrap_or(false)
-                    })
-                    .collect::<Vec<_>>();
+                    .retain(|attr| !attr.find_group().map(|g| &g == member).unwrap_or(false));
             }
             subfield.vis = Visibility::Inherited;
             if by_ref {

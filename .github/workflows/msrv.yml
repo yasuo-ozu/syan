@@ -1,0 +1,45 @@
+name: MSRV
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  msrv:
+    name: Build on the declared MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve rust-version
+        id: msrv
+        run: |
+          core=$(grep -m1 '^rust-version' core/Cargo.toml | cut -d'"' -f2)
+          macro=$(grep -m1 '^rust-version' macro/Cargo.toml | cut -d'"' -f2)
+          if [ "$core" != "$macro" ]; then
+            echo "::error::rust-version differs: core=$core macro=$macro"
+            exit 1
+          fi
+          echo "version=$core" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        run: |
+          rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal --no-self-update
+          rustup default ${{ steps.msrv.outputs.version }}
+          rustc --version
+
+      # `check`, never `test`: dev-dependencies carry higher MSRVs, and the
+      # trybuild tests compare rustc diagnostics whose wording drifts by release.
+      - name: Check (default features)
+        run: cargo check -p syan -p syan-macro
+
+      - name: Check (all features)
+        run: cargo check -p syan -p syan-macro --all-features
+
+      - name: Check (no default features)
+        run: cargo check -p syan -p syan-macro --no-default-features

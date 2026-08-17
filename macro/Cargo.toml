@@ -3,6 +3,7 @@ name = "syan-macro"
 description = "Syntactic and structural parser fundamentals, reimplementing syn crate"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 authors = ["Yasuo Ozu <yasuo@ozu.email>"]
 repository = "https://github.com/yasuo-ozu/syan"
 keywords = ["macros", "syn", "parser", "proc-macro", "parsing"]
