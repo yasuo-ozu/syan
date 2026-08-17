@@ -1,13 +1,3 @@
 [workspace]
 members = ["core", "macro", "bench"]
 resolver = "2"
-
-# decycle 0.5.1 is NOT on crates.io yet. It carries the structural-engine fix this workspace now
-# requires: the local `__DecycleBody` trait's declaration must re-state the reduced impl's
-# where-predicates, else a method signature that projects through a param bound (`Parse::parse_stream`
-# returning `ParseError<<Atom as Spanned>::Span>`) is ill-formed at the declaration. Drop this section
-# once decycle 0.5.1 is released.
-[patch.crates-io]
-decycle = { path = "../decycle" }
-decycle-impl = { path = "../decycle/decycle-impl" }
-decycle-macro = { path = "../decycle/macro" }
