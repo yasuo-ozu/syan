@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Stable only: the suite includes trybuild UI tests, which compare rustc
-  # diagnostics verbatim and break on any toolchain that rewords them.
+  # The UI tests compare rustc diagnostics verbatim, so they are skipped here and
+  # run on a pinned toolchain in the `ui` job instead of floating with stable.
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -21,8 +21,32 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
           rustc --version
-      - run: cargo test --workspace --all-features
-      - run: cargo test -p syan -p syan-macro --no-default-features
+      - run: >-
+          cargo test --workspace --all-features --
+          --skip macro_audit_compile_fail
+          --skip compile_fail_problems
+          --skip visitor_diagnostics
+      - run: >-
+          cargo test -p syan -p syan-macro --no-default-features --
+          --skip macro_audit_compile_fail
+          --skip compile_fail_problems
+          --skip visitor_diagnostics
+
+  # rustc rewords diagnostics and shortens type paths between releases, so these
+  # fixtures are only meaningful on the toolchain they were blessed against.
+  # Bumping this pin means re-blessing with TRYBUILD=overwrite.
+  ui:
+    name: UI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          rustup toolchain install 1.90.0 --profile minimal --no-self-update
+          rustup default 1.90.0
+          rustc --version
+      - run: >-
+          cargo test -p syan --all-features
+          --test macro_audit_test --test recurse_core --test visitor_diagnostics
 
   fmt:
     name: Rustfmt

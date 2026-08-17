@@ -1,7 +1,7 @@
 [package]
 name = "syan"
 description = "Syntactic and structural parser fundamentals, reimplementing syn crate"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Yasuo Ozu <yasuo@ozu.email>"]
@@ -20,7 +20,7 @@ readme = "README.md"
 parametrized = "0.1.8"
 newer-type = "0.1.1"
 proc-macro2 = { version = "1.0", optional = true }
-syan-macro = { path = "../macro", version = "0.2.0" }
+syan-macro = { path = "../macro", version = "0.2.1" }
 decycle = "0.5.2"
 
 [dev-dependencies]

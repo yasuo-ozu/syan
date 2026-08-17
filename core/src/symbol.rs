@@ -309,5 +309,34 @@ macro_rules! _Token {
 #[doc(inline)]
 pub use crate::_Symbol as Symbol;
 
+/// A [`Symbol!`] that remembers where it was matched.
+///
+/// `Token![S => x]` is [`WithSpan`](crate::span::WithSpan)`<Symbol!(x), S>`, so it parses exactly
+/// what `Symbol!(x)` parses and additionally stores a span of type `S`. Use it when a node needs to
+/// report a position; use [`Symbol!`] when it does not.
+///
+/// The span type comes first, before `=>`. Leaving it a type parameter keeps the node reusable
+/// across sources, since each source brings its own span type.
+///
+/// ```
+/// # use syan::parse::Parse;
+/// # use syan::symbol::Token;
+/// type Span = syan::source::string::Span;
+///
+/// #[derive(Parse)]
+/// struct Arrow {
+///     minus: Token![Span => -],
+///     gt: Token![Span => >],
+/// }
+///
+/// let a: Arrow = Parse::parse("->").unwrap();
+/// assert_eq!((a.minus.span.line, a.minus.span.col), (1, 1));
+/// assert_eq!((a.gt.span.line, a.gt.span.col), (1, 2));
+/// ```
+///
+/// The token is spelled the same way as in [`Symbol!`]: an identifier, a punctuation character, a
+/// number, or a character literal.
+///
+/// [`Symbol!`]: macro@crate::symbol::Symbol
 #[doc(inline)]
 pub use crate::_Token as Token;
