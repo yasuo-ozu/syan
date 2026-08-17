@@ -2,7 +2,7 @@
 // The README's visitor example needs an explicit `fn main` so its `mod ast` lands at the crate
 // root: `#[subast(..)]` only accepts `crate`-rooted paths.
 #![allow(clippy::needless_doctest_main)]
-#![doc = include_str!("../../README.md")]
+#![doc = include_str!("../README.md")]
 extern crate self as syan;
 
 #[doc(hidden)]
