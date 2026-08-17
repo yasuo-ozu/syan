@@ -132,10 +132,7 @@ let e: ast::Expr<_> = Parse::parse("- - 1").unwrap();
 
 Alternatives are tried in order, and `Neg` recurses through the `Box`. Depth is bounded only by the
 call stack. `#[recurse]` routes the cyclic obligations through the
-[`decycle`](https://docs.rs/decycle) crate. `#[recurse(structural)]` picks its other engine, which is
-faster but narrower.
-
-A cycle can also run through a group. That is what the split form in [Groups](#groups) is for.
+[`decycle`](https://docs.rs/decycle) crate.
 
 ## Visitors
 
