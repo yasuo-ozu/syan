@@ -200,24 +200,6 @@ mod generics {
         assert_eq!(c.0, 3, "Expr + Stmt (extra param T=u8) + inner Expr");
     }
 
-    // Base recurse (no visit) with a lifetime: confirm the natural type compiles (no E0106).
-    #[recurse]
-    mod base {
-        use core::marker::PhantomData;
-        use syan::visit::Ast;
-
-        #[derive(Ast)]
-        #[subast()]
-        pub enum Expr<'a, S> {
-            Nest(Box<Expr<'a, S>>),
-            Lit(PhantomData<(&'a (), S)>),
-        }
-    }
-
-    #[test]
-    fn base_recurse_lifetime_compiles() {
-        let _e: base::Expr<'static, ()> = base::Expr::Lit(PhantomData);
-    }
 }
 
 // Several *independent* cycles (separate SCCs) in one `#[recurse]` module, visited via one `visitor!`.

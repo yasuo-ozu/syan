@@ -1,3 +1,5 @@
+//! Writing a value back out as atoms: the [`Unparse`] trait and the [`Emitter`] it writes into.
+
 pub use syan_macro::Unparse;
 
 // Defined (and `#[decycle]`-annotated) in `crate::decycle_traits` — see that module's docs.
@@ -21,9 +23,15 @@ where
     }
 }
 
+/// The sink [`Unparse`] writes atoms into, such as a `Vec<Atom>` or a token-stream builder.
+///
+/// Any `&mut T` where `T: Extend<Atom>` is one already.
 pub trait Emitter<Atom> {
+    /// What writing can fail with; `Infallible` for a sink that cannot fail.
     type Error;
+    /// Write one atom.
     fn write_one(&mut self, atom: Atom) -> Result<(), Self::Error>;
+    /// Write whatever separates two atoms, for a sink that needs one (whitespace, say).
     fn write_sep(&mut self) -> Result<(), Self::Error>;
 }
 
@@ -38,7 +46,6 @@ where
     }
 
     fn write_sep(&mut self) -> Result<(), Self::Error> {
-        // do nothing
         Ok(())
     }
 }

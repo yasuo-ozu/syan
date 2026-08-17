@@ -115,7 +115,7 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 ///   height, so runtime depth is bounded only by the OS call stack.
 /// - **`#[recurse(structural)]`** — decycle's **structural** engine: a compile-time unroll with a
 ///   `#[repr(transparent)]` terminator, so there is no runtime registry and no `type-leak`. Narrower
-///   scope in exchange — see the *structural* entry under *Known gaps* in `CLAUDE.md`.
+///   scope in exchange.
 ///
 /// Both produce the same public types and the same parse results; they differ in how the cyclic
 /// obligation is discharged, and therefore in compile time and in generated-code shape.

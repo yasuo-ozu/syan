@@ -102,8 +102,7 @@ fn tree(c: &mut Criterion) {
 }
 
 /// The FAILURE path: input that is valid up to the last atom. Error construction is on the hot
-/// path of any backtracking parser, and `error-design-vs-chumsky.md` measures ~19% of syan's
-/// allocations there — this is where that shows up as wall time.
+/// path of any backtracking parser — this is where that shows up as wall time.
 fn errors(c: &mut Criterion) {
     let mut g = c.benchmark_group("error");
     for n in [4usize, 64] {

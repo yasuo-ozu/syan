@@ -3,6 +3,8 @@ use crate::parse::{Parse, Unparse};
 use crate::span::Spanned;
 use crate::span::WithSpan;
 use crate::symbol::chars as punct;
+/// Parses `T` between an opening and a closing delimiter. Reach for the [`GroupParen`],
+/// [`GroupBrace`] and [`GroupBracket`] aliases rather than naming `O` and `C` by hand.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Group<T, O, C> {
     pub open: O,
@@ -10,12 +12,9 @@ pub struct Group<T, O, C> {
     pub close: C,
 }
 
-// `Unparse` to a `TokenTree`: a delimited group is a *single* `TokenTree::Group` (the delimiters aren't
-// standalone tokens), so `Group` is hand-written per real delimiter rather than `#[derive(Unparse)]`d —
-// the slot is unparsed into a sub-stream wrapped in the matching `Delimiter`.
-//
-// This whole block names `proc_macro2` types directly, so it is gated on the optional dependency —
-// like `source::proc_macro2`. `Group` itself is atom-agnostic and stays available either way.
+// For a token source a delimited group is a *single* `TokenTree::Group`, not three tokens, so these
+// impls are hand-written per delimiter instead of derived. `Group` itself is atom-agnostic; only these
+// impls need the optional `proc_macro2` dependency.
 #[cfg(feature = "proc_macro2")]
 macro_rules! impl_group_unparse_tt {
     ($open:ident, $close:ident, $delim:ident) => {
@@ -32,8 +31,6 @@ macro_rules! impl_group_unparse_tt {
             }
         }
 
-        // The `GroupUnparse` counterpart, on the EMPTY holder: same emission, but the content comes
-        // from the caller instead of from `self.slot`, so nothing is cloned into a filled group.
         impl<S> GroupUnparse<proc_macro2::TokenTree>
             for Group<(), WithSpan<punct::$open, S>, WithSpan<punct::$close, S>>
         {
@@ -78,10 +75,8 @@ impl_group_unparse_tt!(OpenBrace, CloseBrace, Brace);
 #[cfg(feature = "proc_macro2")]
 impl_group_unparse_tt!(OpenBracket, CloseBracket, Bracket);
 
-// A group's span is the range its delimiters cover; the slot's content lies *between* `open` and
-// `close`, so the span is taken from the delimiters only. This deliberately does NOT require `T:
-// Spanned`, so an empty group (`Group<(), ..>`) — or one whose content isn't `Spanned` — still has a
-// span (the hand-written impl replaces what `#[derive(Spanned)]` would emit, which folds the slot too).
+// The span comes from the delimiters alone, deliberately not requiring `T: Spanned` — an empty group
+// (`Group<(), ..>`) still has a span. `#[derive(Spanned)]` would fold the slot in and lose that.
 impl<T, O, C> Spanned for Group<T, O, C>
 where
     O: Spanned,
@@ -114,27 +109,18 @@ where
     }
 }
 
-/// Parse a delimited group whose **content type is chosen by the caller**, returning the content and
-/// the now-empty holder.
+/// Parses a delimited group whose content type the caller picks, yielding the content and the empty
+/// delimiter holder. This is what `#[derive(Parse)]` uses for a `#[group(..)]` field.
 ///
-/// This is what `#[derive(Parse)]` uses for a `#[group(..)]` field, and it is shaped the way it is for
-/// one reason: **`Slot` is a method generic, not a trait parameter**. The resulting obligation
-/// `FieldTy: GroupShape<Atom>` therefore says nothing about the content type, so it is never an edge in
-/// the type's recursion — which is what lets a `#[recurse]` cycle pass through a `#[group]` field. (The
-/// older formulation bounded `<FieldTy as EmptyGroup>::Fill<Substruct>: Parse<Atom>`: a projection that
-/// mentions the substruct, has no head type, and so can be neither reduced nor cycle-broken. See the
-/// `#[group]` entry under *Known gaps* in CLAUDE.md.)
+/// `Slot` is a method generic and the result is `(Slot, Self)`, so the obligation `FieldTy:
+/// GroupShape<Atom>` mentions neither the content type nor a projection — that is what lets a
+/// `#[recurse]` cycle pass through a `#[group]` field. Do not lift `Slot` to the trait.
 ///
-/// Returning `(Slot, Self)` rather than a filled group is the other half: with no associated type there
-/// is no projection anywhere in the obligation.
-///
-/// Two families of impl exist, matching how real sources represent a group:
-/// - the **generic sequencing** impl below — open, content, close as three consecutive parses, correct
-///   for a flat/char-like atom;
-/// - **delimiter-specific** impls (see `crate::source::proc_macro2`) — for a token source a group is a
-///   *single* atom, so the impl consumes one `TokenTree::Group`, parses the content from its inner
-///   stream, and synthesizes the delimiter spans. The delimiters are never parsed as tokens there.
+/// Implemented two ways: the generic sequencing impl below parses open, content and close as three
+/// atoms, while `crate::source::proc_macro2` implements it per delimiter, consuming a group as a
+/// single atom.
 pub trait GroupShape<Atom: crate::span::Spanned>: Sized {
+    /// Parse `Slot` between the delimiters.
     fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
         stream: &mut __S,
     ) -> Result<(Slot, Self), ParseError<crate::span::SpanOf<Atom>>>
@@ -143,11 +129,10 @@ pub trait GroupShape<Atom: crate::span::Spanned>: Sized {
         Slot::Error: Into<ParseError<crate::span::SpanOf<Atom>>>;
 }
 
-/// The [`GroupShape`] counterpart for emitting: write the delimited group back out around `slot`.
-///
-/// Takes the holder by reference and the content by reference, so — unlike the `EmptyGroup::fill`
-/// formulation it replaces — nothing is cloned and the holder needs no `Clone` bound.
+/// The [`GroupShape`] counterpart for emitting: writes the delimited group back out around `slot`.
+/// Both the holder and the content are taken by reference, so nothing is cloned.
 pub trait GroupUnparse<Atom> {
+    /// Emit the delimiters around `slot`.
     fn unparse_group<Slot, E>(
         &self,
         slot: &Slot,
@@ -158,7 +143,6 @@ pub trait GroupUnparse<Atom> {
         E: crate::parse::unparse::Emitter<Atom>;
 }
 
-// Generic sequencing: correct whenever the delimiters really are atoms of their own.
 impl<Atom: crate::span::Spanned, O, C> GroupShape<Atom> for Group<(), O, C>
 where
     O: Parse<Atom>,
@@ -207,15 +191,23 @@ where
     }
 }
 
+/// A `T` in parentheses: `( T )`.
 pub type GroupParen<T, S> = Group<T, WithSpan<punct::OpenParen, S>, WithSpan<punct::CloseParen, S>>;
+/// A `T` in braces: `{ T }`.
 pub type GroupBrace<T, S> = Group<T, WithSpan<punct::OpenBrace, S>, WithSpan<punct::CloseBrace, S>>;
+/// A `T` in square brackets: `[ T ]`.
 pub type GroupBracket<T, S> =
     Group<T, WithSpan<punct::OpenBracket, S>, WithSpan<punct::CloseBracket, S>>;
 
+/// A pair of delimiters with no content yet, as produced by [`GroupShape::parse_group`]. Implemented
+/// by `Group<(), O, C>` to move content in and out of the holder.
 pub trait EmptyGroup {
+    /// The same delimiters holding a `Slot`.
     type Fill<Slot>;
 
+    /// Put `slot` between the delimiters.
     fn fill<Slot>(self, slot: Slot) -> Self::Fill<Slot>;
+    /// Take the content back out, leaving the delimiters empty.
     fn unfill<Slot>(group: Self::Fill<Slot>) -> (Slot, Self);
 }
 

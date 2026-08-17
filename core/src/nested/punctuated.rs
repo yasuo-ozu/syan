@@ -6,12 +6,12 @@ use parametrized::{Parametrized, ParametrizedIntoIter, ParametrizedIterMut};
 #[parametrized::parametrized(default = 0, iter_mut = 0, into_iter = 0)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Unparse, Spanned)]
 #[syan(crate)]
-// The field type is the natural shape consumed by the `#[parametrized]` / derive machinery; factoring it
-// into a type alias would not help (and the macros key on the written type).
+// The derive macros key on the written type, so this shape cannot be factored into a type alias.
 #[allow(clippy::type_complexity)]
 struct PunctuatedInner<Item, Punct>(Option<(Box<Item>, Vec<(Punct, Item)>)>);
 
-/// An punctuated list representation.
+/// Parses zero or more `Item`s separated by a `Punct`, as in `a, b, c`. A trailing punctuation is not
+/// consumed. Use it for comma-separated argument lists and the like.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Unparse, Spanned)]
 #[syan(crate)]
 pub struct Punctuated<Item, Punct> {
@@ -27,14 +27,17 @@ impl<Item, Punct> Default for Punctuated<Item, Punct> {
 }
 
 impl<Item, Punct> Punctuated<Item, Punct> {
+    /// Iterate over the items, skipping the punctuation.
     pub fn iter(&self) -> Iter<'_, Item, Punct> {
         self.into_iter()
     }
 
+    /// Iterate mutably over the items, skipping the punctuation.
     pub fn iter_mut(&mut self) -> IterMut<'_, Item, Punct> {
         self.into_iter()
     }
 
+    /// Number of items in the list.
     pub fn len(&self) -> usize {
         match &self.inner.0 {
             None => 0,
@@ -42,14 +45,17 @@ impl<Item, Punct> Punctuated<Item, Punct> {
         }
     }
 
+    /// Whether the list holds no items.
     pub fn is_empty(&self) -> bool {
         self.inner.0.is_none()
     }
 
+    /// Shared access to the first item, or `None` if the list is empty.
     pub fn first(&self) -> Option<&Item> {
         self.inner.0.as_ref().map(|(first, _)| first.as_ref())
     }
 
+    /// Shared access to the last item, or `None` if the list is empty.
     pub fn last(&self) -> Option<&Item> {
         match &self.inner.0 {
             None => None,
@@ -63,6 +69,7 @@ impl<Item, Punct> Punctuated<Item, Punct> {
         }
     }
 
+    /// Mutable access to the first item, or `None` if the list is empty.
     pub fn first_mut(&mut self) -> Option<&mut Item> {
         self.inner.0.as_mut().map(|(first, _)| first.as_mut())
     }
@@ -96,6 +103,7 @@ impl<Item, Punct> Punctuated<Item, Punct> {
         }
     }
 
+    /// Mutable access to the last item, or `None` if the list is empty.
     pub fn last_mut(&mut self) -> Option<&mut Item> {
         match &mut self.inner.0 {
             None => None,
@@ -109,6 +117,8 @@ impl<Item, Punct> Punctuated<Item, Punct> {
         }
     }
 
+    /// Remove and return the item at `index`, or `None` if out of bounds. The neighbouring punctuation
+    /// is dropped with it.
     pub fn remove(&mut self, index: usize) -> Option<Item> {
         match self.inner.0.take() {
             None => None,
@@ -137,6 +147,7 @@ impl<Item, Punct> Punctuated<Item, Punct> {
 }
 
 impl<Item, Punct: Default> Punctuated<Item, Punct> {
+    /// Append an item, inserting a `Punct::default()` before it unless the list was empty.
     pub fn push(&mut self, item: Item) {
         match &mut self.inner.0 {
             None => {
@@ -148,6 +159,8 @@ impl<Item, Punct: Default> Punctuated<Item, Punct> {
         }
     }
 
+    /// Insert an item at `index`, with a `Punct::default()` separating it from its neighbour. Panics
+    /// if `index` is past the end of the list.
     pub fn insert(&mut self, index: usize, item: Item) {
         match (&mut self.inner.0, index) {
             (None, 0) => {
@@ -167,6 +180,7 @@ impl<Item, Punct: Default> Punctuated<Item, Punct> {
     }
 }
 
+/// Iterator over `&Item`, returned by [`Punctuated::iter`].
 pub struct Iter<'a, Item: 'a, Punct: 'a>(
     <PunctuatedInner<Item, Punct> as Parametrized<0>>::Iter<'a>,
 );
@@ -188,6 +202,7 @@ impl<'a, Item: Sized, Punct> std::iter::FusedIterator for Iter<'a, Item, Punct> 
 {
 }
 
+/// Iterator over `&mut Item`, returned by [`Punctuated::iter_mut`].
 pub struct IterMut<'a, Item: 'a, Punct: 'a>(
     <PunctuatedInner<Item, Punct> as ParametrizedIterMut<0>>::IterMut<'a>,
 );
@@ -209,6 +224,7 @@ impl<'a, Item: Sized, Punct> std::iter::FusedIterator for IterMut<'a, Item, Punc
 {
 }
 
+/// Iterator over owned `Item`s, returned by `Punctuated::into_iter`.
 pub struct IntoIter<Item, Punct>(
     <PunctuatedInner<Item, Punct> as ParametrizedIntoIter<0>>::IntoIter,
 );
@@ -292,18 +308,15 @@ where
 
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
 
-        // Try to parse the first item
         let first_item = match stream.dup(|stream| Item::parse_stream(&mut *stream)) {
             Ok(item) => item,
             Err(_) => {
-                // No items, return empty punctuated list
                 return Ok(Self::default());
             }
         };
 
         let mut pairs = Vec::new();
 
-        // Parse subsequent (punct, item) pairs
         loop {
             let pair: Result<_, Self::Error> = stream.dup(|stream| {
                 let punct = Punct::parse_stream(&mut *stream)

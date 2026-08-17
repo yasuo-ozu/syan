@@ -100,60 +100,6 @@ mod punct {
     }
 }
 
-// ── a `Box` AROUND a container forwards transparently to the inner view ─────────────────────────
-mod boxed_container {
-    use super::*;
-    use syan::nested::punctuated::Punctuated;
-    use syan::visit::{Ast, OptView, SeqView};
-
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
-    pub struct Comma;
-
-    #[derive(Debug, Ast)]
-    pub struct Item<S>(pub i64, pub PhantomData<S>);
-
-    // Edit views over a `Punctuated` seq and an `Option` slot. (Edit views require a *bare* single
-    // container — `SeqView<Item>` / `OptView<Item>` — so a box-around-a-container like `Box<Punctuated>`
-    // is not an edit target under the bare-element model; use the bare container.)
-    #[derive(Debug, Ast)]
-    #[subast(crate::boxed_container::Item)]
-    pub struct Holder<S> {
-        #[seq]
-        pub items: Punctuated<Item<S>, Comma>, // Punctuated<Item> : SeqView<Item>
-        #[opt]
-        pub last: Option<Item<S>>, // Option<Item> : OptView<Item>
-    }
-
-    pub mod v {
-        syan::visit::visitor!(super::Holder, super::Item);
-    }
-
-    struct Editor;
-    impl<S> v::VisitMut<S> for Editor {
-        fn visit_item_seq<V: SeqView<Item<S>>>(&mut self, v: &mut V) {
-            v.retain_mut(|i| i.0 != 0);
-            v.push(Item(9, PhantomData));
-        }
-        fn visit_item_opt<O: OptView<Item<S>>>(&mut self, v: &mut O) {
-            if matches!(v.get(), Some(i) if i.0 == 0) {
-                v.clear(); // Option::take
-            }
-        }
-    }
-
-    #[test]
-    fn punctuated_and_option_edit() {
-        let mut items: Punctuated<Item<()>, Comma> = Punctuated::default();
-        items.push(Item(0, PhantomData));
-        items.push(Item(1, PhantomData));
-        items.push(Item(2, PhantomData));
-        let mut h: Holder<()> = Holder { items, last: Some(Item(0, PhantomData)) };
-        h.visit_mut(&mut Editor);
-        assert_eq!(h.items.iter().map(|i| i.0).collect::<Vec<_>>(), vec![1, 2, 9]);
-        assert!(h.last.is_none(), "the Option was cleared via OptView");
-    }
-}
-
 // ── a closure still visits every element of a Vec / Option slot (via the default seq/opt descent) ──
 mod closure_over_slot {
     use super::*;

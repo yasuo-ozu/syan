@@ -1,5 +1,6 @@
 pub mod into_parse_stream;
 
+/// The [`Parse`] trait: building a value by consuming a [`ParseStream`].
 #[allow(clippy::module_inception)]
 pub mod parse;
 pub mod parse_stream;

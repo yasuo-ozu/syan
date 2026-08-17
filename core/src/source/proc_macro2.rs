@@ -1,3 +1,8 @@
+//! Parsing from a [`proc_macro2::TokenStream`], one [`proc_macro2::TokenTree`] per atom.
+//!
+//! Reach for this when writing a procedural macro: spans are proc-macro2's own, so diagnostics
+//! point back at the caller's source.
+
 use crate::error::ParseError;
 use crate::nested::group::{Group, GroupBrace, GroupBracket, GroupParen, GroupShape};
 use crate::parse::{unparse::Emitter, Parse, ParseStream, Tape, Unparse};
@@ -16,7 +21,6 @@ impl crate::span::Span for Span {
             (None, other) => Span(other),
             (span @ Some(_), None) => Span(span),
             (Some((lhs_start, lhs_end)), Some((rhs_start, rhs_end))) => {
-                // Try to join spans, fallback to first span if joining fails
                 let joined_start = lhs_start.join(rhs_start).unwrap_or(lhs_start);
                 let joined_end = lhs_end.join(rhs_end).unwrap_or(rhs_end);
                 Span(Some((joined_start, joined_end)))
@@ -41,13 +45,13 @@ impl From<Span> for Option<proc_macro2::Span> {
 pub struct Stream {
     tape: Tape<proc_macro2::token_stream::IntoIter>,
     /// Spacing of the last atom served — read by `skip_sep`, so it is *derived* state that must be
-    /// restored alongside the tape. A parallel stack keyed by the tape's own raw token is the
-    /// general recipe for a stream whose state does not fit in one opaque `u64`.
+    /// restored alongside the tape, via the parallel `joint_saves` stack.
     is_joint: bool,
     joint_saves: Vec<bool>,
 }
 
 impl Stream {
+    /// Starts a stream at the first token of `tokens`.
     pub fn new(tokens: proc_macro2::TokenStream) -> Self {
         Self {
             tape: Tape::new(tokens.into_iter()),
@@ -188,10 +192,8 @@ impl<T: Default + core::fmt::Display> Parse<proc_macro2::TokenTree> for Symbol<T
 
 impl<T: Default + core::fmt::Display> Unparse<proc_macro2::TokenTree> for Symbol<T> {
     fn unparse<S: Emitter<proc_macro2::TokenTree>>(&self, sink: &mut S) -> Result<(), S::Error> {
-        // A symbol may be an identifier keyword (`let`) OR punctuation (`=`, `;`, `::`, `->`). Let
-        // proc-macro2's own lexer turn the symbol's text into the right token(s) — an `Ident`, a single
-        // `Punct`, or a sequence of joint `Punct`s for multi-char operators — rather than forcing it
-        // through `Ident::new` (which panics on punctuation).
+        // A symbol may be a keyword (`let`) OR punctuation (`=`, `::`, `->`), so let proc-macro2's
+        // own lexer pick the right token(s) rather than `Ident::new`, which panics on punctuation.
         let text = Self::default().to_string();
         let stream: proc_macro2::TokenStream = text
             .parse()
@@ -206,9 +208,9 @@ impl<T: Default + core::fmt::Display> Unparse<proc_macro2::TokenTree> for Symbol
 macro_rules! impl_for_group {
     ($($t0:ident $(:: $t:ident)*, $delim:path),* $(,)?) => {
         $(
-            // The `GroupShape` form: same single-`TokenTree::Group` consumption, but the content
-            // type is a METHOD generic, so the resulting obligation never mentions it. This is what
-            // `#[derive(Parse)]` uses for a `#[group]` field — see `nested::group::GroupShape`.
+            // The `GroupShape` form, used by `#[derive(Parse)]` for a `#[group]` field: same
+            // single-`TokenTree::Group` consumption, but the content type is a METHOD generic, so
+            // the resulting obligation never mentions it.
             impl GroupShape<proc_macro2::TokenTree> for $t0 $(::$t)*<(), Span> {
                 fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
                     stream: &mut __S,

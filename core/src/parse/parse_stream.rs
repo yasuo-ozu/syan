@@ -1,24 +1,26 @@
+//! The [`ParseStream`] trait: the rewindable stream of atoms a parser reads from.
+
 use crate::span::{Span, Spanned};
 
-/// The core token stream. **Object-safe** — so `&mut dyn ParseStream<Atom = A, Error = E>` is a usable
-/// type. Nothing in syan needs that any more (`#[recurse]` no longer erases at the re-entry boundary;
-/// it reborrows), but it is cheap to keep and lets a caller hold a stream behind a trait object. The
-/// generic conveniences `dup`/`validate_spacing` carry `where Self: Sized`, which keeps them off the
-/// vtable (not callable on `dyn ParseStream`) while preserving object safety — and they're callable on
-/// every real (sized) stream (`Stream`, `&mut T`).
+/// The stream a parser reads from: pull atoms, look one ahead, and rewind.
 ///
-/// Backtracking is expressed by the **checkpoint trio** below rather than by a wrapper type. That is
-/// what keeps the stream type fixed across a `dup` scope: `dup` hands the closure `&mut Self`, not a
-/// `Dup<&mut Self>`, so nesting transactions cannot grow the type. The other former growth source —
-/// the per-level `&mut dyn` tower that `erase` built — is gone: recursion reborrows (`&mut *stream`),
-/// which is a genuine fixed point.
+/// Backtracking is expressed by the checkpoint trio ([`checkpoint_raw`](Self::checkpoint_raw) and
+/// friends) rather than by a wrapper type, so [`dup`](Self::dup) hands its closure `&mut Self` and
+/// nesting transactions never grows the stream type.
+///
+/// The trait is object-safe, so `&mut dyn ParseStream<Atom = A, Error = E>` is usable; the generic
+/// conveniences carry `where Self: Sized` to keep it that way.
 pub trait ParseStream {
+    /// The unit of input this stream serves.
     type Atom;
+    /// What the underlying source reports when it fails; see [`get_error`](Self::get_error).
     type Error;
 
-    // Required
+    /// Consume and return the next atom, or `None` at end of input.
     fn next(&mut self) -> Option<Self::Atom>;
+    /// The atom [`next`](Self::next) would return, without consuming it.
     fn peek(&mut self) -> Option<&Self::Atom>;
+    /// Hand an atom back; it is served before anything still unread.
     fn push(&mut self, _: Self::Atom);
 
     /// Open a transaction; the returned token identifies it.
@@ -31,10 +33,8 @@ pub trait ParseStream {
     /// The token is **opaque and stream-specific** — it is not a position, and passing one stream's
     /// token to another is meaningless.
     ///
-    /// The trio is deliberately *required*, with no default: a defaulted rewind primitive would let a
-    /// wrapper type silently inherit a broken one. `get_error`/`skip_sep` are required for the same
-    /// reason — they used to default to `todo!()`, which turned a forgotten forward into a runtime
-    /// panic instead of a compile error.
+    /// Deliberately required with no default, so that a wrapper type cannot silently inherit a
+    /// rewind primitive that does not rewind it.
     fn checkpoint_raw(&mut self) -> u64;
 
     /// Undo everything consumed since `raw` was taken, and close that scope.
@@ -45,8 +45,6 @@ pub trait ParseStream {
 
     /// Report an error the *source* has accumulated (a lexer that failed mid-stream, say), as opposed
     /// to a parse failure. `Ok(())` for a source that cannot fail.
-    ///
-    /// Required — see the note on [`checkpoint_raw`](Self::checkpoint_raw).
     fn get_error(&mut self) -> Result<(), Self::Error>;
 
     /// Skip the separator atoms if exists. Returns whether we skipped some separators.
@@ -55,6 +53,9 @@ pub trait ParseStream {
     /// If the input streams fall into an error, it returns `true`.
     fn skip_sep(&mut self) -> bool;
 
+    /// Check the spacing before the next atom: `is_joint` demands no separator here, `false` demands
+    /// one. Fails with [`ParseError::Spacing`](crate::error::ParseError::Spacing) if the input
+    /// disagrees.
     fn validate_spacing<S: Span + 'static>(
         &mut self,
         is_joint: bool,
@@ -92,10 +93,8 @@ pub trait ParseStream {
         Self: Sized,
     {
         let raw = self.checkpoint_raw();
-        // A panic escaping `f` leaves the scope open. That is deliberate: the alternative is a drop
-        // guard that rewinds during unwind, which turns "this parse panicked" into "this parse
-        // panicked and then quietly rewound", and can abort the process if the rewind itself
-        // asserts. An abandoned scope is only a bounded leak in `saves`.
+        // A panic escaping `f` deliberately leaves the scope open (a bounded leak) rather than
+        // rewinding from a drop guard during unwind, which could itself assert and abort.
         match f(self) {
             Ok(ok) => {
                 self.commit_raw(raw);

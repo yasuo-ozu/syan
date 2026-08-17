@@ -9,7 +9,6 @@
 //!   context, so a consumer can name those types portably as
 //!   `<T as ::syan::visit::Repeater<N>>::Type` regardless of which crate/module it expands in.
 //!
-//! See `CLAUDE.md` for the full design.
 
 pub use syan_macro::Ast;
 
@@ -55,7 +54,7 @@ pub trait Repeater<const INDEX: usize> {
 // a **view of that slot** as an argument, through which the visitor edits the parent **in place** (no
 // cloning of existing nodes). The view is a trait implemented directly on the container types — so the
 // descent passes `&mut self.field` with no wrapper. Two dedicated interfaces: [`SeqView`] (Vec-like,
-// unbounded) and [`OptView`] (Option-like, ≤1). See `docs/visitor-edit-plan.md`.
+// unbounded) and [`OptView`] (Option-like, ≤1).
 //
 // The element type is a **type parameter** (`SeqView<T>`, not an associated type); the traits are
 // bare-element only — a wrapper like `Box<T>`/`Attempt<T>` implements `OptView<T>` directly (single-slot,

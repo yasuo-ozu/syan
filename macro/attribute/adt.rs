@@ -9,7 +9,6 @@ use super::*;
 /// can remove, so this measures its ceiling against unchanged parse bodies.
 ///
 /// Scoped by `CARGO_CRATE_NAME` so it cannot silently rewrite syan's own impls or a consumer's.
-/// See `perf-measurements.md` §14. Delete once `ErrorLogger` lands, which subsumes it.
 fn ablate_no_aggregate() -> bool {
     std::env::var("SYAN_ABLATE_NO_AGGREGATE").as_deref() == Ok("1")
         && matches!(
@@ -172,7 +171,7 @@ pub(crate) trait Adt {
                     // (says nothing about the content, so it is never a recursion edge) and
                     // `Substruct: Parse<Atom>` (a bare head). The older `EmptyGroup::Fill` form bounded
                     // a projection naming the substruct, which could be neither reduced nor
-                    // cycle-broken — see `nested::group::GroupShape` and CLAUDE.md's `#[group]` entry.
+                    // cycle-broken — see `nested::group::GroupShape`.
                     let substruct_ident = &substruct.ident;
                     let slot_ty: Type = parse_quote!(#substruct_ident #ty_generics);
                     let group_shape: Path = parse_quote!(#syan::nested::group::GroupShape<#tp_atom>);

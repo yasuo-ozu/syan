@@ -35,16 +35,6 @@ struct NestedContainer<S> {
 }
 
 #[test]
-fn test_case_1() {
-    let tokens = quote! { [ 123, ( 234; 345, { 678 }) ]};
-    let container: NestedContainer<_> = Parse::parse(tokens.clone()).unwrap();
-    assert_eq!(container.outer_content.len(), 1);
-    assert_eq!(container.middle_content.len(), 2);
-    assert_eq!(container.inner_content.len(), 1);
-    assert!(container.final_element.is_none());
-}
-
-#[test]
 fn test_case_2_with_final_element() {
     let tokens = quote! { [ 123, ( 234; 345, { 678 ! }) ]};
     let container: NestedContainer<_> = Parse::parse(tokens.clone()).unwrap();

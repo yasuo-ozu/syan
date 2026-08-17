@@ -29,20 +29,13 @@ fn test_symbol_puncts() {
 }
 
 #[test]
-fn test_symbol_joint_chunking() {
-    assert_eq!(
-        &<Symbol![very_long_identifier]>::default().to_string(),
-        "very_long_identifier"
-    );
+fn test_symbol_very_long_sequences() {
+    // Sequences past `MAX_TUPLE_SIZE` (12), which is where `Symbol!` starts chunking into nested
+    // `Joint`s — a single long identifier and a long mixed ident/lit/punct run.
     assert_eq!(
         &<Symbol![very_long_function_name_42]>::default().to_string(),
         "very_long_function_name_42"
     );
-}
-
-#[test]
-fn test_symbol_very_long_sequences() {
-    // Very long sequences to test deeply nested Joint structures
     assert_eq!(&<Symbol![this is a very long sequence of many different tokens that should definitely exceed the fourteen character limit and trigger recursive Joint structures]>::default().to_string(), "thisisaverylongsequenceofmanydifferenttokensthatshoulddefinitelyexceedthefourteencharacterlimitandtriggerrecursiveJointstructures");
     assert_eq!(&<Symbol![1 2 3 4 5 6 7 8 9 0 'a' 'b' 'c' 'd' 'e' 'f' 'g' 'h' 'i' 'j' + - * / :: -> < > = != <= >= && ||]>::default().to_string(), "1234567890abcdefghij+-*/::-><>=!=<=>=&&||");
 }

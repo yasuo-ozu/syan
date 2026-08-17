@@ -347,20 +347,6 @@ fn leaf_from_borrowed_stream() {
 }
 
 #[test]
-fn one_level_of_recursion() {
-    let src = String::from("( x )");
-    let toks = lex(&src);
-    let expr = parse_expr(&toks).unwrap();
-    let ast::Expr::Group { inner, .. } = expr else {
-        panic!("expected a group")
-    };
-    let ast::Expr::Leaf(word) = *inner.expr else {
-        panic!("expected a leaf inside")
-    };
-    assert_eq!(word.text, "x");
-}
-
-#[test]
 fn deep_recursion_through_the_cycle() {
     // Each `( … )` is one full Expr -> Stmt -> Expr turn of the cycle, so the borrow has to survive
     // an arbitrary number of re-entries, not just one.

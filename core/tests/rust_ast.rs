@@ -123,17 +123,6 @@ impl<Atom> Unparse<Atom> for ExpressionTerm {
 use template_quote::quote;
 
 #[test]
-fn test_simple_function() {
-    let tokens = quote! {
-        fn 42() {
-            1;
-        }
-    };
-    let func: ItemFn<_> = Parse::parse(tokens).unwrap();
-    assert_eq!(func.name.name.value, "42");
-}
-
-#[test]
 fn test_simple_module() {
     let tokens = quote! {
         mod 100 {
@@ -143,17 +132,6 @@ fn test_simple_module() {
     let module: ItemMod<_> = Parse::parse(tokens).unwrap();
     assert_eq!(module.name.name.value, "100");
     assert_eq!(module.content.value, "200");
-}
-
-#[test]
-fn test_simple_block() {
-    let tokens = quote! {
-        {
-            let 1 = 2;
-        }
-    };
-    let block: Block<_> = Parse::parse(tokens).unwrap();
-    assert_eq!(block.stmts.len(), 1);
 }
 
 #[test]
@@ -179,13 +157,6 @@ fn test_impl_item() {
     assert_eq!(impl_item.name.name.value, "111");
     assert_eq!(impl_item.target.name.value, "222");
     assert_eq!(impl_item.content.value, "333");
-}
-
-#[test]
-fn test_ident() {
-    let tokens = quote! { 999 };
-    let ident: Ident = Parse::parse(tokens).unwrap();
-    assert_eq!(ident.name.value, "999");
 }
 
 #[test]

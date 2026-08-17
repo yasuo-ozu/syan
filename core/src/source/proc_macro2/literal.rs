@@ -1,62 +1,79 @@
+//! The Rust literal forms, each a type you can `Parse` from a single token and `Unparse` back.
+//!
+//! Pick the type that matches the literal you expect: [`Integer`], [`Float`], [`Bool`], [`Char`],
+//! [`ByteChar`], [`Str`], [`ByteStr`], [`CStr`], or one of the `Raw` variants. The string forms
+//! store their contents exactly as written, escapes unresolved; the character forms resolve theirs.
+
 use super::Span;
 use crate::error::ParseError;
 use crate::parse::unparse::Emitter;
 use crate::parse::{Parse, Unparse};
 
+/// A boolean literal, `true` or `false`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Bool {
     pub value: bool,
 }
 
+/// A byte character literal, `b'a'`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ByteChar {
     pub value: u8,
 }
 
+/// A character literal, `'a'`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Char {
     pub value: char,
 }
 
+/// An integer literal, `42` or `1_000u64`. `value` keeps any underscores and drops the suffix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Integer {
     pub value: String,
     pub suffix: Option<String>,
 }
 
+/// A floating-point literal, `3.14` or `2.5f64`. `value` drops the suffix.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Float {
     pub value: String,
     pub suffix: Option<String>,
 }
 
+/// A string literal, `"text"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Str {
     pub value: String,
 }
 
+/// A raw string literal, `r"text"` or `r#"text"#`, where `hash_count` is the number of `#`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StrRaw {
     pub value: String,
     pub hash_count: usize,
 }
 
+/// A byte string literal, `b"text"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ByteStr {
     pub value: Vec<u8>,
 }
 
+/// A raw byte string literal, `br"text"` or `br#"text"#`, where `hash_count` is the number of `#`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ByteStrRaw {
     pub value: Vec<u8>,
     pub hash_count: usize,
 }
 
+/// A C string literal, `c"text"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CStr {
     pub value: String,
 }
 
+/// A raw C string literal, `cr"text"` or `cr#"text"#`, where `hash_count` is the number of `#`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CStrRaw {
     pub value: String,
@@ -68,20 +85,8 @@ mod parse_impl;
 mod unparse_impl;
 #[cfg(test)]
 mod tests {
-    //! Comprehensive tests for literal parsing functionality.
-    //! 
-    //! This test suite covers:
-    //! - Bool literals (true/false)
-    //! - Character literals (simple chars and escape sequences)  
-    //! - Byte character literals (b'a', with escape sequences)
-    //! - Integer literals (with/without suffixes, with underscores)
-    //! - Float literals (with/without suffixes, scientific notation)
-    //! - String literals (regular strings, raw strings, byte strings, C strings)
-    //! - Display trait implementations for all literal types
-    //! - Error handling for invalid inputs
-    //! 
-    //! Note: Some advanced literal types (raw strings with hashes, etc.) may have 
-    //! limited support depending on the tokenization capabilities.
+    //! Note: some invalid inputs fail at tokenization rather than at parsing, and the raw forms
+    //! have limited support (see `parse_raw` in `parse_impl`).
 
     use super::*;
     use crate::parse::Parse;
@@ -141,7 +146,6 @@ mod tests {
     #[test]
     fn test_bytechar_parsing_invalid() {
         assert!(parse_tokens::<ByteChar>("'a'").is_err()); // Not a byte char
-        // Note: Some invalid inputs may fail at tokenization level, not parsing level
     }
 
     #[test]
@@ -177,7 +181,6 @@ mod tests {
     #[test]
     fn test_char_parsing_invalid() {
         assert!(parse_tokens::<Char>("b'a'").is_err()); // Byte char
-        // Note: Some invalid inputs may fail at tokenization level, not parsing level
     }
 
     #[test]
@@ -290,14 +293,11 @@ mod tests {
 
     #[test]
     fn test_str_raw_parsing() {
-        // Raw string parsing might need different tokenization approach
-        // For now, test that the parser recognizes but may fail on certain inputs
-        // TODO: Implement proper raw string tokenization support
+        // TODO: implement proper raw string tokenization support
         if let Ok(result) = parse_tokens::<StrRaw>("r\"hello\"") {
             assert_eq!(result.value, "hello");
             assert_eq!(result.hash_count, 0);
         }
-        // Test should not panic, just verify the parser can handle the input type
     }
 
     #[test]
@@ -323,13 +323,10 @@ mod tests {
 
     #[test]
     fn test_bytestr_raw_parsing() {
-        // Raw byte string parsing might need different tokenization approach
-        // TODO: Implement proper raw byte string tokenization support
         if let Ok(result) = parse_tokens::<ByteStrRaw>("br\"hello\"") {
             assert_eq!(result.value, b"hello");
             assert_eq!(result.hash_count, 0);
         }
-        // Test should not panic, just verify the parser can handle the input type
     }
 
     #[test]
@@ -355,13 +352,10 @@ mod tests {
 
     #[test]
     fn test_cstr_raw_parsing() {
-        // Raw C string parsing might need different tokenization approach
-        // TODO: Implement proper raw C string tokenization support
         if let Ok(result) = parse_tokens::<CStrRaw>("cr\"hello\"") {
             assert_eq!(result.value, "hello");
             assert_eq!(result.hash_count, 0);
         }
-        // Test should not panic, just verify the parser can handle the input type
     }
 
     #[test]

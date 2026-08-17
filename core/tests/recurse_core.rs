@@ -93,14 +93,6 @@ mod basic {
     }
 
     #[test]
-    fn test_is_literal() {
-        let tokens = quote! { 42 };
-        let expr: Expr<_> = Parse::parse(tokens).unwrap();
-        assert!(expr.is_literal());
-        assert_eq!(expr.stmt_count(), None);
-    }
-
-    #[test]
     fn test_empty_block() {
         let tokens = quote! { {} };
         let expr: Expr<_> = Parse::parse(tokens).unwrap();

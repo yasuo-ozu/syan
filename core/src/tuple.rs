@@ -1,20 +1,32 @@
+/// Splits a tuple into its first element and the rest. Implemented for tuples up to 14 elements, so
+/// that a trait impl can recurse over a tuple one element at a time.
 pub trait PopHead: Sized {
     type Head;
+    /// The remaining elements, itself a tuple — so a recursive impl can pop again.
     type Rem;
+    /// Split into the first element and the rest.
     fn pop_head(self) -> (Self::Head, Self::Rem);
+    /// Put a head and a rest back together.
     fn unsplit(head: Self::Head, rem: Self::Rem) -> Self;
 }
 
+/// [`PopHead`] for a tuple of references — splits by borrow instead of by value.
 pub trait PopHeadRef {
+    /// What the first reference points to.
     type Head;
+    /// The remaining references, as a tuple.
     type Rem;
+    /// Borrow the first element and take the rest.
     fn pop_head_ref(&self) -> (&Self::Head, Self::Rem);
 }
 
+/// Turns `(A, B, ..)` into `(&A, &B, ..)`, so tuple recursion can run without consuming the tuple.
 pub trait AsRef: PopHead {
+    /// The same tuple with every element borrowed.
     type AsRef<'a>: PopHead<Head = &'a Self::Head>
     where
         Self: 'a;
+    /// Borrow every element.
     fn as_ref(&self) -> Self::AsRef<'_>;
 }
 

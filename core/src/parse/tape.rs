@@ -21,12 +21,9 @@
 //! resolves the accumulated prefix is released. So a parse that never backtracks holds O(1) atoms,
 //! and one that does holds exactly the span of its outermost open transaction.
 //!
-//! A checkpoint costs one `Vec` push of a `usize` plus a clone of `extra`, and a rollback costs one
-//! pop — no replay, and nothing proportional to how much the transaction consumed. That is the point
-//! of the design: the previous `Dup` wrapper cloned *every consumed atom* into a replay buffer and
-//! pushed them back one at a time on failure, which is both slower and where the pushback-ordering
-//! bug lived. Here a failed transaction cannot reorder anything, because it does not move atoms at
-//! all — it restores an index.
+//! A checkpoint costs one `Vec` push plus a clone of `extra`, and a rollback costs one pop — no
+//! replay, and nothing proportional to how much the transaction consumed. A failed transaction also
+//! cannot reorder atoms, because it never moves any: it restores an index.
 
 /// Makes a one-shot iterator rewindable, with O(1) checkpoints.
 ///
@@ -49,6 +46,7 @@ pub struct Tape<I: Iterator> {
 }
 
 impl<I: Iterator> Tape<I> {
+    /// Wrap an iterator so that what it produces can be rewound.
     pub fn new(iter: I) -> Self {
         Self {
             iter,
@@ -109,9 +107,9 @@ impl<I: Iterator> Tape<I>
 where
     I::Item: Clone,
 {
-    // Named to mirror `ParseStream::next`, which is what every caller is implementing. Making this an
-    // `Iterator` instead would be worse than the name clash: a type that is both `Iterator` and
-    // `ParseStream` makes every bare `s.next()` ambiguous (E0034) at each call site.
+    /// Consume and return the next atom, or `None` at end of input.
+    // Not an `Iterator` impl: a type that is both `Iterator` and `ParseStream` makes every bare
+    // `s.next()` ambiguous (E0034) at each call site.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<I::Item> {
         if let Some(atom) = self.extra.pop() {
@@ -133,10 +131,8 @@ where
                 None
             }
             // Retain it only if some open transaction could rewind onto it. This arm is a
-            // PERFORMANCE path, not a correctness one — `release` would drop the atom on the next
-            // call anyway; skipping the clone-push-drain round trip per atom is the point. (Measured
-            // by mutation: removing either this arm or `release` alone keeps retention bounded;
-            // removing both makes `reading_outside_a_transaction_retains_nothing` fail.)
+            // performance path, not a correctness one: `release` would drop the atom on the next
+            // call anyway, but skipping the clone-push-drain round trip per atom is the point.
             Some(atom) if self.saves.is_empty() => Some(atom),
             Some(atom) => {
                 self.buf.push(atom.clone());
@@ -210,7 +206,7 @@ mod tests {
     }
 
     /// The reason this is a `Tape` over an iterator rather than a `Vec`: reading without an open
-    /// transaction must not accumulate. Holding the input was previously unavoidable.
+    /// transaction must not accumulate.
     #[test]
     fn reading_outside_a_transaction_retains_nothing() {
         let (mut t, _) = counted(1000);

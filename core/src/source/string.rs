@@ -1,13 +1,20 @@
+//! Parsing straight from a [`String`], one [`char`] per atom.
+//!
+//! The atom type is [`WithSpan<char, Span>`](WithSpan), so every character carries the line and
+//! column it came from. Reach for this when the input is plain text rather than Rust tokens.
+
 use crate::error::ParseError;
 use crate::parse::{IntoParseStream, Parse, ParseStream, Tape};
 use crate::span::WithSpan;
 use crate::symbol::Symbol;
 use core::convert::Infallible;
 
+/// Where a `char` sits in the source text.
 #[derive(Clone, Debug, Default)]
 pub struct Span {
     pub line: usize,
     pub col: usize,
+    /// 0-based `char` offset from the start of the text, unlike the 1-based `line` and `col`.
     pub loc: usize,
 }
 
@@ -22,8 +29,8 @@ impl crate::span::Span for Span {
 }
 
 /// Walks the source text one `char` at a time, attaching the position it was at. Owns the `String`
-/// and indexes into it, so nothing is collected up front and the line/col/loc bookkeeping lives here
-/// rather than in the stream — which is what lets a checkpoint be a plain index.
+/// and indexes into it rather than collecting up front, which is what lets a checkpoint be a plain
+/// index.
 struct SpannedChars {
     src: String,
     byte: usize,
@@ -54,9 +61,11 @@ impl Iterator for SpannedChars {
     }
 }
 
+/// A [`ParseStream`] over the `char`s of a [`String`].
 pub struct Stream(Tape<SpannedChars>);
 
 impl Stream {
+    /// Starts a stream at the beginning of `s` (line 1, column 1).
     pub fn new(s: String) -> Self {
         Self(Tape::new(SpannedChars {
             src: s,

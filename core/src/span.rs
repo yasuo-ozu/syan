@@ -1,3 +1,6 @@
+//! Source positions: the [`Span`] trait, the [`Spanned`] trait for values that carry one, and
+//! [`WithSpan`] for attaching one to a value that has none of its own.
+
 use crate::parse::{IntoParseStream, Parse, ParseStream, Unparse};
 use newer_type::{implement, traits};
 pub use syan_macro::Spanned;
@@ -6,7 +9,12 @@ pub use syan_macro::Spanned;
 /// `Atom`, so this alias keeps those signatures readable.
 pub type SpanOf<Atom> = <Atom as Spanned>::Span;
 
+/// A source position that can grow to cover more input.
+///
+/// Implement it for your source's position type; `()` and `Option<S>` already implement it, so use
+/// `()` when you want no span tracking at all.
 pub trait Span: Clone + core::fmt::Debug + Default {
+    /// Widens `self` to also cover `other`, called once per atom as a parser consumes input.
     fn migrate(self, other: Self) -> Self;
 }
 
@@ -46,6 +54,10 @@ impl<T: Spanned> Spanned for &'_ mut T {
     }
 }
 
+/// A value paired with the span of the input it was parsed from.
+///
+/// Wrap a field in this when the value's own type carries no position — parsing a
+/// `WithSpan<T, S>` parses a `T` and records the span of everything it consumed.
 #[derive(Default, Clone, Debug)]
 #[implement]
 pub struct WithSpan<T, S> {
@@ -114,11 +126,10 @@ where
                 self.0.push(token)
             }
 
-            // Pure delegation. The accumulated span in `self.1` is NOT restored by a rollback, so a
-            // failed inner attempt leaves the span over-extended — pre-existing behaviour, preserved
-            // here deliberately rather than fixed as a side effect of the checkpoint migration. The
-            // trio does make a fix possible (save `(inner_raw, span)` on a side stack, as
-            // `source::proc_macro2::Stream` does for `is_joint`).
+            // Known limitation: the accumulated span in `self.1` is NOT restored by a rollback, so
+            // a failed inner attempt leaves the span over-extended. A fix would save
+            // `(inner_raw, span)` on a side stack, as `source::proc_macro2::Stream` does for
+            // `is_joint`.
             fn checkpoint_raw(&mut self) -> u64 {
                 self.0.checkpoint_raw()
             }

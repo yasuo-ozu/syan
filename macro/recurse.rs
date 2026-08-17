@@ -103,7 +103,7 @@ enum Engine {
     /// re-entry registry.
     Ranked,
     /// `#[recurse(structural)]` — decycle's compile-time unroll. No runtime and no `type-leak`, but a
-    /// narrower scope; see the *structural* entry under *Known gaps* in CLAUDE.md.
+    /// narrower scope.
     Structural,
 }
 

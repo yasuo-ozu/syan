@@ -472,11 +472,14 @@ fn wrappers_forward_every_method() {
 // ===========================================================================
 // TYPE-GROWTH detectors.
 //
-// The growth is a COMPILE-time failure at real depth (E0275 / monomorphization
-// limit — see `dup_growth_repro/`). These probe it at SHALLOW depth, where it
-// still compiles, by recording `type_name::<S>()` and asserting the set of
-// stream types a descent sees stays BOUNDED. That makes them ordinary #[test]s
-// that fail today and pass once the type is depth-invariant.
+// Both growth sources are fixed, so these are regression tests rather than probes for a pending
+// defect. They record `type_name::<S>()` across a descent and assert the set of stream types stays
+// BOUNDED — the property the two fixes established: `dup` hands the closure `&mut Self` (no `Dup`
+// wrapper), and recursion reborrows `&mut *stream` (no `&mut` flood, no erasure tower).
+//
+// Probing at shallow depth keeps them ordinary `#[test]`s. The unbounded case is a COMPILE-time
+// failure, covered by `dup_nests_to_arbitrary_depth_generically` below — that it compiles is the
+// assertion.
 // ===========================================================================
 
 use std::any::type_name;
@@ -532,9 +535,8 @@ fn dup_nesting_does_not_grow_the_stream_type() {
 
 /// The COMPILE-time half of the above, and the stronger statement: a
 /// DEPTH-GENERIC recursive nest, which only type-checks if `dup`'s closure
-/// parameter is a fixed point. This was `dup_growth_repro/dup_nesting.rs` and it
-/// could not be a `#[test]` at all, because `dup` handed the closure
-/// `Dup<&mut Self>`:
+/// parameter is a fixed point. This could not be a `#[test]` at all before the
+/// checkpoint trio landed, because `dup` handed the closure `Dup<&mut Self>`:
 ///
 ///     error[E0275]: overflow evaluating the requirement
 ///       = note: required for `Dup<&mut Dup<&mut Dup<&mut ...>>>` to implement

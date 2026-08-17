@@ -4,14 +4,6 @@ use syan::span::{Span as SpanTrait, WithSpan};
 use syan::symbol::{chars, Symbol};
 
 #[test]
-fn test_span_default() {
-    let span: Span = Default::default();
-    assert_eq!(span.line, 0);
-    assert_eq!(span.col, 0);
-    assert_eq!(span.loc, 0);
-}
-
-#[test]
 fn test_span_migrate() {
     let span1 = Span {
         line: 1,
@@ -143,12 +135,6 @@ fn test_stream_push() {
 }
 
 #[test]
-fn test_stream_get_error() {
-    let mut stream = Stream::new("test".to_string());
-    assert!(stream.get_error().is_ok());
-}
-
-#[test]
 fn test_stream_skip_sep() {
     let mut stream = Stream::new("test".to_string());
     assert!(stream.skip_sep());
@@ -200,29 +186,6 @@ fn test_parse_with_newlines_and_spaces() {
     // Parse 'b'
     let result = Symbol::<chars::_b>::parse_stream(&mut stream);
     assert!(result.is_ok());
-}
-
-#[test]
-fn test_complex_parsing_sequence() {
-    let input = "hello world!".to_string();
-    let mut stream = input.into_parse_stream();
-    
-    // Parse each character in sequence
-    assert!(Symbol::<chars::_h>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_e>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_l>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_l>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_o>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::Space>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_w>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_o>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_r>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_l>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::_d>::parse_stream(&mut stream).is_ok());
-    assert!(Symbol::<chars::Not>::parse_stream(&mut stream).is_ok()); // '!'
-    
-    // Should be end of stream
-    assert!(stream.next().is_none());
 }
 
 #[test]

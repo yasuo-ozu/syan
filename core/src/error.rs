@@ -3,20 +3,16 @@ use core::convert::Infallible;
 
 /// The aggregation half of an error type: how a set of failed alternatives becomes one error.
 ///
-/// This used to also carry `fn into_parse_error(self) -> ParseError`, which named `ParseError`
-/// concretely and so could not survive `ParseError` gaining a span parameter. Conversion is now
-/// plain `From`/`Into`, which composes better and is one fewer concept: a leaf error becomes the
-/// enclosing error with `.map_err(Into::into)`.
+/// Conversion of a leaf error into the enclosing one is plain `Into`, not part of this trait.
 pub trait Error: Sized {
+    /// Fold the failures of every alternative into a single error.
     fn from_cause(cause: Vec<Self>) -> Self;
 }
 
 impl<S: Span> Error for ParseError<S> {
     fn from_cause(cause: Vec<Self>) -> Self {
-        // The aggregate takes the FIRST alternative's span. With no notion of how far each
-        // alternative got, that is the only deterministic choice available; ranking by furthest
-        // progress (and keeping only the winner) is the open work in
-        // `error-design-vs-chumsky.md` §R1/§R4.
+        // The aggregate takes the FIRST alternative's span: with no record of how far each
+        // alternative got, that is the only deterministic choice available.
         let span = cause.first().map(|c| c.span().clone()).unwrap_or_default();
         ParseError::Alternatives {
             span,
@@ -46,6 +42,7 @@ pub enum LitKind {
 }
 
 impl LitKind {
+    /// The name of this kind as it appears in an error message, such as `"a string literal"`.
     pub fn as_str(self) -> &'static str {
         match self {
             LitKind::Bool => "a boolean literal",
@@ -60,31 +57,12 @@ impl LitKind {
     }
 }
 
-/// What went wrong, as data.
+/// What went wrong, as data: the kind is a variant, the detail is `&'static str` or a small `Copy`
+/// enum, and the span is held by value and rendered only by [`Display`](core::fmt::Display).
 ///
-/// # Why an enum, and why no `String`
-///
-/// The previous shape was `struct ParseError { span: Option<String>, message: String, sub_errors:
-/// Vec<Self> }`, built by `ParseError::new(span, message)` — which rendered **both** strings eagerly,
-/// on every failed alternative, for parses that then succeeded and never read them. Measured, that
-/// was 25–37% of total parse time and ~35–81% of all allocations (`perf-measurements.md` §4, §8).
-///
-/// Here the kind is a variant, the detail is `&'static str` or a small `Copy` enum, and the span is
-/// held **by value** rather than as its `Debug` rendering. Constructing one is ~4 ns against ~118–154
-/// ns, and the type is 32 bytes rather than 72 — which also shrinks every `Result` on the *success*
-/// path, since an error travels by value out of every field parse.
-///
-/// Rendering happens once, in [`Display`](core::fmt::Display), on the error a human actually sees.
-///
-/// # `#[non_exhaustive]`
-///
-/// New kinds can be added without a major version, so downstream `match` needs a `_` arm and cannot
-/// construct variants directly — use the constructors ([`expected`](Self::expected),
-/// [`other`](Self::other), …). [`Other`](Self::Other) is the escape hatch for parsers this enum does
-/// not know about; it is the only variant that allocates, and only on the failure path.
-///
-/// `S` defaults to `()` so an atom without spans needs no annotation. A derived impl uses
-/// `ParseError<<Atom as Spanned>::Span>`.
+/// The enum is `#[non_exhaustive]`, so a downstream `match` needs a `_` arm and variants are built
+/// through the constructors ([`expected`](Self::expected), [`other`](Self::other), …). `S` defaults
+/// to `()`, so an atom that carries no spans needs no annotation.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError<S = ()> {
@@ -106,18 +84,23 @@ pub enum ParseError<S = ()> {
 }
 
 impl<S: Span> ParseError<S> {
+    /// `what` was expected at `span` and something else was found.
     pub fn expected(span: S, what: &'static str) -> Self {
         ParseError::Expected { span, what }
     }
+    /// Input ended at `span` where something was still expected.
     pub fn eof(span: S) -> Self {
         ParseError::Eof { span }
     }
+    /// A delimited group was expected at `span`.
     pub fn group(span: S) -> Self {
         ParseError::Group { span }
     }
+    /// Spacing was wrong at `span`; `want_joint` says whether a separator was forbidden or required.
     pub fn spacing(span: S, want_joint: bool) -> Self {
         ParseError::Spacing { span, want_joint }
     }
+    /// A literal of `kind` was expected at `span`, or was malformed.
     pub fn literal(span: S, kind: LitKind) -> Self {
         ParseError::Literal { span, kind }
     }
@@ -152,13 +135,10 @@ impl<S: Span> std::error::Error for ParseError<S> {}
 
 impl<S: Span> core::fmt::Display for ParseError<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The span is rendered HERE, once, rather than at construction time — that is the whole
-        // point of holding it by value. `()` carries no position, so skip it rather than print "()".
+        // `()` carries no position, so skip it rather than print "()".
         let spanned = core::any::type_name::<S>() != "()";
         match self {
             ParseError::Alternatives { alts, .. } => {
-                // No separate expected-set is needed: the alternatives *are* the set, and joining
-                // them at print time costs nothing on the parse path.
                 f.write_str("expected ")?;
                 for (i, a) in alts.iter().enumerate() {
                     if i > 0 {
@@ -195,9 +175,16 @@ impl<S: Span> From<Infallible> for ParseError<S> {
     }
 }
 
+/// Merges two error types into the one that can carry both.
+///
+/// Reach for it where a parse has two independent failure sources — the item and the separator of a
+/// [`Punctuated`](crate::nested::punctuated::Punctuated), say — and either may be [`Infallible`].
 pub trait UnionWith<Rhs>: Sized {
+    /// The error type both sides are lifted into.
     type Output: Error;
+    /// Lift an error produced by the left-hand side.
     fn use_left(self) -> Self::Output;
+    /// Lift an error produced by the right-hand side.
     fn use_right(rhs: Rhs) -> Self::Output;
 }
 

@@ -113,9 +113,8 @@ impl Parse<proc_macro2::TokenTree> for Char {
     }
 }
 
-/// Shared scaffold for all `Literal`-based `Parse` impls: read one literal token,
-/// hand its string form to `f`; on `None` (or a non-literal token / EOF), restore
-/// the stream and fail — mirrors the existing push-back-on-failure behavior.
+/// Shared scaffold for all `Literal`-based `Parse` impls: read one literal token and hand its
+/// string form to `f`; on `None` (or a non-literal token / EOF), push the token back and fail.
 fn parse_lit<T, S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
     stream: &mut S,
     kind: crate::error::LitKind,
@@ -155,12 +154,10 @@ macro_rules! impl_parse_lit {
 }
 
 /// Shared by StrRaw/ByteStrRaw/CStrRaw after the caller strips the "r"/"br"/"cr" prefix.
-/// NOTE: intentionally reproduces the current hash-counting loop bit-for-bit — the
-/// `while let Some('#') = chars.next()` loop consumes the first non-'#' char (the
-/// opening quote) via the failed match arm, so `remaining` never starts with '"' and
-/// every raw-string literal currently FAILS to parse, at any hash count including zero.
-/// Pre-existing latent bug, identical in all three impls today (tests tolerate it via
-/// `if let Ok`); this fold preserves it — do NOT "fix" it while applying this design.
+///
+/// KNOWN BUG: the `while let Some('#')` loop also consumes the first non-'#' char (the opening
+/// quote) via its failed match arm, so `remaining` never starts with '"' and every raw-string
+/// literal fails to parse, at any hash count. Tests tolerate this via `if let Ok`.
 fn parse_raw(rest: &str) -> Option<(String, usize)> {
     let mut hash_count = 0;
     let mut chars = rest.chars();
@@ -234,7 +231,7 @@ impl_parse_lit!(Integer, crate::error::LitKind::Int, |s: &str| {
                     suffix: Some((*suffix).to_string()),
                 });
             }
-            // no early return on a failed suffix match — the original loop keeps trying
+            // no early return on a failed suffix match — keep trying the other suffixes
         }
     }
     (s.chars()

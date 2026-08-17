@@ -1,3 +1,13 @@
+//! Type-level symbols: keywords, identifiers and punctuation encoded as zero-sized types.
+//!
+//! Use [`Symbol!`](macro@crate::symbol::Symbol) to name one, [`Token!`](macro@crate::symbol::Token)
+//! to pair it with a span, and [`chars::Char!`](macro@crate::symbol::chars::Char) for a single
+//! character.
+
+/// One zero-sized type per source character: `_a`, `_Z`, `_0`, `Star`, `Semi`, and so on.
+///
+/// These are the building blocks a [`Symbol!`](macro@crate::symbol::Symbol) expands to; name one
+/// directly with the [`Char!`](macro@crate::symbol::chars::Char) macro.
 pub mod chars {
     /// Marker that every single-character symbol parses from the atom type `Atom`.
     ///
@@ -138,12 +148,7 @@ mod imp {
     pub enum _Symbol<T> {
         Symbol,
 
-        /// Unreachable phantom variant for type parameter storage.
-        ///
-        /// This variant cannot be constructed due to the [`Infallible`] field
-        /// and exists only to maintain the type parameter `T` in the enum definition.
-        ///
-        /// [`Infallible`]: core::convert::Infallible
+        /// Holds `T`; uninhabited via the `Infallible` field, so it can never be constructed.
         _Phantom(core::marker::PhantomData<T>, core::convert::Infallible),
     }
 

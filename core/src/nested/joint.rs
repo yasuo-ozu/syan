@@ -4,6 +4,9 @@ use crate::span::Spanned;
 use crate::tuple::PopHeadRef;
 use newer_type::{implement, traits};
 
+/// Parses each element of `Tuple` in order, rejecting the input if the source puts a separator
+/// between two of them. Use it for multi-character operators like `->` or `::`, which must be written
+/// without intervening space.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[implement(traits::Debug)]
 pub struct Joint<Tuple>(pub Tuple);

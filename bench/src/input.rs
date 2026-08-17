@@ -36,8 +36,7 @@ pub fn tree(depth: usize) -> String {
     format!("( {half} + {half} )")
 }
 
-/// Inputs that FAIL, at a known distance in. Error-path cost is the axis the
-/// error-handling work in `error-design-vs-chumsky.md` cares about.
+/// Inputs that FAIL, at a known distance in. Error-path cost is its own axis.
 pub fn bad_at(n: usize) -> String {
     let mut s = flat(n);
     s.push_str(" + &");
