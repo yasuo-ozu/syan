@@ -25,9 +25,9 @@ mod parse_and_unparse {
 
     #[recurse(structural)]
     mod ast {
+        use syan::literal::Integer;
         use syan::nested::group::GroupBrace;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum Expr<S> {
@@ -72,9 +72,9 @@ mod two_type_cycle {
 
     #[recurse(structural)]
     mod ast {
+        use syan::literal::Integer;
         use syan::nested::group::GroupBrace;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
         use syan::symbol::Token;
 
         #[derive(Parse, Unparse)]

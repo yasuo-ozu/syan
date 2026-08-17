@@ -21,7 +21,7 @@ struct W1<S, T>
 where
     T: Clone,
 {
-    a: syan::source::proc_macro2::literal::Integer,
+    a: syan::literal::Integer,
     _p: core::marker::PhantomData<(S, T)>,
 }
 

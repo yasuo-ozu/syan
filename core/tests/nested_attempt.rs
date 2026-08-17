@@ -5,9 +5,9 @@
 //! `Parse::attempt()` (and its field-type form `Attempt<T>`) parses atomically: on failure it **rewinds**
 //! the stream (unlike a plain `T`, which leaves it half-consumed) while still **propagating the error**
 //! (unlike `Option<T>`, which becomes `None`).
+use syan::literal::{Bool, Integer};
 use syan::nested::Attempt;
 use syan::parse::{IntoParseStream, Parse, Unparse};
-use syan::source::proc_macro2::literal::{Bool, Integer};
 use template_quote::quote;
 
 #[test]

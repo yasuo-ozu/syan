@@ -9,15 +9,15 @@
 
 // Natural recursive types + Parse over mutually-recursive AST cycles.
 mod basic {
+    use syan::literal::Integer;
     use syan::parse::{recurse, Parse};
-    use syan::source::proc_macro2::literal::Integer;
     use template_quote::quote;
 
     #[recurse]
     mod minimal {
+        use syan::literal::Integer;
         use syan::nested::group::GroupBrace;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
         use syan::symbol::Token;
 
         #[derive(Parse, Unparse)]
@@ -164,7 +164,7 @@ mod basic {
     #[test]
     fn test_multi_param_parse_lit() {
         use multi_param::Expr;
-        use syan::source::proc_macro2::literal::Integer;
+        use syan::literal::Integer;
 
         let tokens = template_quote::quote! { 42 };
         let e: Expr<_, Integer> = Parse::parse(tokens).unwrap();
@@ -177,7 +177,7 @@ mod basic {
     #[test]
     fn test_multi_param_parse_block() {
         use multi_param::Expr;
-        use syan::source::proc_macro2::literal::Integer;
+        use syan::literal::Integer;
 
         let tokens = template_quote::quote! { { 1 } };
         let e: Expr<_, Integer> = Parse::parse(tokens).unwrap();
@@ -195,9 +195,9 @@ mod fixes {
 
     #[recurse]
     mod generic_limit1 {
+        use syan::literal::Integer;
         use syan::nested::group::GroupBrace;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum Expr<S> {
@@ -213,8 +213,8 @@ mod fixes {
     // Non-generic cycle: no type parameters to thread anywhere; must still compile.
     #[recurse]
     mod nongeneric_limit1 {
+        use syan::literal::Integer;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum E {
@@ -225,7 +225,7 @@ mod fixes {
 
     #[test]
     fn generic_and_non_generic_cycles_compile() {
-        use syan::source::proc_macro2::literal::Integer;
+        use syan::literal::Integer;
         // Constructing a value of each is the check: both shapes must survive expansion.
         let _e: generic_limit1::Expr<()> = generic_limit1::Expr::Lit(Integer {
             value: "1".to_string(),
@@ -320,8 +320,8 @@ mod where_clause {
     #[recurse]
     mod param_bound {
         use core::marker::PhantomData;
+        use syan::literal::Integer;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum Expr<S>
@@ -347,8 +347,8 @@ mod where_clause {
     #[recurse]
     mod self_ref {
         use core::marker::PhantomData;
+        use syan::literal::Integer;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum Expr<S>
@@ -418,9 +418,9 @@ mod problems {
     // span; the module still compiles.
     #[recurse]
     mod non_conventional_span_param {
+        use syan::literal::Integer;
         use syan::nested::group::GroupBrace;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum Value<Atom> {
@@ -454,8 +454,8 @@ mod no_root {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
+        use syan::literal::Integer;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum A<S> {

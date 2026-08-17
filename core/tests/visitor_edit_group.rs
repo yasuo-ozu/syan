@@ -7,9 +7,9 @@
 //! survive an `Unparse` round-trip. Exercises `#[group]` + `#[seq]`/`#[opt]` together.
 #![allow(dead_code)]
 
+use syan::literal::Integer;
 use syan::nested::group::{GroupBrace, GroupParen};
 use syan::parse::{Parse, Unparse};
-use syan::source::proc_macro2::literal::Integer;
 use syan::symbol::Token;
 use syan::visit::{Ast, OptView, SeqView};
 use template_quote::quote;
@@ -142,9 +142,9 @@ mod rec {
 
     #[recurse]
     mod ast {
+        use syan::literal::Integer;
         use syan::nested::group::GroupBrace;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
         use syan::visit::Ast;
         use type_macro_derive_tricks::macro_derive;
 

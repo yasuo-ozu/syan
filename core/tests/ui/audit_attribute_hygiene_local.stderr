@@ -1,4 +1,4 @@
-error[E0614]: type `syan::source::proc_macro2::literal::Integer` cannot be dereferenced
+error[E0614]: type `syan::literal::Integer` cannot be dereferenced
   --> tests/ui/audit_attribute_hygiene_local.rs:10:10
    |
 10 | #[derive(Parse, Unparse)]

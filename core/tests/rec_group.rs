@@ -13,7 +13,7 @@ struct NestedContainer<S> {
     // Level 1: Bracket group [...]
     pub bracket_group: syan::nested::group::GroupBracket<(), S>,
     #[group(self.bracket_group)]
-    pub outer_content: Punctuated<syan::source::proc_macro2::literal::Integer, Token![S => ,]>,
+    pub outer_content: Punctuated<syan::literal::Integer, Token![S => ,]>,
     #[group(self.bracket_group)]
     pub comma_token: Token![S => ,],
 
@@ -21,7 +21,7 @@ struct NestedContainer<S> {
     #[group(self.bracket_group)]
     pub paren_group: syan::nested::group::GroupParen<(), S>,
     #[group(self.paren_group)]
-    pub middle_content: Punctuated<syan::source::proc_macro2::literal::Integer, Token![S => ;]>,
+    pub middle_content: Punctuated<syan::literal::Integer, Token![S => ;]>,
     #[group(self.paren_group)]
     pub comma_token_2: Token![S => ,],
 
@@ -29,7 +29,7 @@ struct NestedContainer<S> {
     #[group(self.paren_group)]
     pub brace_group: syan::nested::group::GroupBrace<(), S>,
     #[group(self.brace_group)]
-    pub inner_content: Punctuated<syan::source::proc_macro2::literal::Integer, Token![S => ,]>,
+    pub inner_content: Punctuated<syan::literal::Integer, Token![S => ,]>,
     #[group(self.brace_group)]
     pub final_element: Option<Token![S => !]>,
 }
@@ -69,7 +69,7 @@ fn test_case_4_empty_groups() {
 struct SimpleContainer<S> {
     pub bracket_group: syan::nested::group::GroupBracket<(), S>,
     #[group(self.bracket_group)]
-    pub content: Punctuated<syan::source::proc_macro2::literal::Integer, Token![S => ,]>,
+    pub content: Punctuated<syan::literal::Integer, Token![S => ,]>,
 }
 
 #[test]

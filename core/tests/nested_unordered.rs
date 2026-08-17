@@ -4,9 +4,9 @@
 
 //! `Unordered<T, U>` parses `T` and `U` in either order, keeps both, and unparses back in the order it
 //! saw them.
+use syan::literal::{Bool, Integer};
 use syan::nested::Unordered;
 use syan::parse::{Parse, Unparse};
-use syan::source::proc_macro2::literal::{Bool, Integer};
 use syan::span::{Spanned, WithSpan};
 use template_quote::quote;
 

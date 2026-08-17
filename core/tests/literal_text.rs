@@ -1,9 +1,7 @@
 //! `Integer` parsed from text (`char`) and bytes (`u8`), not just from a `TokenTree`.
 
-#![cfg(feature = "proc_macro2")]
-
+use syan::literal::Integer;
 use syan::parse::Parse;
-use syan::source::proc_macro2::literal::Integer;
 use syan::symbol::Token;
 
 type Text = syan::source::string::Span;

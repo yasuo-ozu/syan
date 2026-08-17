@@ -77,7 +77,7 @@ fn eof_is_its_own_kind() {
 /// The 16 sites that used to say `"parse failed"` now carry a `LitKind`.
 #[test]
 fn a_literal_failure_names_the_literal_kind() {
-    use syan::source::proc_macro2::literal::Integer;
+    use syan::literal::Integer;
     let ts = "oops".parse::<proc_macro2::TokenStream>().unwrap();
     let mut stream = syan::parse::IntoParseStream::into_parse_stream(ts);
     let e = Integer::parse_stream(&mut stream).unwrap_err();

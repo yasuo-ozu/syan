@@ -1,10 +1,12 @@
 //! `Parse` for the literal types over *text* atoms, `char` and `u8`.
 //!
-//! The `TokenTree` impls in [`parse_impl`](super::parse_impl) validate a literal the lexer has
-//! already delimited; text arrives undelimited, so these scan it an atom at a time. As on a token
-//! stream, a leading `-` is punctuation rather than part of the literal.
+//! The `TokenTree` impls validate a literal the lexer has already delimited; text arrives
+//! undelimited, so these scan it an atom at a time. As on a token stream, a leading `-` is
+//! punctuation rather than part of the literal.
 
-use super::*;
+use super::Integer;
+use crate::error::ParseError;
+use crate::parse::Parse;
 use crate::span::WithSpan;
 
 /// Longest first, so `u128` is not mistaken for `u1` followed by `28`.

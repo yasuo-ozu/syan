@@ -44,7 +44,7 @@ macro_rules! engine {
             mod g {
                 use syan::nested::group::GroupParen;
                 use syan::parse::Parse;
-                use syan::source::proc_macro2::literal::Integer;
+                use syan::literal::Integer;
                 use syan::source::proc_macro2::Span;
 
                 #[derive(Parse)]

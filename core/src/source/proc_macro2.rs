@@ -9,8 +9,6 @@ use crate::parse::{unparse::Emitter, Parse, ParseStream, Tape, Unparse};
 use crate::span::WithSpan;
 use crate::symbol::Symbol;
 
-pub mod literal;
-
 /// Wrapper around proc_macro2::Span that implements syan's Span trait
 #[derive(Clone, Debug, Default)]
 pub struct Span(Option<(proc_macro2::Span, proc_macro2::Span)>);

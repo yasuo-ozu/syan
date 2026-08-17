@@ -6,8 +6,8 @@
 //! prefix is parsed ONCE up front, not re-parsed inside each variant's backtracking attempt.
 #![allow(dead_code)] // variants are matched, not field-read
 use std::sync::atomic::{AtomicUsize, Ordering};
+use syan::literal::{Bool, Integer};
 use syan::parse::Parse;
-use syan::source::proc_macro2::literal::{Bool, Integer};
 use template_quote::quote;
 
 static PREFIX_PARSES: AtomicUsize = AtomicUsize::new(0);
@@ -99,8 +99,8 @@ fn named_field_prefix() {
 #[syan::parse::recurse]
 mod rec {
     use core::marker::PhantomData;
+    use syan::literal::{Bool, Integer};
     use syan::parse::{Parse, Unparse};
-    use syan::source::proc_macro2::literal::{Bool, Integer};
 
     #[derive(Parse, Unparse)]
     pub enum Expr<S> {

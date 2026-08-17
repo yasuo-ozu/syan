@@ -12,7 +12,7 @@ use syan::parse::recurse;
 #[recurse]
 mod m {
     use syan::parse::{Parse, Unparse};
-    use syan::source::proc_macro2::literal::Integer;
+    use syan::literal::Integer;
 
     #[derive(Parse, Unparse)]
     pub(crate) enum Expr<S> {

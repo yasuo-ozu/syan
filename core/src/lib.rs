@@ -12,6 +12,7 @@ pub use decycle as __decycle;
 pub mod decycle_traits;
 /// Parse failures: `ParseError` and the traits around it.
 pub mod error;
+pub mod literal;
 /// Combinator types you put in a field: groups, punctuated lists, and friends.
 pub mod nested;
 /// The `Parse` and `Unparse` traits, and the token stream.

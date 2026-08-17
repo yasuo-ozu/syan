@@ -38,9 +38,8 @@ the last combinator returned; a named tree means writing one out and mapping ont
 from the tree instead. **The field order is the grammar:**
 
 ```rust
-# #[cfg(feature = "proc_macro2")] {
 # use syan::parse::Parse;
-# use syan::source::proc_macro2::literal::Integer;
+# use syan::literal::Integer;
 # use syan::symbol::Token;
 #[derive(Parse)]
 struct Assign<S, V> {
@@ -55,7 +54,6 @@ assert_eq!(a.value.value, "1");
 // Each `Token!` carries the span of what it matched, in the source's own coordinates.
 assert_eq!((a.name.span.line, a.name.span.col, a.name.span.loc), (1, 1, 0));
 assert_eq!((a.eq.span.line, a.eq.span.col, a.eq.span.loc), (1, 3, 2));
-# }
 ```
 
 You get a named struct, not a tuple, and spans come with it. The span is a type parameter, so one
@@ -86,11 +84,10 @@ A group takes two fields: one for the delimiters, and one marked `#[group(..)]` 
 what is *inside* them.
 
 ```rust
-# #[cfg(feature = "proc_macro2")] {
 # use syan::nested::group::GroupParen;
 # use syan::nested::Punctuated;
 # use syan::parse::Parse;
-# use syan::source::proc_macro2::literal::Integer;
+# use syan::literal::Integer;
 # use syan::symbol::Token;
 #[derive(Parse)]
 struct Call<S> {
@@ -102,7 +99,6 @@ struct Call<S> {
 
 let call: Call<_> = Parse::parse("f( 1, 2, 3 )").unwrap();
 assert_eq!(call.args.len(), 3);
-# }
 ```
 
 The `()` is the holder's own content type. It is empty because the content lives in `args` instead.
@@ -114,12 +110,11 @@ Types that refer to each other need `#[recurse]` on the enclosing module. Withou
 bounds are mutually dependent, so none can be proved and nothing compiles.
 
 ```rust
-# #[cfg(feature = "proc_macro2")] {
 # use syan::parse::{recurse, Parse};
 #[recurse]
 mod ast {
     use syan::parse::Parse;
-    use syan::source::proc_macro2::literal::Integer;
+    use syan::literal::Integer;
     use syan::symbol::Token;
 
     #[derive(Parse)]
@@ -133,7 +128,6 @@ mod ast {
 }
 
 let e: ast::Expr<_> = Parse::parse("- - 1").unwrap();
-# }
 ```
 
 Alternatives are tried in order, and `Neg` recurses through the `Box`. Depth is bounded only by the
@@ -218,7 +212,7 @@ emits its result: a `TokenStream` is an `Emitter`, so a tree writes straight int
 ```rust
 # #[cfg(feature = "proc_macro2")] {
 # use syan::parse::{Parse, Unparse};
-# use syan::source::proc_macro2::literal::Integer;
+# use syan::literal::Integer;
 # use syan::symbol::Token;
 #[derive(Parse, Unparse)]
 struct Assign<S, V> {

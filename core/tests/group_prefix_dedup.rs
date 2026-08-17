@@ -17,9 +17,9 @@
 //! The fix walks the prefix/suffix split point back out of any group run, so at worst the enum falls
 //! back to the per-variant scheme.
 
+use syan::literal::Integer;
 use syan::nested::group::GroupParen;
 use syan::parse::{Parse, Unparse};
-use syan::source::proc_macro2::literal::Integer;
 use syan::symbol::Token;
 use template_quote::quote;
 

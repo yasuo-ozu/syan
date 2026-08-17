@@ -3,8 +3,8 @@
 #![cfg(feature = "proc_macro2")]
 
 use proc_macro2::{TokenStream, TokenTree};
+use syan::literal::*;
 use syan::parse::{Parse, Unparse};
-use syan::source::proc_macro2::literal::*;
 use template_quote::quote;
 
 fn parse_single<T: Parse<TokenTree>>(tokens: TokenStream) -> Result<T, T::Error> {

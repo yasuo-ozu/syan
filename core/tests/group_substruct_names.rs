@@ -20,9 +20,9 @@
 //! the shared prefix loses the suffix fields that name it — `Cannot find member g in struct E`). That
 //! is not what this file is about.
 
+use syan::literal::Integer;
 use syan::nested::group::GroupParen;
 use syan::parse::{Parse, Unparse};
-use syan::source::proc_macro2::literal::Integer;
 use syan::symbol::Token;
 use template_quote::quote;
 

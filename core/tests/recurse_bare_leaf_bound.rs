@@ -17,8 +17,8 @@ use template_quote::quote;
 #[syan::parse::recurse]
 mod ast {
     use core::marker::PhantomData;
+    use syan::literal::Integer;
     use syan::parse::{Parse, Unparse};
-    use syan::source::proc_macro2::literal::Integer;
 
     #[derive(Parse, Unparse)]
     pub enum Expr<S>

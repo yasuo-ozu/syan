@@ -2,9 +2,9 @@
 // dependency that provides them.
 #![cfg(feature = "proc_macro2")]
 
+use syan::literal::Integer;
 use syan::nested::group::{GroupBrace, GroupParen};
 use syan::parse::{Parse, Unparse};
-use syan::source::proc_macro2::literal::Integer;
 use syan::symbol::Token;
 
 type DefaultExpr<S> = Expr<S, Expr<S, Expr<S, ExpressionTerm>>>;

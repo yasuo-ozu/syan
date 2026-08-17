@@ -14,8 +14,8 @@ mod unparse_spanned {
     #[recurse]
     mod pu {
         use core::marker::PhantomData;
+        use syan::literal::Integer;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         // A list `1 2 3` → Cons(1, Cons(2, Cons(3, Nil))); group-free, all-`Integer` leaves.
         #[derive(Parse, Unparse)]
@@ -58,7 +58,7 @@ mod unparse_spanned {
     #[test]
     fn unparse_unbounded_depth() {
         use pu::Expr;
-        use syan::source::proc_macro2::literal::Integer;
+        use syan::literal::Integer;
         // `Unparse` has no backtracking and re-enters un-ranked, so a depth-5000 list unparses.
         let mut e: Expr<()> = Expr::Nil(PhantomData);
         for _ in 0..5000 {
@@ -117,8 +117,8 @@ mod unparse_spanned {
     #[recurse]
     mod mt {
         use core::marker::PhantomData;
+        use syan::literal::Integer;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum Expr<S> {
@@ -137,7 +137,7 @@ mod unparse_spanned {
     fn multi_type_unparse_direct_unbounded() {
         use core::marker::PhantomData;
         use mt::{Expr, Stmt};
-        use syan::source::proc_macro2::literal::Integer;
+        use syan::literal::Integer;
         let tree: Expr<()> = Expr::Wrap(Box::new(Stmt::Wrap(Box::new(Expr::Lit(
             Integer {
                 value: "7".into(),
@@ -215,9 +215,9 @@ mod group_ful {
 
     #[recurse]
     mod up {
+        use syan::literal::Integer;
         use syan::nested::group::GroupBrace;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         // A brace-delimited list of integer literals, recursive in `inner`.
         #[derive(Parse, Unparse)]
@@ -326,9 +326,9 @@ mod group_ful {
     // forcing the outer `dup()` to rewind the entire re-entered parse before the second variant retries.
     #[recurse]
     mod df {
+        use syan::literal::Integer;
         use syan::nested::group::GroupParen;
         use syan::parse::{Parse, Unparse};
-        use syan::source::proc_macro2::literal::Integer;
 
         #[derive(Parse, Unparse)]
         pub enum Expr<S> {

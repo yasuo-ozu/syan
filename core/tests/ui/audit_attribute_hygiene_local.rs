@@ -5,7 +5,7 @@
 // the next field calls `parse(&mut <value>)` -> cryptic `&mut Integer: ParseStream` (E0277). Unlike
 // the visitor path (which fresh-names its helpers), these derive locals make no hygiene effort.
 use syan::parse::{Parse, Unparse};
-use syan::source::proc_macro2::literal::Integer;
+use syan::literal::Integer;
 
 #[derive(Parse, Unparse)]
 pub struct Collide {

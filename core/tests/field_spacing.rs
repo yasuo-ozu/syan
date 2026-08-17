@@ -88,15 +88,14 @@ mod over_tokens {
 
 /// A group and a `Punctuated` skip separators between their own parts, as a struct does between
 /// fields. `Vec<T>` is plain repetition and has no such boundary.
-#[cfg(feature = "proc_macro2")]
 mod combinator_boundaries {
     // `paren` is read by `#[group(self.paren)]`, which clippy cannot see.
     #![allow(dead_code, clippy::type_complexity)]
 
     use super::*;
+    use syan::literal::Integer;
     use syan::nested::group::GroupParen;
     use syan::nested::Punctuated;
-    use syan::source::proc_macro2::literal::Integer;
 
     #[derive(Parse)]
     struct Call<S> {

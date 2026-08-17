@@ -90,8 +90,8 @@ impl GroupUnparse<TokenTree> for Angle {
 
 #[syan::parse::recurse]
 mod g {
+    use syan::literal::Integer;
     use syan::parse::{Parse, Unparse};
-    use syan::source::proc_macro2::literal::Integer;
 
     // `inner` is a cycle member reached ONLY through the `angle` substruct.
     #[derive(Parse, Unparse)]
@@ -118,8 +118,8 @@ mod g {
 /// it cannot weaken anything.
 #[syan::parse::recurse]
 mod m {
+    use syan::literal::Integer;
     use syan::parse::{Parse, Unparse};
-    use syan::source::proc_macro2::literal::Integer;
 
     #[derive(Parse, Unparse)]
     pub enum PatBot {

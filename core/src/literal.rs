@@ -4,10 +4,14 @@
 //! [`ByteChar`], [`Str`], [`ByteStr`], [`CStr`], or one of the `Raw` variants. The string forms
 //! store their contents exactly as written, escapes unresolved; the character forms resolve theirs.
 
-use super::Span;
+#[cfg(feature = "proc_macro2")]
 use crate::error::ParseError;
+#[cfg(feature = "proc_macro2")]
 use crate::parse::unparse::Emitter;
+#[cfg(feature = "proc_macro2")]
 use crate::parse::{Parse, Unparse};
+#[cfg(feature = "proc_macro2")]
+use crate::source::proc_macro2::Span;
 
 /// A boolean literal, `true` or `false`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -81,10 +85,12 @@ pub struct CStrRaw {
 }
 
 mod display_impl;
+#[cfg(feature = "proc_macro2")]
 mod parse_impl;
 mod parse_text_impl;
+#[cfg(feature = "proc_macro2")]
 mod unparse_impl;
-#[cfg(test)]
+#[cfg(all(test, feature = "proc_macro2"))]
 mod tests {
     //! Note: some invalid inputs fail at tokenization rather than at parsing, and the raw forms
     //! have limited support (see `parse_raw` in `parse_impl`).
