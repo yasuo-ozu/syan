@@ -105,7 +105,9 @@ impl_for_tup!(
 
 impl<Atom: crate::span::Spanned> Parse<Atom> for () {
     type Error = core::convert::Infallible;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(_: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        _: &mut __S,
+    ) -> Result<Self, Self::Error> {
         Ok(())
     }
 }
@@ -121,7 +123,9 @@ where
     T: Parse<Atom>,
 {
     type Error = T::Error;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         Ok((T::parse_stream(&mut *stream)?,))
     }
 }

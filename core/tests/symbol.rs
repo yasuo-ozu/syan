@@ -5,7 +5,10 @@ fn test_symbol_idents() {
     assert_eq!(&<Symbol![hello]>::default().to_string(), "hello");
     assert_eq!(&<Symbol![x]>::default().to_string(), "x");
     assert_eq!(&<Symbol![test_123]>::default().to_string(), "test_123");
-    assert_eq!(&<Symbol![hello_world]>::default().to_string(), "hello_world");
+    assert_eq!(
+        &<Symbol![hello_world]>::default().to_string(),
+        "hello_world"
+    );
     assert_eq!(&<Symbol![MyStruct]>::default().to_string(), "MyStruct");
 }
 

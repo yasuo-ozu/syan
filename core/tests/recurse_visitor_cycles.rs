@@ -71,7 +71,10 @@ mod generics {
         let e: ct::Expr<(), 2> = ct::Expr::Nest(Box::new(ct::Expr::Lit(PhantomData)));
         let mut c = Counter::default();
         v_ct::Visit::visit_expr(&mut c, &e);
-        assert_eq!(c.0, 2, "const param N threads through the depth-generic visitor");
+        assert_eq!(
+            c.0, 2,
+            "const param N threads through the depth-generic visitor"
+        );
     }
 
     // Const params are omitted from the terminator's `PhantomData` (unused const params don't trigger
@@ -106,7 +109,10 @@ mod generics {
             ct_char::Expr::Nest(Box::new(ct_char::Expr::Lit(PhantomData)));
         let mut c = Counter::default();
         v_ct_char::Visit::visit_expr(&mut c, &e);
-        assert_eq!(c.0, 2, "const C: char threads through; terminator no longer needs `[(); N]`");
+        assert_eq!(
+            c.0, 2,
+            "const C: char threads through; terminator no longer needs `[(); N]`"
+        );
     }
 
     #[recurse]
@@ -193,13 +199,13 @@ mod generics {
 
     #[test]
     fn heterogeneous_generics_visitor() {
-        let e: het::Expr<()> =
-            het::Expr::Stmt(Box::new(het::Stmt::Back(Box::new(het::Expr::Lit(PhantomData)))));
+        let e: het::Expr<()> = het::Expr::Stmt(Box::new(het::Stmt::Back(Box::new(
+            het::Expr::Lit(PhantomData),
+        ))));
         let mut c = Counter::default();
         v_het::Visit::visit_expr(&mut c, &e);
         assert_eq!(c.0, 3, "Expr + Stmt (extra param T=u8) + inner Expr");
     }
-
 }
 
 // Several *independent* cycles (separate SCCs) in one `#[recurse]` module, visited via one `visitor!`.
@@ -313,11 +319,14 @@ mod multiroot {
     #[test]
     fn each_root_keeps_its_own_depth() {
         // A(outer) -> ToB(B) -> ToA(A) -> Lit.
-        let v: ast::A<()> =
-            ast::A::ToB(Box::new(ast::B::ToA(Box::new(ast::A::Lit(PhantomData)))));
+        let v: ast::A<()> = ast::A::ToB(Box::new(ast::B::ToA(Box::new(ast::A::Lit(PhantomData)))));
         let mut c = Counter::default();
         v_ast::Visit::visit_a(&mut c, &v);
-        assert_eq!((c.a, c.b), (2, 1), "two A nodes (outer + inner) and one B node");
+        assert_eq!(
+            (c.a, c.b),
+            (2, 1),
+            "two A nodes (outer + inner) and one B node"
+        );
     }
 
     #[test]

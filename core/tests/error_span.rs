@@ -31,7 +31,13 @@ fn a_span_is_kept_by_value() {
     // No rendering and no allocation: the span is the span.
     assert_eq!(e.span().loc, 42);
     assert_eq!(e.span().line, 3);
-    assert!(matches!(e, ParseError::Expected { what: "a digit", .. }));
+    assert!(matches!(
+        e,
+        ParseError::Expected {
+            what: "a digit",
+            ..
+        }
+    ));
     let text = e.to_string();
     assert!(text.contains("a digit") && text.contains("42"), "{text}");
 }
@@ -114,7 +120,10 @@ fn an_aggregate_renders_its_alternatives() {
     assert_eq!(agg.alternatives().len(), 2);
     let text = agg.to_string();
     assert!(text.contains("`x`") && text.contains("`y`"), "{text}");
-    assert!(text.contains(", or "), "alternatives should read as a list: {text}");
+    assert!(
+        text.contains(", or "),
+        "alternatives should read as a list: {text}"
+    );
     // The aggregate takes the first alternative's span — see the note on `Error::from_cause`.
     assert_eq!(agg.span().loc, 5);
 }

@@ -184,7 +184,9 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
             if user_types.contains(&seg.ident.to_string()) {
                 return Some(Peeled {
                     conts: Vec::new(),
-                    head: Head::Path { head: seg.ident.clone() },
+                    head: Head::Path {
+                        head: seg.ident.clone(),
+                    },
                     shared_ref: false,
                 });
             }
@@ -257,4 +259,3 @@ pub(crate) fn method_ident_m(head: &Ident, mutable: bool) -> Ident {
         Span::call_site(),
     )
 }
-

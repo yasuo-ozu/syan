@@ -114,9 +114,11 @@ fn has_concrete_fill(targets: &[&DoneType], shared: &HashSet<String>) -> bool {
         }
         out
     };
-    targets
-        .iter()
-        .any(|d| fields_of(&d.def).iter().any(|t| ty_fills(t, &params_of, shared)))
+    targets.iter().any(|d| {
+        fields_of(&d.def)
+            .iter()
+            .any(|t| ty_fills(t, &params_of, shared))
+    })
 }
 
 fn generate_module(st: &BuildInput) -> TokenStream {
@@ -162,7 +164,10 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .filter(|d| item_ident(&d.def).is_some_and(|id| visited.contains(&id.to_string())))
         .collect();
     if targets.is_empty() {
-        let at = st.visited.first().map_or_else(Span::call_site, |p| last_ident(p).span());
+        let at = st
+            .visited
+            .first()
+            .map_or_else(Span::call_site, |p| last_ident(p).span());
         abort!(at, "no AST definitions resolved for the visitor");
     }
 
@@ -196,8 +201,11 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     // `where`-bounded one (`S: Bound`) can't: applied to items over the union, a type lacking `S` carries
     // an undischargeable `S: Bound`. So a bounded unshared param, like a concrete-filled one, must become
     // a per-method generic with the trait keyed on the shared subset (method-mode, below).
-    let unshared_names: HashSet<String> =
-        union_params.iter().map(param_name).filter(|n| !shared_names.contains(n)).collect();
+    let unshared_names: HashSet<String> = union_params
+        .iter()
+        .map(param_name)
+        .filter(|n| !shared_names.contains(n))
+        .collect();
     let has_bounded_unshared = targets.iter().any(|d| {
         item_where_preds(&d.def)
             .iter()
@@ -225,10 +233,14 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     };
     sort_lifetimes_first(&mut g_params);
     let struct_only = method_mode;
-    let by_name: HashMap<String, TokenStream> =
-        union_params.iter().map(|p| (param_name(p), param_use(p))).collect();
-    let by_name_param: HashMap<String, GenericParam> =
-        g_params.iter().map(|p| (param_name(p), p.clone())).collect();
+    let by_name: HashMap<String, TokenStream> = union_params
+        .iter()
+        .map(|p| (param_name(p), param_use(p)))
+        .collect();
+    let by_name_param: HashMap<String, GenericParam> = g_params
+        .iter()
+        .map(|p| (param_name(p), p.clone()))
+        .collect();
     let base_args: Vec<TokenStream> = st
         .base_generics
         .iter()
@@ -372,7 +384,11 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     // A `#[seq]`/`#[opt]` field can only view a type this visitor *targets* (its own `visit_*_seq`/`_opt`
     // is emitted only for `visited` types). A marker pointing at an **inherited** base type would make the
     // descent call a `visit_<t>_seq` that lives nowhere — a cryptic E0599 in generated code. Fail clean.
-    if let Some(t) = seq_used.iter().chain(opt_used.iter()).find(|t| !visited.contains(*t)) {
+    if let Some(t) = seq_used
+        .iter()
+        .chain(opt_used.iter())
+        .find(|t| !visited.contains(*t))
+    {
         abort!(
             Span::call_site(),
             "a `#[seq]`/`#[opt]` field views the inherited type `{}`; container-edit views are not \
@@ -385,8 +401,19 @@ fn generate_module(st: &BuildInput) -> TokenStream {
 
     let [shared, mutable] = [false, true].map(|m| {
         gen_side(
-            m, &vtypes, &g_params, &g_args, &g_def, &g_use, &base_g_use, &ancestors, &st.base,
-            &union_where, struct_only, &seq_used, &opt_used,
+            m,
+            &vtypes,
+            &g_params,
+            &g_args,
+            &g_def,
+            &g_use,
+            &base_g_use,
+            &ancestors,
+            &st.base,
+            &union_where,
+            struct_only,
+            &seq_used,
+            &opt_used,
         )
     });
 
@@ -417,4 +444,3 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         #mutable
     }
 }
-

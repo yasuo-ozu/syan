@@ -60,7 +60,9 @@ impl<S> v::VisitMut<S> for Editor {
 fn round_trip(doc: &Doc<Sp>) -> String {
     let mut out = Vec::<proc_macro2::TokenTree>::new();
     doc.unparse(&mut (&mut out)).unwrap();
-    out.into_iter().collect::<proc_macro2::TokenStream>().to_string()
+    out.into_iter()
+        .collect::<proc_macro2::TokenStream>()
+        .to_string()
 }
 
 fn vals(doc: &Doc<Sp>) -> Vec<&str> {
@@ -75,15 +77,34 @@ fn edit_grouped_seq_and_opt() {
 
     doc.visit_mut(&mut Editor);
 
-    assert_eq!(vals(&doc), vec!["1", "2"], "`0 ;` dropped from the #[group] #[seq] Vec");
-    assert!(doc.tail.is_none(), "the #[group] #[opt] tail (`7 ;`) was cleared via OptView");
+    assert_eq!(
+        vals(&doc),
+        vec!["1", "2"],
+        "`0 ;` dropped from the #[group] #[seq] Vec"
+    );
+    assert!(
+        doc.tail.is_none(),
+        "the #[group] #[opt] tail (`7 ;`) was cleared via OptView"
+    );
 
     // The brace/paren group delimiters survive the edit + Unparse.
     let s = round_trip(&doc);
-    assert!(s.contains('{') && s.contains('}'), "brace group preserved: {s}");
-    assert!(s.contains('(') && s.contains(')'), "paren group preserved: {s}");
-    assert!(s.contains('1') && s.contains('2'), "kept statements present: {s}");
-    assert!(!s.contains('0') && !s.contains('7'), "dropped/cleared values gone: {s}");
+    assert!(
+        s.contains('{') && s.contains('}'),
+        "brace group preserved: {s}"
+    );
+    assert!(
+        s.contains('(') && s.contains(')'),
+        "paren group preserved: {s}"
+    );
+    assert!(
+        s.contains('1') && s.contains('2'),
+        "kept statements present: {s}"
+    );
+    assert!(
+        !s.contains('0') && !s.contains('7'),
+        "dropped/cleared values gone: {s}"
+    );
 }
 
 #[test]
@@ -91,17 +112,24 @@ fn tail_kept_when_not_seven() {
     let mut doc: Doc<Sp> = Parse::parse(quote!( { 5 ; } ( 3 ; ) )).unwrap();
     doc.visit_mut(&mut Editor);
     assert_eq!(vals(&doc), vec!["5"]);
-    assert_eq!(doc.tail.as_ref().map(|s| s.n.value.as_str()), Some("3"), "a non-`7` tail is kept");
+    assert_eq!(
+        doc.tail.as_ref().map(|s| s.n.value.as_str()),
+        Some("3"),
+        "a non-`7` tail is kept"
+    );
 }
 
 #[test]
 fn empty_groups_edit_is_noop() {
-    let mut doc: Doc<Sp> = Parse::parse(quote!( { } ( ) )).unwrap();
+    let mut doc: Doc<Sp> = Parse::parse(quote!({}())).unwrap();
     assert!(doc.stmts.is_empty() && doc.tail.is_none());
     doc.visit_mut(&mut Editor);
     assert!(doc.stmts.is_empty() && doc.tail.is_none());
     let s = round_trip(&doc);
-    assert!(s.contains('{') && s.contains('}') && s.contains('(') && s.contains(')'), "{s}");
+    assert!(
+        s.contains('{') && s.contains('}') && s.contains('(') && s.contains(')'),
+        "{s}"
+    );
 }
 
 // ── group + `#[seq]` inside a `#[recurse]` cycle: a `{ … }` block holds a `#[seq]` Vec of the cycle
@@ -160,6 +188,10 @@ mod rec {
         // `{ 1 0 { 2 0 } 3 }` — drop the `0`s in the grouped blocks at both depths.
         let mut e: ast::Expr<Sp> = Parse::parse(quote!( { 1 0 { 2 0 } 3 } )).unwrap();
         e.visit_mut(&mut Editor);
-        assert_eq!(lits(&e), vec!["1", "2", "3"], "0s dropped from grouped blocks at both depths");
+        assert_eq!(
+            lits(&e),
+            vec!["1", "2", "3"],
+            "0s dropped from grouped blocks at both depths"
+        );
     }
 }

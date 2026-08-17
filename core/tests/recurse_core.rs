@@ -227,10 +227,14 @@ mod fixes {
     fn generic_and_non_generic_cycles_compile() {
         use syan::source::proc_macro2::literal::Integer;
         // Constructing a value of each is the check: both shapes must survive expansion.
-        let _e: generic_limit1::Expr<()> =
-            generic_limit1::Expr::Lit(Integer { value: "1".to_string(), suffix: None });
-        let _n: nongeneric_limit1::E =
-            nongeneric_limit1::E::Lit(Integer { value: "2".to_string(), suffix: None });
+        let _e: generic_limit1::Expr<()> = generic_limit1::Expr::Lit(Integer {
+            value: "1".to_string(),
+            suffix: None,
+        });
+        let _n: nongeneric_limit1::E = nongeneric_limit1::E::Lit(Integer {
+            value: "2".to_string(),
+            suffix: None,
+        });
     }
 
     mod other {

@@ -25,16 +25,14 @@
 //! depths — so `#[derive(Ast)]`, `visitor!(…)`, `Debug`, user `impl`s and every other non-structural
 //! derive are untouched, and a `visitor!` over a `#[recurse]` cycle is an ordinary acyclic visitor.
 
+use decycle::analysis::EdgeKind;
+use decycle::safegraph::VecGraph;
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::{abort, set_dummy};
 use std::collections::HashSet;
 use syn::punctuated::Punctuated;
-use syn::{
-    DeriveInput, Field, Fields, Item, ItemMod, Path, Token,
-};
-use decycle::analysis::EdgeKind;
-use decycle::safegraph::VecGraph;
+use syn::{DeriveInput, Field, Fields, Item, ItemMod, Path, Token};
 use template_quote::quote;
 
 /// How many ranks decycle unrolls before its floor. The rank ladder here only has to *discharge the
@@ -158,7 +156,6 @@ struct Expansion {
     cycle_graph: VecGraph<Ident, EdgeKind>,
 }
 
-
 /// Expand **every** structural derive in the module — cycle member or not.
 ///
 /// Expanding all of them is what lets the module drop its `Parse`/`Unparse` *derive* imports
@@ -168,7 +165,12 @@ struct Expansion {
 /// This pass is **cycle-independent by construction**: a derive expands to the same impl whether or
 /// not its type recurses. Only what happens to the result afterwards differs, which is why the cycle
 /// set is not a parameter here — see [`Expansion::select_cycle_members`].
-fn expand_items(items: &[Item], routed: &[(&'static str, Path)], syan: &Path, nonce: u64) -> Expansion {
+fn expand_items(
+    items: &[Item],
+    routed: &[(&'static str, Path)],
+    syan: &Path,
+    nonce: u64,
+) -> Expansion {
     let mut ex = Expansion {
         items: Vec::new(),
         derived: Vec::new(),
@@ -177,7 +179,8 @@ fn expand_items(items: &[Item], routed: &[(&'static str, Path)], syan: &Path, no
         cycle_graph: VecGraph::default(),
     };
     for item in items {
-        let Some((ident, attrs)) = adt_parts(item).filter(|(_, a)| derives_any(a, STRUCTURAL_DERIVES))
+        let Some((ident, attrs)) =
+            adt_parts(item).filter(|(_, a)| derives_any(a, STRUCTURAL_DERIVES))
         else {
             ex.items.push(rewrite_trait_imports(item.clone(), routed));
             continue;
@@ -241,7 +244,6 @@ impl Expansion {
     }
 }
 
-
 /// The items that must precede the module's own: when decycle will run, the namespace-split trait
 /// bindings the reshaped impls need. (The aliases that keep decycle's own helper-module nesting from
 /// changing what a name means are decycle's to emit — see `decycle::ranked::nesting`.)
@@ -291,19 +293,24 @@ fn emit(
     // into every bound and decoded again by decycle — and syan's scoping rules (only `pub`, only
     // single-segment references) are visible to decycle instead of implied.
     let Expansion {
-        items,
-        cycle_graph,
-        ..
+        items, cycle_graph, ..
     } = ex;
     let mut decycled = module;
-    decycled.content = Some((Default::default(), prelude.into_iter().chain(items).collect()));
+    decycled.content = Some((
+        Default::default(),
+        prelude.into_iter().chain(items).collect(),
+    ));
     if engine == Engine::Structural {
         // Structural adopts an impl by its trait path's LAST segment, so it reads the derive's
         // fully-qualified impls as-is — no re-spelling step, and hence no `emit_contracts`. The graph
         // can only narrow its participant set (its model is keyed on `(type, trait)` pairs), which is
         // exactly what is wanted: syan's cycle types and nothing else.
-        return decycle::structural::process_module_with_graph(decycled, &cycle_graph, &decycle_path)
-            .into();
+        return decycle::structural::process_module_with_graph(
+            decycled,
+            &cycle_graph,
+            &decycle_path,
+        )
+        .into();
     }
     decycle::ranked::process_module_with_graph(
         decycled,
@@ -312,14 +319,14 @@ fn emit(
         // decycle otherwise reads as "ordinary premise" — so without this it would adopt nothing.
         // Opting in is what lets syan state the cycle once instead of encoding it into the spelling of
         // every bound.
-        /* emit_contracts */ true,
+        /* emit_contracts */
+        true,
         &decycle_path,
         DECYCLE_RECURSE_LEVEL,
         /* support_infinite_cycle */ true,
     )
     .into()
 }
-
 
 /// The ident and attributes of an item `#[recurse]` can expand a derive for — an enum or a struct.
 /// Every other item kind is passed through untouched, so `None` is the whole answer for it.
@@ -383,10 +390,6 @@ fn prune_use_tree(tree: syn::UseTree, names: &[String]) -> Option<syn::UseTree> 
         }
     }
 }
-
-
-
-
 
 /// A `#[derive(..)]` or `#[macro_derive(..)]` attribute, as its own name plus the traits it lists.
 ///
@@ -537,7 +540,6 @@ fn make_natural_item(item: &Item) -> Item {
 
 use crate::attribute;
 
-
 /// An enum or struct item, as the `DeriveInput` a derive entry point takes.
 ///
 /// A round-trip through tokens rather than a field-by-field rebuild: an `Item::Enum`/`Item::Struct`
@@ -562,10 +564,6 @@ fn routed_traits(syan: &Path) -> Vec<(&'static str, Path)> {
 fn bare_ident(name: &str) -> Ident {
     Ident::new(name, Span::call_site())
 }
-
-
-
-
 
 /// Run one structural derive over `item`, **unreshaped**.
 ///
@@ -622,4 +620,3 @@ fn substruct_idents(items: &[Item]) -> Vec<String> {
         })
         .collect()
 }
-

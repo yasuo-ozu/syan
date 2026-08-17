@@ -202,66 +202,102 @@ fn test_byte_char_display() {
 
 #[test]
 fn test_integer_display() {
-    let int_plain = Integer { value: "42".to_string(), suffix: None };
+    let int_plain = Integer {
+        value: "42".to_string(),
+        suffix: None,
+    };
     assert_eq!(format!("{}", int_plain), "42");
-    
-    let int_suffix = Integer { value: "123".to_string(), suffix: Some("u32".to_string()) };
+
+    let int_suffix = Integer {
+        value: "123".to_string(),
+        suffix: Some("u32".to_string()),
+    };
     assert_eq!(format!("{}", int_suffix), "123u32");
 }
 
 #[test]
 fn test_float_display() {
-    let float_plain = Float { value: "3.14".to_string(), suffix: None };
+    let float_plain = Float {
+        value: "3.14".to_string(),
+        suffix: None,
+    };
     assert_eq!(format!("{}", float_plain), "3.14");
-    
-    let float_suffix = Float { value: "2.5".to_string(), suffix: Some("f32".to_string()) };
+
+    let float_suffix = Float {
+        value: "2.5".to_string(),
+        suffix: Some("f32".to_string()),
+    };
     assert_eq!(format!("{}", float_suffix), "2.5f32");
 }
 
 #[test]
 fn test_str_display() {
-    let str_val = Str { value: "hello".to_string() };
+    let str_val = Str {
+        value: "hello".to_string(),
+    };
     assert_eq!(format!("{}", str_val), "\"hello\"");
-    
-    let str_escape = Str { value: "hello \"world\"".to_string() };
+
+    let str_escape = Str {
+        value: "hello \"world\"".to_string(),
+    };
     assert_eq!(format!("{}", str_escape), "\"hello \\\"world\\\"\"");
 }
 
 #[test]
 fn test_str_raw_display() {
-    let str_raw = StrRaw { value: "hello \"world\"".to_string(), hash_count: 1 };
+    let str_raw = StrRaw {
+        value: "hello \"world\"".to_string(),
+        hash_count: 1,
+    };
     assert_eq!(format!("{}", str_raw), "r#\"hello \"world\"\"#");
-    
-    let str_raw_multi = StrRaw { value: "content".to_string(), hash_count: 3 };
+
+    let str_raw_multi = StrRaw {
+        value: "content".to_string(),
+        hash_count: 3,
+    };
     assert_eq!(format!("{}", str_raw_multi), "r###\"content\"###");
 }
 
 #[test]
 fn test_byte_str_display() {
-    let byte_str = ByteStr { value: b"hello".to_vec() };
+    let byte_str = ByteStr {
+        value: b"hello".to_vec(),
+    };
     assert_eq!(format!("{}", byte_str), "b\"hello\"");
-    
-    let byte_str_escape = ByteStr { value: b"hello\nworld".to_vec() };
+
+    let byte_str_escape = ByteStr {
+        value: b"hello\nworld".to_vec(),
+    };
     assert_eq!(format!("{}", byte_str_escape), "b\"hello\\nworld\"");
 }
 
 #[test]
 fn test_byte_str_raw_display() {
-    let byte_str_raw = ByteStrRaw { value: b"hello \"world\"".to_vec(), hash_count: 1 };
+    let byte_str_raw = ByteStrRaw {
+        value: b"hello \"world\"".to_vec(),
+        hash_count: 1,
+    };
     assert_eq!(format!("{}", byte_str_raw), "br#\"hello \"world\"\"#");
 }
 
 #[test]
 fn test_cstr_display() {
-    let cstr = CStr { value: "hello".to_string() };
+    let cstr = CStr {
+        value: "hello".to_string(),
+    };
     assert_eq!(format!("{}", cstr), "c\"hello\"");
-    
-    let cstr_escape = CStr { value: "hello \"world\"".to_string() };
+
+    let cstr_escape = CStr {
+        value: "hello \"world\"".to_string(),
+    };
     assert_eq!(format!("{}", cstr_escape), "c\"hello \\\"world\\\"\"");
 }
 
 #[test]
 fn test_cstr_raw_display() {
-    let cstr_raw = CStrRaw { value: "hello \"world\"".to_string(), hash_count: 2 };
+    let cstr_raw = CStrRaw {
+        value: "hello \"world\"".to_string(),
+        hash_count: 2,
+    };
     assert_eq!(format!("{}", cstr_raw), "cr##\"hello \"world\"\"##");
 }

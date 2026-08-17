@@ -24,7 +24,9 @@ pub struct Ws<T>(pub T);
 
 impl<T: Parse<Atom>> Parse<Atom> for Ws<T> {
     type Error = T::Error;
-    fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         let s = stream.into_parse_stream();
         loop {
             let ws = matches!(s.peek(), Some(a) if a.slot.is_whitespace());
@@ -43,7 +45,9 @@ pub struct Int(pub i64);
 
 impl Parse<Atom> for Int {
     type Error = ParseError<Span>;
-    fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         let s = stream.into_parse_stream();
         let mut buf = String::new();
         loop {

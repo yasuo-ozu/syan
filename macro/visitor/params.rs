@@ -4,7 +4,10 @@ use super::*;
 /// base's params (for inheritance — the new trait must declare them to name `base::Visit<base params>`
 /// as a supertrait, so the new union must ⊇ the base's). The caller normalizes order with
 /// `sort_lifetimes_first`.
-pub(crate) fn param_union(targets: &[&DoneType], base_generics: &[GenericParam]) -> Vec<GenericParam> {
+pub(crate) fn param_union(
+    targets: &[&DoneType],
+    base_generics: &[GenericParam],
+) -> Vec<GenericParam> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for d in targets {
@@ -31,7 +34,10 @@ pub(crate) fn sort_lifetimes_first(params: &mut [GenericParam]) {
 
 /// The set of idents that count as user AST types when peeling a field of a type with the given
 /// `self_ident` and `#[subast]` entries: the type's own ident plus every `#[subast]` matchkey.
-pub(crate) fn self_and_subast_keys(self_ident: Option<&Ident>, subast: &[SubEntry]) -> HashSet<String> {
+pub(crate) fn self_and_subast_keys(
+    self_ident: Option<&Ident>,
+    subast: &[SubEntry],
+) -> HashSet<String> {
     let mut s: HashSet<String> = subast.iter().map(|e| e.key.to_string()).collect();
     if let Some(id) = self_ident {
         s.insert(id.to_string());

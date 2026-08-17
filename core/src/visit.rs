@@ -110,7 +110,11 @@ pub trait SeqView<T> {
     where
         Self: Sized,
     {
-        SeqIter { seq: self, idx: 0, len: self.len() }
+        SeqIter {
+            seq: self,
+            idx: 0,
+            len: self.len(),
+        }
     }
     /// Iterate the elements by `&mut` for in-place edits (`for x in v.view_iter_mut() { … }`). For
     /// structural changes use `push`/`insert`/`remove`/`retain_mut`. Default impl over the by-index
@@ -120,7 +124,11 @@ pub trait SeqView<T> {
         Self: Sized,
     {
         let len = self.len();
-        SeqIterMut { seq: self, idx: 0, len }
+        SeqIterMut {
+            seq: self,
+            idx: 0,
+            len,
+        }
     }
 }
 

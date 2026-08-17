@@ -1,4 +1,3 @@
-
 pub use syan_macro::Parse;
 
 // The trait itself is defined (and `#[decycle]`-annotated) in `crate::decycle_traits` — see that
@@ -10,7 +9,9 @@ where
     Item: Parse<Atom>,
 {
     type Error = Item::Error;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         Ok(Box::new(Item::parse_stream(&mut *stream)?))
     }
 }
@@ -20,7 +21,9 @@ where
     Item: Parse<Atom>,
 {
     type Error = core::convert::Infallible;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         Ok(stream.dup(|stream| Item::parse_stream(&mut *stream)).ok())
     }
 }
@@ -30,7 +33,9 @@ where
     T: Parse<Atom>,
 {
     type Error = T::Error;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         let mut v = Vec::new();
         for _ in 0..N {
             v.push(T::parse_stream(&mut *stream)?);
@@ -44,21 +49,27 @@ where
     T: Parse<Atom, Error = E>,
 {
     type Error = core::convert::Infallible;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         Ok(T::parse_stream(&mut *stream))
     }
 }
 
 impl<Atom: crate::span::Spanned, T> Parse<Atom> for core::marker::PhantomData<T> {
     type Error = core::convert::Infallible;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(_stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        _stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         Ok(Default::default())
     }
 }
 
 impl<Atom: crate::span::Spanned> Parse<Atom> for core::convert::Infallible {
     type Error = crate::error::ParseError<crate::span::SpanOf<Atom>>;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(_stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        _stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         panic!()
     }
 }

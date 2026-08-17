@@ -107,7 +107,10 @@ where
     fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(
         _stream: &mut __S,
     ) -> Result<Self, Self::Error> {
-        Err(syan::error::ParseError::other(Default::default(), "expression recursion limit"))
+        Err(syan::error::ParseError::other(
+            Default::default(),
+            "expression recursion limit",
+        ))
     }
 }
 

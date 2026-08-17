@@ -165,7 +165,8 @@ pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
     // Keep only the `#[seq]`/`#[opt]` field markers (the visitor reads them to dispatch a field through
     // its `SeqView`/`OptView` edit method); drop everything else.
     fn clean_field_attrs(f: &mut Field) {
-        f.attrs.retain(|a| a.path().is_ident("seq") || a.path().is_ident("opt"));
+        f.attrs
+            .retain(|a| a.path().is_ident("seq") || a.path().is_ident("opt"));
         f.vis = Visibility::Inherited;
     }
     let mut di = input.clone();
@@ -359,7 +360,10 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     let subast_entry_tokens = subast_tokens(&subast);
 
     let cleaned = cleaned_definition(input);
-    let macro_name = Ident::new(&format!("__{}_ast_{}", to_snake(ident), nonce), Span::call_site());
+    let macro_name = Ident::new(
+        &format!("__{}_ast_{}", to_snake(ident), nonce),
+        Span::call_site(),
+    );
 
     // type-leak: one `Repeater<N>` impl **on the AST type itself** per context-dependent field type
     // (`<T as Repeater<N>>::Type` names that type portably from another crate). No separate leaker

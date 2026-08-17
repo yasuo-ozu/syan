@@ -48,7 +48,10 @@ mod vecdeque {
             ]),
         };
         h.visit_mut(&mut Editor);
-        assert_eq!(h.items.iter().map(|s| s.0).collect::<Vec<_>>(), vec![1, 102, 9]);
+        assert_eq!(
+            h.items.iter().map(|s| s.0).collect::<Vec<_>>(),
+            vec![1, 102, 9]
+        );
     }
 }
 
@@ -96,7 +99,11 @@ mod punct {
         items.push(Stmt(2, PhantomData));
         let mut h = Holder { items };
         h.visit_mut(&mut Editor);
-        assert_eq!(vals(&h.items), vec![1, 2, 9], "zeros dropped, 9 appended through the separator");
+        assert_eq!(
+            vals(&h.items),
+            vec![1, 2, 9],
+            "zeros dropped, 9 appended through the separator"
+        );
     }
 }
 
@@ -122,14 +129,21 @@ mod closure_over_slot {
     #[test]
     fn closure_runs_for_every_seq_and_opt_element() {
         let mut block: Block<()> = Block {
-            stmts: vec![Stmt(1, PhantomData), Stmt(2, PhantomData), Stmt(3, PhantomData)],
+            stmts: vec![
+                Stmt(1, PhantomData),
+                Stmt(2, PhantomData),
+                Stmt(3, PhantomData),
+            ],
             tail: Some(Stmt(10, PhantomData)),
         };
         // The `Vec`/`Option` fields are UNMARKED (no `#[seq]`/`#[opt]`), so there is no view method —
         // they are traversed by the ordinary descent, and the closure's `visit_stmt_mut` hook fires for
         // each element all the same.
         block.visit_mut(|s: &mut Stmt<()>| s.0 += 100);
-        assert_eq!(block.stmts.iter().map(|s| s.0).collect::<Vec<_>>(), vec![101, 102, 103]);
+        assert_eq!(
+            block.stmts.iter().map(|s| s.0).collect::<Vec<_>>(),
+            vec![101, 102, 103]
+        );
         assert_eq!(block.tail.as_ref().map(|s| s.0), Some(110));
     }
 

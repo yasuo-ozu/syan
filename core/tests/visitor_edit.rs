@@ -39,7 +39,9 @@ mod fixed {
 
     #[test]
     fn fixed_field_visited_in_place() {
-        let mut w: Wrap<()> = Wrap { inner: Leaf::A(PhantomData) };
+        let mut w: Wrap<()> = Wrap {
+            inner: Leaf::A(PhantomData),
+        };
         let mut to_b = ToB(0);
         w.visit_mut(&mut to_b);
         assert_eq!(to_b.0, 1, "the fixed Leaf was visited once");
@@ -140,23 +142,45 @@ mod views {
         b.visit_mut(&mut Editor);
         let vals: Vec<i64> = b.stmts.iter().map(|s| s.0).collect();
         assert_eq!(vals, vec![1, 102, 7], "0s removed, 2->102, 7 appended");
-        assert_eq!(b.tail.as_ref().map(|s| s.0), Some(5), "empty Option filled with 5");
+        assert_eq!(
+            b.tail.as_ref().map(|s| s.0),
+            Some(5),
+            "empty Option filled with 5"
+        );
     }
 
     #[test]
     fn opt_take_clears() {
-        let mut b: Block<()> = Block { stmts: vec![], tail: Some(Stmt(0, PhantomData)) };
+        let mut b: Block<()> = Block {
+            stmts: vec![],
+            tail: Some(Stmt(0, PhantomData)),
+        };
         b.visit_mut(&mut Editor);
-        assert_eq!(b.stmts.iter().map(|s| s.0).collect::<Vec<_>>(), vec![7], "push into empty Vec");
+        assert_eq!(
+            b.stmts.iter().map(|s| s.0).collect::<Vec<_>>(),
+            vec![7],
+            "push into empty Vec"
+        );
         assert!(b.tail.is_none(), "a zero tail was cleared");
     }
 
     #[test]
     fn opt_replace_on_two() {
-        let mut b: Block<()> = Block { stmts: vec![], tail: Some(Stmt(2, PhantomData)) };
+        let mut b: Block<()> = Block {
+            stmts: vec![],
+            tail: Some(Stmt(2, PhantomData)),
+        };
         b.visit_mut(&mut Editor);
-        assert_eq!(b.stmts.iter().map(|s| s.0).collect::<Vec<_>>(), vec![7], "7 pushed into the empty Vec");
-        assert_eq!(b.tail.as_ref().map(|s| s.0), Some(102), "the Option tail (a 2) was replaced");
+        assert_eq!(
+            b.stmts.iter().map(|s| s.0).collect::<Vec<_>>(),
+            vec![7],
+            "7 pushed into the empty Vec"
+        );
+        assert_eq!(
+            b.tail.as_ref().map(|s| s.0),
+            Some(102),
+            "the Option tail (a 2) was replaced"
+        );
     }
 
     // ── back-compat: overriding the *parent* and editing its `&mut Vec`/`&mut Option` directly still works ──
@@ -173,7 +197,11 @@ mod views {
     #[test]
     fn parent_override_still_works() {
         let mut block: Block<()> = Block {
-            stmts: vec![Stmt(0, PhantomData), Stmt(1, PhantomData), Stmt(2, PhantomData)],
+            stmts: vec![
+                Stmt(0, PhantomData),
+                Stmt(1, PhantomData),
+                Stmt(2, PhantomData),
+            ],
             tail: Some(Stmt(7, PhantomData)),
         };
         block.visit_mut(&mut ParentEditor);
@@ -211,9 +239,9 @@ mod rec {
         fn visit_expr_seq<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
             for e in v.view_iter_mut() {
                 match e {
-                    ast::Expr::Lit(0, _) => {}                              // dropped by retain below
+                    ast::Expr::Lit(0, _) => {} // dropped by retain below
                     ast::Expr::Lit(2, _) => *e = ast::Expr::Lit(99, PhantomData),
-                    _ => v::visit_expr_mut(self, e),                        // descend nested `Many`
+                    _ => v::visit_expr_mut(self, e), // descend nested `Many`
                 }
             }
             v.retain_mut(|e| !matches!(e, ast::Expr::Lit(0, _)));
@@ -294,7 +322,11 @@ mod rec_opt {
             ast::Expr::Lit(5, PhantomData),
         ))))));
         e.visit_mut(&mut Bump);
-        assert_eq!(lits(&e), vec![6], "descent through Option<Box<_>> reached the deep Lit");
+        assert_eq!(
+            lits(&e),
+            vec![6],
+            "descent through Option<Box<_>> reached the deep Lit"
+        );
     }
 
     #[test]
@@ -366,7 +398,10 @@ mod drill {
             vec![1, 2],
             "Vec<Leaf> inside the drilled Mid edited via visit_leaf_seq"
         );
-        assert!(top.mid.last.is_none(), "Option<Leaf> inside the drilled Mid cleared via visit_leaf_opt");
+        assert!(
+            top.mid.last.is_none(),
+            "Option<Leaf> inside the drilled Mid cleared via visit_leaf_opt"
+        );
     }
 }
 
@@ -465,7 +500,10 @@ mod boxed_opt {
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
         fn visit_leaf_opt<O: OptView<Leaf<S>>>(&mut self, v: &mut O) {
-            assert!(v.is_some(), "a Box<Leaf> single-slot view is always present");
+            assert!(
+                v.is_some(),
+                "a Box<Leaf> single-slot view is always present"
+            );
             if let Some(l) = v.get_mut() {
                 l.0 += 100; // edit the boxed node in place
             }
@@ -475,7 +513,9 @@ mod boxed_opt {
 
     #[test]
     fn opt_edits_boxed_single_node() {
-        let mut h: Holder<()> = Holder { boxed: Box::new(Leaf(5, PhantomData)) };
+        let mut h: Holder<()> = Holder {
+            boxed: Box::new(Leaf(5, PhantomData)),
+        };
         h.visit_mut(&mut Editor);
         assert_eq!(h.boxed.0, 106, "5 -> +100 (get_mut) -> +1 (set) = 106");
     }

@@ -119,10 +119,7 @@ mod extra_param {
         // The tuple infers `T = u32` from `prog`.
         let mut p = 0usize;
         let mut e = 0usize;
-        prog.visit((
-            |_: &Program<(), u32>| p += 1,
-            |_: &ast::Expr<()>| e += 1,
-        ));
+        prog.visit((|_: &Program<(), u32>| p += 1, |_: &ast::Expr<()>| e += 1));
         assert_eq!((p, e), (1, 2), "Program + 2 Exprs (Nest + inner Lit)");
     }
 }
@@ -173,8 +170,12 @@ mod closure {
     fn sample() -> ast::Decl<()> {
         ast::Decl {
             params: vec![
-                ast::Param { ty: ast::Type::Int(PhantomData) },
-                ast::Param { ty: ast::Type::Bool(PhantomData) },
+                ast::Param {
+                    ty: ast::Type::Int(PhantomData),
+                },
+                ast::Param {
+                    ty: ast::Type::Bool(PhantomData),
+                },
             ],
             ret: ast::Type::Int(PhantomData),
             body: ast::Expr::Lit(PhantomData),
@@ -186,7 +187,10 @@ mod closure {
         let d = sample();
         let mut types = 0usize;
         d.visit(|_t: &ast::Type<()>| types += 1);
-        assert_eq!(types, 3, "two param Types (drilled through Param) + the ret Type");
+        assert_eq!(
+            types, 3,
+            "two param Types (drilled through Param) + the ret Type"
+        );
     }
 
     #[test]
@@ -298,7 +302,10 @@ mod drill {
         let mut c = Counter::default();
         decl.visit(&mut c);
         assert_eq!(c.decls, 1);
-        assert_eq!(c.types, 1, "reached via drilling through Cast, not via the Expr field");
+        assert_eq!(
+            c.types, 1,
+            "reached via drilling through Cast, not via the Expr field"
+        );
     }
 
     // Drilling through an *unlisted* cross-edge cycle type (`Cast`) to reach the listed root `Expr`.
@@ -343,11 +350,15 @@ mod drill {
 
         #[test]
         fn drills_through_unlisted_cast() {
-            let e: ast::Expr<()> =
-                ast::Expr::Cast(Box::new(ast::Cast::Inner(Box::new(ast::Expr::Lit(PhantomData)))));
+            let e: ast::Expr<()> = ast::Expr::Cast(Box::new(ast::Cast::Inner(Box::new(
+                ast::Expr::Lit(PhantomData),
+            ))));
             let mut c = Counter::default();
             v::Visit::visit_expr(&mut c, &e);
-            assert_eq!(c.0, 2, "outer Expr + inner Expr reached by drilling through the unlisted Cast");
+            assert_eq!(
+                c.0, 2,
+                "outer Expr + inner Expr reached by drilling through the unlisted Cast"
+            );
         }
     }
 }

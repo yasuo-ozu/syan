@@ -89,13 +89,18 @@ mod via_visitor {
         ))));
         let mut c = Counter::default();
         e.visit_mut(&mut c);
-        assert_eq!((c.e, c.s), (2, 1), "same shape as the shared walk, via &mut");
+        assert_eq!(
+            (c.e, c.s),
+            (2, 1),
+            "same shape as the shared walk, via &mut"
+        );
     }
 
     #[test]
     fn closure_over_recurse_cycle() {
-        let e: ast::Expr<()> =
-            ast::Expr::Stmt(Box::new(ast::Stmt::Expr(Box::new(ast::Expr::Lit(PhantomData)))));
+        let e: ast::Expr<()> = ast::Expr::Stmt(Box::new(ast::Stmt::Expr(Box::new(
+            ast::Expr::Lit(PhantomData),
+        ))));
         let mut exprs = 0usize;
         e.visit(|_e: &ast::Expr<()>| exprs += 1);
         assert_eq!(exprs, 2, "both Expr nodes seen by the closure");
@@ -157,7 +162,10 @@ mod disjoint_params {
     }
 
     mod v {
-        syan::visit::visitor!(crate::disjoint_params::m::Expr, crate::disjoint_params::m::Foo);
+        syan::visit::visitor!(
+            crate::disjoint_params::m::Expr,
+            crate::disjoint_params::m::Foo
+        );
     }
 
     #[test]

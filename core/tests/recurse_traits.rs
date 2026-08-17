@@ -20,10 +20,7 @@ mod unparse_spanned {
         // A list `1 2 3` → Cons(1, Cons(2, Cons(3, Nil))); group-free, all-`Integer` leaves.
         #[derive(Parse, Unparse)]
         pub enum Expr<S> {
-            Cons {
-                head: Integer,
-                tail: Box<Expr<S>>,
-            },
+            Cons { head: Integer, tail: Box<Expr<S>> },
             Nil(PhantomData<S>),
         }
     }
@@ -52,7 +49,10 @@ mod unparse_spanned {
             depth += 1;
             e = *tail;
         }
-        assert_eq!(depth, 200, "all 200 levels parsed — `recurse_level` is not a depth ceiling");
+        assert_eq!(
+            depth, 200,
+            "all 200 levels parsed — `recurse_level` is not a depth ceiling"
+        );
     }
 
     #[test]
@@ -63,13 +63,20 @@ mod unparse_spanned {
         let mut e: Expr<()> = Expr::Nil(PhantomData);
         for _ in 0..5000 {
             e = Expr::Cons {
-                head: Integer { value: "1".into(), suffix: None },
+                head: Integer {
+                    value: "1".into(),
+                    suffix: None,
+                },
                 tail: Box::new(e),
             };
         }
         let mut out = Vec::<proc_macro2::TokenTree>::new();
         e.unparse(&mut (&mut out)).unwrap();
-        assert_eq!(out.len(), 5000, "five thousand `1`s — depth far past the old limit");
+        assert_eq!(
+            out.len(),
+            5000,
+            "five thousand `1`s — depth far past the old limit"
+        );
     }
 
     #[recurse]
@@ -132,22 +139,39 @@ mod unparse_spanned {
         use mt::{Expr, Stmt};
         use syan::source::proc_macro2::literal::Integer;
         let tree: Expr<()> = Expr::Wrap(Box::new(Stmt::Wrap(Box::new(Expr::Lit(
-            Integer { value: "7".into(), suffix: None },
+            Integer {
+                value: "7".into(),
+                suffix: None,
+            },
             PhantomData,
         )))));
         let mut out = Vec::<proc_macro2::TokenTree>::new();
         tree.unparse(&mut (&mut out)).unwrap();
-        assert_eq!(out.len(), 1, "the `7` literal (Stmt::Wrap/Nil emit nothing)");
+        assert_eq!(
+            out.len(),
+            1,
+            "the `7` literal (Stmt::Wrap/Nil emit nothing)"
+        );
         let _n: Stmt<()> = Stmt::Nil(PhantomData);
 
         // A depth-2000 alternating tree unparses.
-        let mut e: Expr<()> = Expr::Lit(Integer { value: "1".into(), suffix: None }, PhantomData);
+        let mut e: Expr<()> = Expr::Lit(
+            Integer {
+                value: "1".into(),
+                suffix: None,
+            },
+            PhantomData,
+        );
         for _ in 0..2000 {
             e = Expr::Wrap(Box::new(Stmt::Wrap(Box::new(e))));
         }
         let mut deep = Vec::<proc_macro2::TokenTree>::new();
         e.unparse(&mut (&mut deep)).unwrap();
-        assert_eq!(deep.len(), 1, "deep multi-type tree round-trips (direct → unbounded)");
+        assert_eq!(
+            deep.len(),
+            1,
+            "deep multi-type tree round-trips (direct → unbounded)"
+        );
     }
 
     // MULTI-TYPE cycle: DIRECT Spanned via the leaf-bound union (`S: Span`).
@@ -213,7 +237,11 @@ mod group_ful {
         let e: up::Expr<_> = Parse::parse(quote! { { 1 2 } }).unwrap();
         let mut out = Vec::<proc_macro2::TokenTree>::new();
         e.unparse(&mut (&mut out)).unwrap();
-        assert_eq!(out.len(), 1, "the whole expression is a single brace `TokenTree::Group`");
+        assert_eq!(
+            out.len(),
+            1,
+            "the whole expression is a single brace `TokenTree::Group`"
+        );
         assert!(matches!(out[0], proc_macro2::TokenTree::Group(_)));
         assert_eq!(out[0].to_string(), "{ 1 2 }");
     }
@@ -229,7 +257,9 @@ mod group_ful {
         let mut out = Vec::<proc_macro2::TokenTree>::new();
         e.unparse(&mut (&mut out)).unwrap();
         assert_eq!(
-            out.into_iter().collect::<proc_macro2::TokenStream>().to_string(),
+            out.into_iter()
+                .collect::<proc_macro2::TokenStream>()
+                .to_string(),
             src.to_string(),
             "deep group-ful tree round-trips (Unparse past the old depth limit)",
         );
@@ -260,7 +290,11 @@ mod group_ful {
         use syan::span::{Spanned, WithSpan};
         // `.span()` folds the group's delimiter spans + the leaf span — the empty `()` slot needs no
         // `Spanned` impl (its span comes from the delimiters).
-        let brace = Group { open: Default::default(), slot: (), close: Default::default() };
+        let brace = Group {
+            open: Default::default(),
+            slot: (),
+            close: Default::default(),
+        };
         let tree: Expr<()> = Expr::Block {
             brace,
             inner: vec![Expr::Atom(WithSpan { slot: 7, span: () })],
@@ -271,8 +305,15 @@ mod group_ful {
         // per level; no `Root: Clone`).
         let mut deep: Expr<()> = Expr::Atom(WithSpan { slot: 7, span: () });
         for _ in 0..2000 {
-            let brace = Group { open: Default::default(), slot: (), close: Default::default() };
-            deep = Expr::Block { brace, inner: vec![deep] };
+            let brace = Group {
+                open: Default::default(),
+                slot: (),
+                close: Default::default(),
+            };
+            deep = Expr::Block {
+                brace,
+                inner: vec![deep],
+            };
         }
         let _s: () = deep.span();
     }
@@ -333,7 +374,9 @@ mod group_ful {
         let mut out = Vec::<proc_macro2::TokenTree>::new();
         top.unparse(&mut (&mut out)).unwrap();
         assert_eq!(
-            out.into_iter().collect::<proc_macro2::TokenStream>().to_string(),
+            out.into_iter()
+                .collect::<proc_macro2::TokenStream>()
+                .to_string(),
             full.to_string(),
             "round-trips after the deep backtrack",
         );

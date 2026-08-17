@@ -51,7 +51,11 @@ fn dup_commit_keeps_consumption() {
         Ok(())
     });
     assert!(r.is_ok());
-    assert_eq!(drain(&mut s), "c", "a successful dup must keep its consumption");
+    assert_eq!(
+        drain(&mut s),
+        "c",
+        "a successful dup must keep its consumption"
+    );
 }
 
 #[test]
@@ -230,7 +234,11 @@ fn peek_agrees_with_next_after_a_rollback() {
         Err("fail")
     });
     assert_eq!(s.peek().map(|a| a.slot), Some('a'));
-    assert_eq!(s.next().map(|a| a.slot), Some('a'), "peek must predict next after a rollback");
+    assert_eq!(
+        s.next().map(|a| a.slot),
+        Some('a'),
+        "peek must predict next after a rollback"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -598,12 +606,18 @@ fn descent_instantiates_exactly_one_stream_type() {
     let deep = taken();
 
     assert_eq!(
-        shallow, deep,
+        shallow,
+        deep,
         "the stream type must not depend on descent depth\n{}\n{}",
         report("depth 3", &shallow),
         report("depth 30", &deep)
     );
-    assert_eq!(deep.len(), 1, "{}", report("expected ONE stream type", &deep));
+    assert_eq!(
+        deep.len(),
+        1,
+        "{}",
+        report("expected ONE stream type", &deep)
+    );
     assert!(
         !deep[0].contains("dyn"),
         "the descent should be fully monomorphised, got {:?}",
@@ -619,14 +633,17 @@ fn substream_does_not_nest() {
     struct Probe;
     impl syan::parse::Parse<Atom> for Probe {
         type Error = syan::error::ParseError<Span>;
-        fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+        fn parse_stream<__S: syan::parse::ParseStream<Atom = Atom>>(
+            stream: &mut __S,
+        ) -> Result<Self, Self::Error> {
             note::<Atom>();
             let _ = stream.next();
             Ok(Probe)
         }
     }
     let _ = <WithSpan<Probe, Span> as syan::parse::Parse<Atom>>::parse(stream_of("ab"));
-    let _ = <WithSpan<WithSpan<Probe, Span>, Span> as syan::parse::Parse<Atom>>::parse(stream_of("ab"));
+    let _ =
+        <WithSpan<WithSpan<Probe, Span>, Span> as syan::parse::Parse<Atom>>::parse(stream_of("ab"));
     let seen = taken();
     assert!(
         seen.len() <= 1,

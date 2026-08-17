@@ -127,4 +127,3 @@ fn all_reject_bad_input() {
         assert!(ok.is_empty(), "{src:?} was ACCEPTED by {ok:?}");
     }
 }
-

@@ -190,7 +190,9 @@ mod multilevel {
     }
 
     fn sample() -> Item<()> {
-        Item::S(Box::new(Stmt::E(Box::new(Expr::Typed(Box::new(Type::Unit(PhantomData)))))))
+        Item::S(Box::new(Stmt::E(Box::new(Expr::Typed(Box::new(
+            Type::Unit(PhantomData),
+        ))))))
     }
 
     #[derive(Default)]
@@ -263,8 +265,9 @@ mod multilevel {
 
     #[test]
     fn three_level_with_arity_widening() {
-        let ast: Item2<(), ()> =
-            Item2::S(Box::new(Stmt::E(Box::new(Expr::Typed(Box::new(Type::Unit(PhantomData)))))));
+        let ast: Item2<(), ()> = Item2::S(Box::new(Stmt::E(Box::new(Expr::Typed(Box::new(
+            Type::Unit(PhantomData),
+        ))))));
         let mut c = Counter::default();
         ast.visit(&mut c);
         assert_eq!((c.items, c.stmts, c.exprs, c.types), (1, 1, 1, 1));
@@ -328,8 +331,9 @@ mod over_recurse {
 
     #[test]
     fn acyclic_extends_recurse() {
-        let prog: Program<()> =
-            Program { body: ast::Expr::Bin(Box::new(ast::Expr::Lit(PhantomData))) };
+        let prog: Program<()> = Program {
+            body: ast::Expr::Bin(Box::new(ast::Expr::Lit(PhantomData))),
+        };
         let mut w = Walker::default();
         prog.visit(&mut w);
         assert_eq!((w.p, w.e), (1, 2), "Program + 2 Exprs (Bin + inner Lit)");
@@ -379,7 +383,11 @@ mod over_recurse {
         let mut b = Both::default();
         nv2::Visit::visit_stmt(&mut b, &s);
         base::Visit::visit_expr(&mut b, &e);
-        assert_eq!((b.s, b.e), (2, 2), "2 Stmts + 2 Exprs, one visitor over both cycles");
+        assert_eq!(
+            (b.s, b.e),
+            (2, 2),
+            "2 Stmts + 2 Exprs, one visitor over both cycles"
+        );
     }
 }
 
@@ -456,10 +464,16 @@ mod over_recurse_mid {
     #[test]
     fn three_level_over_recurse_base() {
         let m: Module<()> = Module {
-            prog: Program { body: ast::Expr::Bin(Box::new(ast::Expr::Lit(PhantomData))) },
+            prog: Program {
+                body: ast::Expr::Bin(Box::new(ast::Expr::Lit(PhantomData))),
+            },
         };
         let mut w = Walker::default();
         m.visit(&mut w);
-        assert_eq!((w.m, w.p, w.e), (1, 1, 2), "Module + Program + 2 Exprs (Bin + inner Lit)");
+        assert_eq!(
+            (w.m, w.p, w.e),
+            (1, 1, 2),
+            "Module + Program + 2 Exprs (Bin + inner Lit)"
+        );
     }
 }

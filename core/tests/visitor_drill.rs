@@ -144,7 +144,10 @@ mod chain {
         };
         let mut leaves = 0usize;
         block.visit(|_l: &Leaf<()>| leaves += 1);
-        assert_eq!(leaves, 3, "2 in the Vec + 1 in the Option, each drilled through Item");
+        assert_eq!(
+            leaves, 3,
+            "2 in the Vec + 1 in the Option, each drilled through Item"
+        );
     }
 
     // Finite dead-end: an unlisted intermediate reaching no visited type — a no-op, not an error.
@@ -167,7 +170,10 @@ mod chain {
         let ast: ExprD<()> = ExprD::D(Dead(7, PhantomData));
         let mut exprs = 0usize;
         ast.visit(|_e: &ExprD<()>| exprs += 1);
-        assert_eq!(exprs, 1, "the root ExprD; drilling Dead reached no visited node");
+        assert_eq!(
+            exprs, 1,
+            "the root ExprD; drilling Dead reached no visited node"
+        );
     }
 }
 
@@ -204,7 +210,10 @@ mod fixes {
         let ast: Expr<()> = Expr::R(Aliased::U(PhantomData));
         let mut reals = 0usize;
         ast.visit(|_r: &Real<()>| reals += 1);
-        assert_eq!(reals, 1, "field `Aliased` lowered to visit_real, no duplicate fetch");
+        assert_eq!(
+            reals, 1,
+            "field `Aliased` lowered to visit_real, no duplicate fetch"
+        );
     }
 
     #[derive(Debug, Ast)]
@@ -237,7 +246,10 @@ mod fixes {
         let ast: Outer<()> = Outer::O(weird::Option(Leaf::U(PhantomData)));
         let mut leaves = 0usize;
         ast.visit(|_l: &Leaf<()>| leaves += 1);
-        assert_eq!(leaves, 1, "drilled through the user `Option` type to its Leaf");
+        assert_eq!(
+            leaves, 1,
+            "drilled through the user `Option` type to its Leaf"
+        );
     }
 
     // A distinct leaf type, since two visitors over the same type in one crate would emit
@@ -340,6 +352,9 @@ mod paths {
         let ast: Expr<()> = Expr::B(BCast(Type::Unit(PhantomData)));
         let mut n = 0usize;
         ast.visit(|_t: &Type<()>| n += 1);
-        assert_eq!(n, 1, "drilled through b::Cast (fetched distinctly from a::Cast)");
+        assert_eq!(
+            n, 1,
+            "drilled through b::Cast (fetched distinctly from a::Cast)"
+        );
     }
 }

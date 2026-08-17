@@ -141,7 +141,10 @@ impl<'a> Lower<'a> {
             Container::Opt => (self.opt_used, "opt"),
         };
         used.borrow_mut().insert(head.to_string());
-        let m = Ident::new(&format!("visit_{}_{suffix}", to_snake(head)), Span::call_site());
+        let m = Ident::new(
+            &format!("visit_{}_{suffix}", to_snake(head)),
+            Span::call_site(),
+        );
         quote!( this.#m(#binding); )
     }
 
@@ -249,9 +252,9 @@ impl<'a> Lower<'a> {
                     let name = f.ident.clone().unwrap();
                     let bind = quote!(#name);
                     let view = field_view(&f.attrs);
-                    if let Some(stmt) = self
-                        .lower_field(&f.ty, &bind, view, idx, subast, self_ident, path, depth, stack)
-                    {
+                    if let Some(stmt) = self.lower_field(
+                        &f.ty, &bind, view, idx, subast, self_ident, path, depth, stack,
+                    ) {
                         binds.push(quote!(#name));
                         stmts.push(stmt);
                     }
@@ -266,9 +269,9 @@ impl<'a> Lower<'a> {
                     let bind_id = Ident::new(&format!("__f{depth}_{idx}"), Span::call_site());
                     let bind = quote!(#bind_id);
                     let view = field_view(&f.attrs);
-                    if let Some(stmt) = self
-                        .lower_field(&f.ty, &bind, view, idx, subast, self_ident, path, depth, stack)
-                    {
+                    if let Some(stmt) = self.lower_field(
+                        &f.ty, &bind, view, idx, subast, self_ident, path, depth, stack,
+                    ) {
                         pats.push(quote!(#bind_id));
                         stmts.push(stmt);
                     } else {

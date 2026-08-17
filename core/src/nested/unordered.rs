@@ -19,7 +19,11 @@ pub struct Unordered<T, U> {
 impl<T, U> Unordered<T, U> {
     /// Build from values, choosing `T`-then-`U` as the (re)emission order.
     pub fn new(t: T, u: U) -> Self {
-        Self { t, u, t_first: true }
+        Self {
+            t,
+            u,
+            t_first: true,
+        }
     }
 
     /// Whether `T` appeared — and will be unparsed — before `U`.
@@ -35,7 +39,11 @@ impl<T, U> Unordered<T, U> {
 
 impl<T: Default, U: Default> Default for Unordered<T, U> {
     fn default() -> Self {
-        Self { t: T::default(), u: U::default(), t_first: true }
+        Self {
+            t: T::default(),
+            u: U::default(),
+            t_first: true,
+        }
     }
 }
 
@@ -49,18 +57,30 @@ where
 {
     type Error = ParseError<crate::span::SpanOf<Atom>>;
 
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
-        let t_then_u = stream.dup(|s| -> Result<(T, U), ParseError<crate::span::SpanOf<Atom>>> {
-            let t = T::parse_stream(&mut *s).map_err(Into::into)?;
-            let u = U::parse_stream(&mut *s).map_err(Into::into)?;
-            Ok((t, u))
-        });
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
+        let t_then_u = stream.dup(
+            |s| -> Result<(T, U), ParseError<crate::span::SpanOf<Atom>>> {
+                let t = T::parse_stream(&mut *s).map_err(Into::into)?;
+                let u = U::parse_stream(&mut *s).map_err(Into::into)?;
+                Ok((t, u))
+            },
+        );
         match t_then_u {
-            Ok((t, u)) => Ok(Self { t, u, t_first: true }),
+            Ok((t, u)) => Ok(Self {
+                t,
+                u,
+                t_first: true,
+            }),
             Err(_) => {
                 let u = U::parse_stream(&mut *stream).map_err(Into::into)?;
                 let t = T::parse_stream(&mut *stream).map_err(Into::into)?;
-                Ok(Self { t, u, t_first: false })
+                Ok(Self {
+                    t,
+                    u,
+                    t_first: false,
+                })
             }
         }
     }

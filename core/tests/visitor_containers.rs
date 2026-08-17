@@ -27,7 +27,10 @@ mod nested {
     }
 
     fn leaf<S>(value: i64) -> Leaf<S> {
-        Leaf { _p: PhantomData, value }
+        Leaf {
+            _p: PhantomData,
+            value,
+        }
     }
 
     #[test]
@@ -44,17 +47,27 @@ mod nested {
 
     #[test]
     fn nested_containers_visit_mut() {
-        let mut h: Holder<()> =
-            Holder { vo: vec![Some(leaf(1))], ov: None, vv: vec![vec![leaf(2)]] };
+        let mut h: Holder<()> = Holder {
+            vo: vec![Some(leaf(1))],
+            ov: None,
+            vv: vec![vec![leaf(2)]],
+        };
         let mut n = 0usize;
         h.visit_mut(|l: &mut Leaf<()>| {
             n += 1;
             l.value = -l.value;
         });
-        assert_eq!(n, 2, "Vec<Option<_>> and Vec<Vec<_>> both descended on the mut side");
+        assert_eq!(
+            n, 2,
+            "Vec<Option<_>> and Vec<Vec<_>> both descended on the mut side"
+        );
         // The mutation must persist through the owning container, not just be observed transiently by
         // the visitor closure.
-        assert_eq!(h.vo[0].as_ref().map(|l| l.value), Some(-1), "Vec<Option<Leaf>> write persists");
+        assert_eq!(
+            h.vo[0].as_ref().map(|l| l.value),
+            Some(-1),
+            "Vec<Option<Leaf>> write persists"
+        );
         assert_eq!(h.vv[0][0].value, -2, "Vec<Vec<Leaf>> write persists");
     }
 }
@@ -80,7 +93,10 @@ mod container_of_tuple {
     }
 
     mod v {
-        syan::visit::visitor!(crate::container_of_tuple::Leaf, crate::container_of_tuple::Holder);
+        syan::visit::visitor!(
+            crate::container_of_tuple::Leaf,
+            crate::container_of_tuple::Holder
+        );
     }
 
     fn leaf<S>() -> Leaf<S> {
@@ -110,7 +126,10 @@ mod container_of_tuple {
         };
         let mut n = 0usize;
         h.visit_mut(|_: &mut Leaf<()>| n += 1);
-        assert_eq!(n, 8, "the &mut side must also reach tuple elements inside containers");
+        assert_eq!(
+            n, 8,
+            "the &mut side must also reach tuple elements inside containers"
+        );
     }
 }
 
@@ -150,6 +169,9 @@ mod tuple_field {
         let e = Expr::Triple((Ty::Unit(PhantomData), (PhantomData, Ty::Unit(PhantomData))));
         let mut n = 0usize;
         e.visit(|_: &Ty<()>| n += 1);
-        assert_eq!(n, 2, "the two Ty elements (skipping the PhantomData leaf) should be visited");
+        assert_eq!(
+            n, 2,
+            "the two Ty elements (skipping the PhantomData leaf) should be visited"
+        );
     }
 }

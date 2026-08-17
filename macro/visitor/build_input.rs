@@ -81,7 +81,10 @@ fn parse_ancestors(ts: TokenStream) -> Result<Vec<AncIn>> {
                     "p" => path = Some(syn::parse2(inner)?),
                     "n" => names = parse_idents(inner)?,
                     other => {
-                        return Err(Error::new(name.span(), format!("unknown @a section @{other}")))
+                        return Err(Error::new(
+                            name.span(),
+                            format!("unknown @a section @{other}"),
+                        ))
                     }
                 }
             }
@@ -208,7 +211,10 @@ pub(crate) fn requalify_ancestor(anc: &Path, base: &Path) -> Path {
         for s in prefix.iter().chain(tail.iter()) {
             segments.push(s.clone());
         }
-        Path { leading_colon: None, segments }
+        Path {
+            leading_colon: None,
+            segments,
+        }
     };
     match first.ident.to_string().as_str() {
         "crate" => {
@@ -264,7 +270,10 @@ fn parse_done_type(input: ParseStream) -> Result<DoneType> {
             "def" => def = Some(syn::parse2(content)?),
             "subast" => subast = parse_subentries(content)?,
             other => {
-                return Err(Error::new(name.span(), format!("unknown @t section @{other}")))
+                return Err(Error::new(
+                    name.span(),
+                    format!("unknown @t section @{other}"),
+                ))
             }
         }
     }
@@ -326,15 +335,12 @@ impl Parse for BuildInput {
                 }
                 "done" => done = parse_done(content)?,
                 "rest" => {
-                    let paths =
-                        Punctuated::<Path, Token![,]>::parse_terminated.parse2(content)?;
+                    let paths = Punctuated::<Path, Token![,]>::parse_terminated.parse2(content)?;
                     rest = paths.into_iter().collect();
                 }
                 "ast" => just_def = Some(syn::parse2(content)?),
                 "subast" => just_subast = parse_subentries(content)?,
-                other => {
-                    return Err(Error::new(name.span(), format!("unknown section @{other}")))
-                }
+                other => return Err(Error::new(name.span(), format!("unknown section @{other}"))),
             }
         }
 
@@ -373,7 +379,7 @@ fn parse_idents(ts: TokenStream) -> Result<Vec<Ident>> {
 /// section-list assembler.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn state_tokens(
-    base: &TokenStream,   // base_tokens(&base_path) or quote!()
+    base: &TokenStream, // base_tokens(&base_path) or quote!()
     build: &Path,
     nonce: &TokenStream,
     visited: &[Path],
@@ -449,8 +455,16 @@ pub fn build(input: TokenStream) -> TokenStream {
         let done_ts = emit_done(done);
         let anc_ts = emit_ancestors(base_ancestors);
         let state = state_tokens(
-            &base_ts, build, nonce, visited, inherited, base_generics, &anc_ts, &quote!(#next),
-            &done_ts, rest,
+            &base_ts,
+            build,
+            nonce,
+            visited,
+            inherited,
+            base_generics,
+            &anc_ts,
+            &quote!(#next),
+            &done_ts,
+            rest,
         );
         return quote! { #next ! { @ast #build { #state } } };
     }

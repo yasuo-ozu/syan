@@ -51,7 +51,11 @@ mod containers {
     fn box_around_option_some() {
         let e: ast::Expr<()> =
             ast::Expr::Opt(Box::new(Some(Box::new(ast::Expr::Lit(PhantomData)))));
-        assert_eq!(count(&e), 2, "Box<Option<Box<Expr>>> descends through the Some");
+        assert_eq!(
+            count(&e),
+            2,
+            "Box<Option<Box<Expr>>> descends through the Some"
+        );
     }
 
     #[test]
@@ -73,7 +77,11 @@ mod containers {
     fn tuple_field_with_leaf() {
         let e: ast::Expr<()> =
             ast::Expr::Tagged((Box::new(ast::Expr::Lit(PhantomData)), PhantomData));
-        assert_eq!(count(&e), 2, "leaf tuple element is skipped, cycle ref visited");
+        assert_eq!(
+            count(&e),
+            2,
+            "leaf tuple element is skipped, cycle ref visited"
+        );
     }
 
     #[test]
@@ -126,8 +134,14 @@ mod container_of_tuple {
     #[test]
     fn recurse_vec_of_tuple_back_edges() {
         let e: ast::Expr<()> = ast::Expr::VecPair(vec![
-            (Box::new(ast::Expr::Lit(PhantomData)), Box::new(ast::Expr::Lit(PhantomData))),
-            (Box::new(ast::Expr::Lit(PhantomData)), Box::new(ast::Expr::Lit(PhantomData))),
+            (
+                Box::new(ast::Expr::Lit(PhantomData)),
+                Box::new(ast::Expr::Lit(PhantomData)),
+            ),
+            (
+                Box::new(ast::Expr::Lit(PhantomData)),
+                Box::new(ast::Expr::Lit(PhantomData)),
+            ),
         ]);
         let mut c = Counter::default();
         v::Visit::visit_expr(&mut c, &e);

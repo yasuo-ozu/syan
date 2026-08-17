@@ -82,8 +82,6 @@ impl<'a> syan::error::Error for LexError<'a> {
         // Keep the first cause's location; the choice is not what's under test.
         cause.into_iter().next().unwrap_or(LexError { at: "" })
     }
-
-
 }
 
 /// A stream over a borrowed slice. TWO independent non-`'static` lifetimes: `'s` borrows the token
@@ -183,7 +181,9 @@ macro_rules! literal_leaf {
         impl<'a> Parse<Tok<'a>> for $name<Sp<'a>> {
             type Error = ParseError<Sp<'a>>;
 
-            fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError<Sp<'a>>> {
+            fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(
+                stream: &mut __S,
+            ) -> Result<Self, ParseError<Sp<'a>>> {
                 match stream.next() {
                     Some(tok) if tok.text == $text => Ok($name {
                         span: Sp { text: tok.text },
@@ -191,7 +191,10 @@ macro_rules! literal_leaf {
                     Some(tok) => {
                         // Put it back so an enclosing `dup` sees an untouched stream.
                         stream.push(tok);
-                        Err(ParseError::other(Sp::default(), concat!("expected `", $text, "`")))
+                        Err(ParseError::other(
+                            Sp::default(),
+                            concat!("expected `", $text, "`"),
+                        ))
                     }
                     None => Err(ParseError::other(
                         Sp::default(),
@@ -216,7 +219,9 @@ pub struct Word<S> {
 impl<'a> Parse<Tok<'a>> for Word<Sp<'a>> {
     type Error = ParseError<Sp<'a>>;
 
-    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError<Sp<'a>>> {
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(
+        stream: &mut __S,
+    ) -> Result<Self, ParseError<Sp<'a>>> {
         match stream.next() {
             Some(tok) if tok.text.chars().all(char::is_alphanumeric) => Ok(Word {
                 text: tok.text.to_string(),
@@ -245,7 +250,9 @@ pub struct Ref<'a, S> {
 impl<'a> Parse<Tok<'a>> for Ref<'a, Sp<'a>> {
     type Error = ParseError<Sp<'a>>;
 
-    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(stream: &mut __S) -> Result<Self, ParseError<Sp<'a>>> {
+    fn parse_stream<__S: syan::parse::ParseStream<Atom = Tok<'a>>>(
+        stream: &mut __S,
+    ) -> Result<Self, ParseError<Sp<'a>>> {
         match stream.next() {
             Some(tok) if tok.text.chars().all(char::is_alphanumeric) => Ok(Ref {
                 text: tok.text,
@@ -437,7 +444,10 @@ fn entry_through_a_borrowed_stream() {
     let mut stream = SliceStream::new(&toks);
     let expr = parse_expr_borrowed(&mut stream).unwrap();
     // The stream is still ours afterwards — it was borrowed, not consumed.
-    assert!(stream.peek().is_none(), "the whole input should be consumed");
+    assert!(
+        stream.peek().is_none(),
+        "the whole input should be consumed"
+    );
     let ast::Expr::Group { inner, .. } = expr else {
         panic!("expected a group")
     };
@@ -496,5 +506,8 @@ fn lifetime_parameterised_cycle_outlives_the_token_buffer() {
     let ast_lt::Expr::Leaf(r) = *inner.expr else {
         panic!("expected a leaf")
     };
-    assert!(std::ptr::eq(r.text, &src[src.find("kept").unwrap()..][.."kept".len()]));
+    assert!(std::ptr::eq(
+        r.text,
+        &src[src.find("kept").unwrap()..][.."kept".len()]
+    ));
 }

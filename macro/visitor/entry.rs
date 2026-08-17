@@ -73,7 +73,10 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
         Err(e) => return e.to_compile_error(),
     };
     if args.types.is_empty() {
-        abort!(Span::call_site(), "visitor!(..) needs at least one AST type");
+        abort!(
+            Span::call_site(),
+            "visitor!(..) needs at least one AST type"
+        );
     }
     let build: Path = parse_quote!(#syan::_imp::syan_macro::__visitor_build);
     let nonce = nonce.to_string();
@@ -86,7 +89,16 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
     let base_ts = base_tokens(&args.base);
     let make_state = |fetching: TokenStream, rest: &[Path]| {
         state_tokens(
-            &base_ts, &build, &nonce, all_types, &[], &[], &quote!(), &fetching, &quote!(), rest,
+            &base_ts,
+            &build,
+            &nonce,
+            all_types,
+            &[],
+            &[],
+            &quote!(),
+            &fetching,
+            &quote!(),
+            rest,
         )
     };
 

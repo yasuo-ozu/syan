@@ -69,10 +69,7 @@ mod basic {
     fn tuple_of_closures_single_traversal() {
         let mut exprs = 0usize;
         let mut stmts = 0usize;
-        sample().visit((
-            |_s: &Stmt<()>| stmts += 1,
-            |_e: &Expr<()>| exprs += 1,
-        ));
+        sample().visit((|_s: &Stmt<()>| stmts += 1, |_e: &Expr<()>| exprs += 1));
         assert_eq!(exprs, 2);
         assert_eq!(stmts, 1);
     }
@@ -345,10 +342,7 @@ mod generics {
 
         let mut exprs = 0usize;
         let mut ops = 0usize;
-        ast.visit((
-            |_e: &Expr<(), ()>| exprs += 1,
-            |_o: &BinOp<()>| ops += 1,
-        ));
+        ast.visit((|_e: &Expr<(), ()>| exprs += 1, |_o: &BinOp<()>| ops += 1));
         assert_eq!(exprs, 5, "2 Bin + 3 Lit");
         assert_eq!(ops, 2, "Add + Mul");
     }
@@ -381,7 +375,10 @@ mod union_where_unshared {
         // The generated `where S: Bound` lands here, so the user trait must be in scope (a where-bound
         // naming a user trait by bare path needs importing).
         use crate::union_where_unshared::Bound;
-        syan::visit::visitor!(crate::union_where_unshared::Bounded, crate::union_where_unshared::Plain);
+        syan::visit::visitor!(
+            crate::union_where_unshared::Bounded,
+            crate::union_where_unshared::Plain
+        );
     }
 
     struct MyType;
@@ -413,6 +410,9 @@ mod union_where_unshared {
         b.visit(&mut c);
         p.visit(&mut c);
         assert_eq!(c.bounded, 1);
-        assert_eq!(c.plain, 1, "the param-less `Plain` is visited without choosing an `S`");
+        assert_eq!(
+            c.plain, 1,
+            "the param-less `Plain` is visited without choosing an `S`"
+        );
     }
 }

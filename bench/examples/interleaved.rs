@@ -42,17 +42,9 @@ fn main() {
         .collect();
 
     let names = [
-        "nom",
-        "chumsky",
-        "combine",
-        "char/rk",
-        "char/st",
-        "token/rk",
-        "token/st",
+        "nom", "chumsky", "combine", "char/rk", "char/st", "token/rk", "token/st",
     ];
-    println!(
-        "min-of-{ROUNDS} interleaved, 単位 µs (トークン列は parse-only。字句解析は測定外)\n"
-    );
+    println!("min-of-{ROUNDS} interleaved, 単位 µs (トークン列は parse-only。字句解析は測定外)\n");
     print!("| case |");
     for n in names {
         print!(" {n} |");

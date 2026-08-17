@@ -44,7 +44,10 @@ impl GroupShape<TokenTree> for Angle {
             Some(tt) if punct_is(&tt, '<') => {}
             Some(tt) => {
                 stream.push(tt);
-                return Err(syan::error::ParseError::other(Span::default(), "expected `<`"));
+                return Err(syan::error::ParseError::other(
+                    Span::default(),
+                    "expected `<`",
+                ));
             }
             None => return Err(syan::error::ParseError::other(Span::default(), "eof")),
         }
@@ -53,7 +56,10 @@ impl GroupShape<TokenTree> for Angle {
             Some(tt) if punct_is(&tt, '>') => Ok((slot, Angle)),
             Some(tt) => {
                 stream.push(tt);
-                Err(syan::error::ParseError::other(Span::default(), "expected `>`"))
+                Err(syan::error::ParseError::other(
+                    Span::default(),
+                    "expected `>`",
+                ))
             }
             None => Err(syan::error::ParseError::other(Span::default(), "eof")),
         }

@@ -40,7 +40,6 @@ pub(crate) trait FindAttribute {
     fn has_default(&self) -> bool {
         self.find_attribute("default").is_some()
     }
-
 }
 
 fn is_derive_helper_attr(attr: &Attribute) -> bool {

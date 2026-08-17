@@ -25,7 +25,10 @@ mod union_lifetime_order {
 
     mod v {
         // Outer (type param `S`) listed BEFORE Inner (lifetime `'a`) → union order is `[S, 'a]`.
-        syan::visit::visitor!(crate::union_lifetime_order::Outer, crate::union_lifetime_order::Inner);
+        syan::visit::visitor!(
+            crate::union_lifetime_order::Outer,
+            crate::union_lifetime_order::Inner
+        );
     }
 
     #[test]
@@ -53,7 +56,10 @@ mod followed_ref_mut {
     }
 
     mod v {
-        syan::visit::visitor!(crate::followed_ref_mut::Holder, crate::followed_ref_mut::Leaf);
+        syan::visit::visitor!(
+            crate::followed_ref_mut::Holder,
+            crate::followed_ref_mut::Leaf
+        );
     }
 
     #[test]
@@ -112,7 +118,10 @@ mod recurse_nonroot_lifetime {
     }
 
     mod v {
-        syan::visit::visitor!(crate::recurse_nonroot_lifetime::m::Expr, crate::recurse_nonroot_lifetime::m::Stmt);
+        syan::visit::visitor!(
+            crate::recurse_nonroot_lifetime::m::Expr,
+            crate::recurse_nonroot_lifetime::m::Stmt
+        );
     }
 
     #[test]

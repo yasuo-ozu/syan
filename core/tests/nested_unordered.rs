@@ -15,7 +15,10 @@ type IntBool = Unordered<Integer, Bool>;
 fn unparsed(u: &IntBool) -> String {
     let mut out = Vec::<proc_macro2::TokenTree>::new();
     u.unparse(&mut (&mut out)).unwrap();
-    out.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ")
+    out.iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[test]
@@ -41,7 +44,13 @@ fn parses_u_then_t() {
 
 #[test]
 fn new_chooses_t_first_order() {
-    let u = IntBool::new(Integer { value: "1".into(), suffix: None }, Bool { value: true });
+    let u = IntBool::new(
+        Integer {
+            value: "1".into(),
+            suffix: None,
+        },
+        Bool { value: true },
+    );
     assert!(u.t_first());
     assert_eq!(unparsed(&u), "1 true");
     let (t, b) = u.into_inner();
@@ -53,8 +62,14 @@ fn new_chooses_t_first_order() {
 fn span_folds_both_in_input_order() {
     // Constructed (not parsed) so the span type can be `()`; just assert `Spanned` is callable.
     let u = Unordered::new(
-        WithSpan { slot: 1u32, span: () },
-        WithSpan { slot: 2u64, span: () },
+        WithSpan {
+            slot: 1u32,
+            span: (),
+        },
+        WithSpan {
+            slot: 2u64,
+            span: (),
+        },
     );
     let _s: () = u.span();
 }

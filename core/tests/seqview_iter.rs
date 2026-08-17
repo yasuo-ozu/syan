@@ -8,7 +8,12 @@ use syan::visit::{OptView, SeqView};
 #[test]
 fn iter_reads_every_element() {
     let v = vec![1, 2, 3];
-    assert_eq!(<Vec<i32> as SeqView<i32>>::view_iter(&v).copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        <Vec<i32> as SeqView<i32>>::view_iter(&v)
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
     assert_eq!(<Vec<i32> as SeqView<i32>>::view_iter(&v).len(), 3);
 }
 
@@ -19,7 +24,11 @@ fn iter_mut_edits_every_element_in_place() {
         *x *= 10;
     }
     assert_eq!(v, vec![10, 20, 30]);
-    assert_eq!(<Vec<i32> as SeqView<i32>>::view_iter_mut(&mut v).count(), 3, "each element once");
+    assert_eq!(
+        <Vec<i32> as SeqView<i32>>::view_iter_mut(&mut v).count(),
+        3,
+        "each element once"
+    );
 }
 
 #[test]
@@ -84,8 +93,16 @@ fn push_and_retain_mut_prefer_inherent_over_seqview() {
     let mut v: Vec<i32> = vec![1, 2, 3];
     v.push(4); // inherent Vec::push (SeqView::push exists but inherent wins)
     v.retain_mut(|x| *x % 2 == 0); // inherent Vec::retain_mut
-    assert_eq!(v, vec![2, 4], "inherent methods applied, no silent trait fallback");
-    assert_eq!(v.iter().copied().sum::<i32>(), 6, "slice `.iter()` unshadowed by SeqView");
+    assert_eq!(
+        v,
+        vec![2, 4],
+        "inherent methods applied, no silent trait fallback"
+    );
+    assert_eq!(
+        v.iter().copied().sum::<i32>(),
+        6,
+        "slice `.iter()` unshadowed by SeqView"
+    );
     assert_eq!(<Vec<i32> as SeqView<i32>>::len(&v), 2); // trait still reachable via UFCS
     let _view: &dyn SeqView<i32> = &v;
 }

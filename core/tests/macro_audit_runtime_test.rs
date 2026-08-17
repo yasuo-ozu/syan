@@ -17,10 +17,26 @@ fn symbol_reencodes_int_literals() {
     use syan::symbol::Symbol;
     // BUG: each of these should preserve the written spelling (or be rejected); instead the literal
     // is silently normalized to decimal.
-    assert_eq!(<Symbol![0xff]>::default().to_string(), "255", "0xff should stay \"0xff\"");
-    assert_eq!(<Symbol![0b101]>::default().to_string(), "5", "0b101 should stay \"0b101\"");
-    assert_eq!(<Symbol![0o17]>::default().to_string(), "15", "0o17 should stay \"0o17\"");
-    assert_eq!(<Symbol![1_000]>::default().to_string(), "1000", "1_000 should stay \"1_000\"");
+    assert_eq!(
+        <Symbol![0xff]>::default().to_string(),
+        "255",
+        "0xff should stay \"0xff\""
+    );
+    assert_eq!(
+        <Symbol![0b101]>::default().to_string(),
+        "5",
+        "0b101 should stay \"0b101\""
+    );
+    assert_eq!(
+        <Symbol![0o17]>::default().to_string(),
+        "15",
+        "0o17 should stay \"0o17\""
+    );
+    assert_eq!(
+        <Symbol![1_000]>::default().to_string(),
+        "1000",
+        "1_000 should stay \"1_000\""
+    );
 }
 
 // ── BUG: symbol! leaks a raw identifier's `r#` prefix into the symbol string ─────────────────────
@@ -31,5 +47,9 @@ fn symbol_reencodes_int_literals() {
 fn symbol_leaks_raw_ident_prefix() {
     use syan::symbol::Symbol;
     // BUG: should be "type"; the `r#` prefix leaks through.
-    assert_eq!(<Symbol![r#type]>::default().to_string(), "r#type", "raw-ident prefix should be stripped");
+    assert_eq!(
+        <Symbol![r#type]>::default().to_string(),
+        "r#type",
+        "raw-ident prefix should be stripped"
+    );
 }

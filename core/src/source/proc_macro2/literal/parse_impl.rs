@@ -3,7 +3,9 @@ use super::*;
 impl Parse<proc_macro2::TokenTree> for Bool {
     type Error = ParseError<Span>;
 
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         match stream.next() {
             Some(proc_macro2::TokenTree::Ident(ident)) => {
                 let ident_str = ident.to_string();
@@ -11,7 +13,9 @@ impl Parse<proc_macro2::TokenTree> for Bool {
                     "true" => Ok(Bool { value: true }),
                     "false" => Ok(Bool { value: false }),
                     _ => {
-                        let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Ident(ident.clone()));
+                        let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Ident(
+                            ident.clone(),
+                        ));
                         stream.push(proc_macro2::TokenTree::Ident(ident));
                         Err(ParseError::literal(__span, crate::error::LitKind::Bool))
                     }
@@ -43,7 +47,9 @@ fn unescape(rest: &str) -> Option<char> {
 impl Parse<proc_macro2::TokenTree> for ByteChar {
     type Error = ParseError<Span>;
 
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         match stream.next() {
             Some(proc_macro2::TokenTree::Literal(lit)) => {
                 let lit_str = lit.to_string();
@@ -61,7 +67,8 @@ impl Parse<proc_macro2::TokenTree> for ByteChar {
                         Err(ParseError::eof(Span::default()))
                     }
                 } else {
-                    let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
+                    let __span =
+                        crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
                     Err(ParseError::literal(__span, crate::error::LitKind::ByteChar))
                 }
@@ -79,7 +86,9 @@ impl Parse<proc_macro2::TokenTree> for ByteChar {
 impl Parse<proc_macro2::TokenTree> for Char {
     type Error = ParseError<Span>;
 
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         match stream.next() {
             Some(proc_macro2::TokenTree::Literal(lit)) => {
                 let lit_str = lit.to_string();
@@ -98,7 +107,8 @@ impl Parse<proc_macro2::TokenTree> for Char {
                         Err(ParseError::eof(Span::default()))
                     }
                 } else {
-                    let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
+                    let __span =
+                        crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
                     Err(ParseError::literal(__span, crate::error::LitKind::Char))
                 }
@@ -126,7 +136,8 @@ fn parse_lit<T, S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::T
             match f(&lit_str) {
                 Some(value) => Ok(value),
                 None => {
-                    let __span = crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
+                    let __span =
+                        crate::span::Spanned::span(&proc_macro2::TokenTree::Literal(lit.clone()));
                     stream.push(proc_macro2::TokenTree::Literal(lit));
                     Err(ParseError::literal(__span, kind))
                 }
@@ -146,7 +157,11 @@ macro_rules! impl_parse_lit {
         impl Parse<proc_macro2::TokenTree> for $Ty {
             type Error = ParseError<Span>;
 
-            fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
+            fn parse_stream<
+                __S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>,
+            >(
+                stream: &mut __S,
+            ) -> Result<Self, Self::Error> {
                 parse_lit(&mut *stream, $kind, $body)
             }
         }

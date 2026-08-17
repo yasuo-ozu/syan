@@ -168,11 +168,11 @@ impl crate::parse::unparse::Emitter<proc_macro2::TokenTree> for proc_macro2::Tok
 impl<T: Default + core::fmt::Display> Parse<proc_macro2::TokenTree> for Symbol<T> {
     type Error = ParseError<Span>;
 
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         match stream.next() {
-            Some(proc_macro2::TokenTree::Ident(ident))
-                if ident == Self::default().to_string() =>
-            {
+            Some(proc_macro2::TokenTree::Ident(ident)) if ident == Self::default().to_string() => {
                 Ok(Default::default())
             }
             Some(proc_macro2::TokenTree::Punct(punct))
