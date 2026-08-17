@@ -2,12 +2,16 @@
   <img src="https://raw.githubusercontent.com/yasuo-ozu/syan/main/syan.png" width="140" alt="syan logo: a token stream feeding a syntax tree, with arrows circling back to the tokens">
 </p>
 
-# syan crate [![Latest Version]][crates.io] [![Documentation]][docs.rs]
+# syan crate [![Latest Version]][crates.io] [![Documentation]][docs.rs] [![CI]][ci-workflow] [![MSRV]][msrv-workflow]
 
 [Latest Version]: https://img.shields.io/crates/v/syan.svg
 [crates.io]: https://crates.io/crates/syan
 [Documentation]: https://img.shields.io/docsrs/syan
 [docs.rs]: https://docs.rs/syan/latest/syan/
+[CI]: https://github.com/yasuo-ozu/syan/actions/workflows/ci.yml/badge.svg
+[ci-workflow]: https://github.com/yasuo-ozu/syan/actions/workflows/ci.yml
+[MSRV]: https://img.shields.io/crates/msrv/syan.svg
+[msrv-workflow]: https://github.com/yasuo-ozu/syan/actions/workflows/msrv.yml
 
 **Declare the syntax tree; the parser is derived from it.** `syan` is a general-purpose parser. It
 is generic over the *atom* it reads, so the input can be a `&str`, a `&[u8]`, or a proc-macro
