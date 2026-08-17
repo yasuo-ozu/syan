@@ -9,19 +9,16 @@
 [Documentation]: https://img.shields.io/docsrs/syan
 [docs.rs]: https://docs.rs/syan/latest/syan/
 
-**Declare the syntax tree; the parser is derived from it.** `syan` is a general-purpose parser: it
-reads `char`s from a `&str`, bytes from a `&[u8]`, or `TokenTree`s from a proc-macro `TokenStream`,
-because it is generic over the *atom* it consumes. Trees round-trip back to atoms, carry spans, and
-may be mutually recursive.
+**Declare the syntax tree; the parser is derived from it.** `syan` is a general-purpose parser. It
+is generic over the *atom* it reads, so the input can be a `&str`, a `&[u8]`, or a proc-macro
+`TokenStream`. Trees carry spans, unparse back to atoms, and may be mutually recursive.
 
-Nothing in the core is tied to `proc_macro2`. That is one optional feature and one source module
-among several — if you are writing a proc macro see [Proc macros](#proc-macros), and if you are
-parsing ordinary text, read on.
+Nothing in the core needs `proc_macro2`. It is one optional feature and one source module. Writing a
+proc macro? See [Proc macros](#proc-macros). Otherwise read on.
 
 ## Parsing text
 
-A combinator library builds a parser as a *value* and leaves the shape of the result to you. Here is
-`combine` reading `x = 1`:
+A combinator library builds a parser as a *value*. Here is `combine` reading `x = 1`:
 
 ```rust,ignore
 use combine::parser::char::{char, digit, spaces};
@@ -36,9 +33,9 @@ let mut assign = char('x')
 assert_eq!(assign.parse("x = 1").unwrap().0, 1);
 ```
 
-The grammar is there, but only implicitly — in the order of the `with`/`skip` calls. The result is
-whatever the last combinator yielded, so a named tree means writing it out separately and mapping
-onto it. `syan` starts from the tree instead, and **the field order is the grammar**:
+The grammar is only implicit, in the order of the `with` and `skip` calls. The result is whatever
+the last combinator returned; a named tree means writing one out and mapping onto it. `syan` starts
+from the tree instead. **The field order is the grammar:**
 
 ```rust
 # #[cfg(feature = "proc_macro2")] {
@@ -61,13 +58,15 @@ assert_eq!((a.eq.span.line, a.eq.span.col, a.eq.span.loc), (1, 3, 2));
 # }
 ```
 
-Separators between fields are skipped, so `"x=1"` and `"x  =  1"` both parse. Where spacing *is*
-part of the grammar, `#[joint]` on a field demands there was none and `#[alone]` demands there was
-one.
+You get a named struct, not a tuple, and spans come with it. The span is a type parameter, so one
+node serves both text and a `TokenStream`.
+
+Separators between fields are skipped, so `"x=1"` and `"x  =  1"` both parse. When spacing matters,
+`#[joint]` demands none and `#[alone]` demands one.
 
 ## Combinators
 
-Sequencing is the field order; everything else is a type you put in a field.
+Sequencing is the field order. Everything else is a type you put in a field.
 
 | type | parses |
 |---|---|
@@ -83,7 +82,7 @@ Sequencing is the field order; everything else is a type you put in a field.
 
 ### Groups
 
-A group takes two fields: one holding the delimiters, and one — marked `#[group(..)]` — parsed from
+A group takes two fields: one for the delimiters, and one marked `#[group(..)]` that is parsed from
 what is *inside* them.
 
 ```rust
@@ -106,18 +105,17 @@ assert_eq!(call.args.len(), 3);
 # }
 ```
 
-The `()` in `GroupParen<(), S>` is the holder's own content type — empty, because the content is the
-`args` field instead. Splitting it this way leaves the content type free, which is what lets a group
-sit on a recursion cycle.
+The `()` is the holder's own content type. It is empty because the content lives in `args` instead.
+Keeping the two apart leaves the content type free, which is what lets a group sit on a recursion
+cycle.
 
-A group and a `Punctuated` treat the boundaries *between their parts* the way a struct treats its
-fields, so the separators above are skipped. `Vec<T>` is plain repetition with no such boundary:
-whatever sits between two elements is the element's own business.
+A group and a `Punctuated` skip separators between their parts, as a struct does between fields.
+`Vec<T>` is plain repetition, so what sits between two elements is the element's own business.
 
 ## Recursive grammars
 
-A grammar whose types refer to each other needs `#[recurse]` on the enclosing module. Without it the
-derived bounds are mutually dependent, so none of them can be proved and nothing compiles.
+Types that refer to each other need `#[recurse]` on the enclosing module. Without it the derived
+bounds are mutually dependent, so none can be proved and nothing compiles.
 
 ```rust
 # #[cfg(feature = "proc_macro2")] {
@@ -142,18 +140,17 @@ let e: ast::Expr<_> = Parse::parse("- - 1").unwrap();
 # }
 ```
 
-Alternatives are tried in order, and `Neg` recurses back into `Expr` through the `Box`. Depth is
-bounded only by the call stack. `#[recurse]` routes the cyclic obligations through the
-[`decycle`](https://docs.rs/decycle) crate; `#[recurse(structural)]` selects its other engine, which
-is faster but narrower in scope.
+Alternatives are tried in order, and `Neg` recurses through the `Box`. Depth is bounded only by the
+call stack. `#[recurse]` routes the cyclic obligations through the
+[`decycle`](https://docs.rs/decycle) crate. `#[recurse(structural)]` picks its other engine, which is
+faster but narrower.
 
-A cycle can also run through a group — a `#[group(..)]` field whose type refers back to the enclosing
-enum — which is what the split form in [Groups](#groups) is for.
+A cycle can also run through a group. That is what the split form in [Groups](#groups) is for.
 
 ## Visitors
 
-Walking a tree is a separate derive. `#[derive(Ast)]` marks a node and `#[subast(..)]` names the
-other nodes it can reach; `visitor!` then generates the traversal for that set.
+Walking a tree is a separate derive. `#[derive(Ast)]` marks a node, `#[subast(..)]` names the other
+nodes it can reach, and `visitor!` generates the traversal.
 
 ```rust
 mod ast {
@@ -188,19 +185,18 @@ fn main() {
 }
 ```
 
-A closure visits one node type; a tuple of closures visits several in a single traversal, and a
-struct implementing the generated `Visit`/`VisitMut` trait gives you a method per node type — call
-`visit::visit_expr(self, i)` from it to keep descending. `visit_mut` edits in place, without
-rebuilding the tree.
+A closure visits one node type. A tuple of closures visits several in one traversal. A struct
+implementing the generated `Visit` or `VisitMut` trait gets a method per node type; call
+`visit::visit_expr(self, i)` from it to keep descending. `visit_mut` edits in place.
 
 ## Proc macros
 
 A `TokenStream` is just another source, behind the default `proc_macro2` feature. Its atom is a
-`TokenTree`, its span is a `proc_macro2::Span`, and the literal types (`Integer`, `Str`, `Float`, …)
+`TokenTree` and its span is a `proc_macro2::Span`. The literal types (`Integer`, `Str`, `Float`, …)
 come with it.
 
-This is the niche `syn` occupies, and the contrast is the same one as with combinators: `syn` has
-you write the tree *and* the code that walks the input to build it, kept in step by hand.
+This is `syn`'s niche, and the contrast is the same as with combinators. `syn` has you write the
+tree *and* the code that walks the input, kept in step by hand.
 
 ```rust,ignore
 // syn: the tree, and then a parser for it, written separately.
@@ -219,10 +215,9 @@ impl Parse for Assign {
 }
 ```
 
-The `Assign` from the top of this file parses a `TokenStream` unchanged — only the span and the
-literal type follow the source. Adding `#[derive(Unparse)]` gives the other direction, which is what
-a macro needs to emit its result: a `TokenStream` is an `Emitter`, so a tree writes straight into
-one.
+The `Assign` from the top of this file reads a `TokenStream` unchanged. Only the span and the
+literal type follow the source. `#[derive(Unparse)]` adds the other direction, which is how a macro
+emits its result: a `TokenStream` is an `Emitter`, so a tree writes straight into one.
 
 ```rust
 # #[cfg(feature = "proc_macro2")] {
@@ -246,20 +241,19 @@ assert_eq!(out.to_string(), "x = 1");
 # }
 ```
 
-A token source delivers a delimited group as a *single* `TokenTree`, so `#[group(..)]` gets the
-group's contents handed to it and whitespace inside a repetition never arises — `Call` from
-[Groups](#groups) parses `f(1, 2, 3)`, spaces and all, without change.
+A token source delivers a delimited group as one `TokenTree`, so `#[group(..)]` is handed its
+contents directly. `Call` from [Groups](#groups) reads `f(1, 2, 3)` unchanged.
 
 ## Errors
 
-A failed parse returns `ParseError<S>`, an enum over the *kind* of failure — `Expected`, `Eof`,
-`Group`, `Literal`, and so on — carrying a span of your source's own type. Nothing is formatted until
-you print it.
+A failed parse returns `ParseError<S>`. It is an enum over the *kind* of failure — `Expected`,
+`Eof`, `Group`, `Literal`, and so on — carrying a span of your source's type. Nothing is formatted
+until you print it.
 
 ## Features
 
-- `proc_macro2` (default) — the `TokenStream` source and its literal types. Turn it off and `syan`
-  drops the dependency entirely, leaving the text (`&str`, `String`) and byte (`&[u8]`) sources.
+- `proc_macro2` (default) — the `TokenStream` source and its literal types. Turn it off and the
+  dependency goes away, leaving the text (`&str`, `String`) and byte (`&[u8]`) sources.
 
 ## License
 
