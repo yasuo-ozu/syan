@@ -128,4 +128,22 @@ mod combinator_boundaries {
     fn a_trailing_separator_does_not_invent_an_item() {
         assert_eq!(args("f(1,)"), None, "trailing comma is not a valid item");
     }
+
+    #[derive(Parse)]
+    struct Reps<S> {
+        items: Vec<Integer>,
+        _end: Token![S => ;],
+    }
+
+    fn reps(src: &str) -> Option<usize> {
+        Parse::parse(src).ok().map(|r: Reps<Text>| r.items.len())
+    }
+
+    #[test]
+    fn vec_skips_between_items() {
+        assert_eq!(reps("1 2;"), Some(2));
+        assert_eq!(reps("1  2   3;"), Some(3));
+        assert_eq!(reps("12;"), Some(1));
+        assert_eq!(reps(";"), Some(0));
+    }
 }

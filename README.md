@@ -106,11 +106,7 @@ assert_eq!(call.args.len(), 3);
 ```
 
 The `()` is the holder's own content type. It is empty because the content lives in `args` instead.
-Keeping the two apart leaves the content type free, which is what lets a group sit on a recursion
-cycle.
-
-A group and a `Punctuated` skip separators between their parts, as a struct does between fields.
-`Vec<T>` is plain repetition, so what sits between two elements is the element's own business.
+Keeping the two apart leaves the content type free.
 
 ## Recursive grammars
 

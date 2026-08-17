@@ -28,7 +28,14 @@ macro_rules! impl_for_collection {
             type Error = $item::Error;
             fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
                 let mut v: Self = Default::default();
-                while let Ok(item) = stream.dup(|stream| $item::parse_stream(&mut *stream)) {
+                let mut first = true;
+                while let Ok(item) = stream.dup(|stream| {
+                    if !first {
+                        crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
+                    }
+                    $item::parse_stream(&mut *stream)
+                }) {
+                    first = false;
                     v.extend(std::iter::once(item));
                 }
                 Ok(v)
