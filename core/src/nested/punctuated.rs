@@ -302,12 +302,14 @@ where
     Item::Error: crate::error::UnionWith<Punct::Error>,
     <Item::Error as crate::error::UnionWith<Punct::Error>>::Output:
         Into<ParseError<crate::span::SpanOf<Atom>>>,
-    <Item::Error as crate::error::UnionWith<Punct::Error>>::Output: Into<ParseError<crate::span::SpanOf<Atom>>>,
+    <Item::Error as crate::error::UnionWith<Punct::Error>>::Output:
+        Into<ParseError<crate::span::SpanOf<Atom>>>,
 {
     type Error = <Item::Error as crate::error::UnionWith<Punct::Error>>::Output;
 
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
-
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         let first_item = match stream.dup(|stream| Item::parse_stream(&mut *stream)) {
             Ok(item) => item,
             Err(_) => {
@@ -319,8 +321,10 @@ where
 
         loop {
             let pair: Result<_, Self::Error> = stream.dup(|stream| {
+                crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
                 let punct = Punct::parse_stream(&mut *stream)
                     .map_err(<Item::Error as UnionWith<Punct::Error>>::use_right)?;
+                crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
                 let item = Item::parse_stream(&mut *stream)
                     .map_err(<Item::Error as UnionWith<Punct::Error>>::use_left)?;
                 Ok((punct, item))

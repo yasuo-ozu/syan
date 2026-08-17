@@ -6,7 +6,6 @@
 use crate::error::ParseError;
 use crate::parse::{IntoParseStream, Parse, ParseStream, Tape};
 use crate::span::WithSpan;
-use crate::symbol::Symbol;
 use core::convert::Infallible;
 
 /// Where a `char` sits in the source text.
@@ -109,8 +108,15 @@ impl ParseStream for Stream {
         Ok(())
     }
 
+    /// Whitespace is the separator in text. Consumes a run of it and reports whether there was any,
+    /// which is what tells [`Joint`](crate::nested::Joint) the atoms around it were not adjacent.
     fn skip_sep(&mut self) -> bool {
-        true
+        let mut skipped = false;
+        while self.0.peek().is_some_and(|a| a.slot.is_whitespace()) {
+            self.0.next();
+            skipped = true;
+        }
+        skipped
     }
 }
 
@@ -123,10 +129,19 @@ impl IntoParseStream for String {
     }
 }
 
+impl IntoParseStream for &str {
+    type Atom = WithSpan<char, Span>;
+    type Output = Stream;
+
+    fn into_parse_stream(self) -> Self::Output {
+        Stream::new(self.to_owned())
+    }
+}
+
 macro_rules! impl_parse_for_char {
     ($($name:ident),* $(,)?) => {
         $(
-            impl Parse<WithSpan<char, Span>> for Symbol<crate::symbol::chars::$name> {
+            impl Parse<WithSpan<char, Span>> for crate::symbol::chars::$name {
                 type Error = ParseError<Span>;
 
                 fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = WithSpan<char, Span>>>(

@@ -1,4 +1,7 @@
 #![doc(html_logo_url = "https://raw.githubusercontent.com/yasuo-ozu/syan/main/syan.png")]
+// The README's visitor example needs an explicit `fn main` so its `mod ast` lands at the crate
+// root: `#[subast(..)]` only accepts `crate`-rooted paths.
+#![allow(clippy::needless_doctest_main)]
 #![doc = include_str!("../../README.md")]
 extern crate self as syan;
 

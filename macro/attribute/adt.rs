@@ -205,6 +205,9 @@ pub(crate) trait Adt {
                                 #{spacing == Spacing::Joint}
                             )?;
                         }
+                        #(if spacing.is_none()) {
+                            let _ = #syan::parse::parse_stream::ParseStream::skip_sep(&mut *#v_stream);
+                        }
                         let #field_ident = ::core::result::Result::map_err(
                             <#to_parse_ty as #trait_fullpath>::parse_stream(&mut *#v_stream),
                             // Spelled in full: `Into::into` alone leaves the source as an
@@ -290,12 +293,15 @@ pub(crate) trait Adt {
                     // Both the holder `Clone` and the `Fill` HRTB projection are gone — the holder and
                     // the content are passed by reference.
                     let mut sub_ty_generics = generics.clone();
-                    sub_ty_generics.params.insert(0, parse_quote!('syan_substruct_ref));
+                    sub_ty_generics
+                        .params
+                        .insert(0, parse_quote!('syan_substruct_ref));
                     let slot_ty = quote! {
                         #{&substruct.ident}
                         #{sub_ty_generics.split_for_impl().1}
                     };
-                    let group_unparse: Path = parse_quote!(#syan::nested::group::GroupUnparse<#tp_atom>);
+                    let group_unparse: Path =
+                        parse_quote!(#syan::nested::group::GroupUnparse<#tp_atom>);
                     ret.extend(quote! {
                         let __syan_slot = #{&substruct.ident} {
                             #(for subfield in &subfields) { #{&subfield.ident}, }
@@ -307,7 +313,8 @@ pub(crate) trait Adt {
                     });
 
                     where_predicates.push(parse_quote!(#field_ty: #group_unparse));
-                    where_predicates.push(parse_quote!(for<'syan_substruct_ref> #slot_ty: #trait_fullpath));
+                    where_predicates
+                        .push(parse_quote!(for<'syan_substruct_ref> #slot_ty: #trait_fullpath));
                     substructs.push(substruct);
                 } else {
                     // Only a field that really is unparsed gets the bound. A `#[group(..)]` holder

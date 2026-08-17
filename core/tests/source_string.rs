@@ -15,13 +15,13 @@ fn test_span_migrate() {
         col: 3,
         loc: 10,
     };
-    
+
     // migrate should prefer the span with higher loc
     let result = span1.clone().migrate(span2.clone());
     assert_eq!(result.line, 2);
     assert_eq!(result.col, 3);
     assert_eq!(result.loc, 10);
-    
+
     let result = span2.migrate(span1);
     assert_eq!(result.line, 2);
     assert_eq!(result.col, 3);
@@ -40,7 +40,7 @@ fn test_span_migrate_equal_loc() {
         col: 3,
         loc: 10,
     };
-    
+
     // When loc is equal, should prefer the first span
     let result = span1.clone().migrate(span2);
     assert_eq!(result.line, 1);
@@ -58,47 +58,47 @@ fn test_stream_empty_string() {
 #[test]
 fn test_stream_multiple_chars() {
     let mut stream = Stream::new("abc".to_string());
-    
+
     let atom1 = stream.next().unwrap();
     assert_eq!(atom1.slot, 'a');
     assert_eq!(atom1.span.line, 1);
     assert_eq!(atom1.span.col, 1);
     assert_eq!(atom1.span.loc, 0);
-    
+
     let atom2 = stream.next().unwrap();
     assert_eq!(atom2.slot, 'b');
     assert_eq!(atom2.span.line, 1);
     assert_eq!(atom2.span.col, 2);
     assert_eq!(atom2.span.loc, 1);
-    
+
     let atom3 = stream.next().unwrap();
     assert_eq!(atom3.slot, 'c');
     assert_eq!(atom3.span.line, 1);
     assert_eq!(atom3.span.col, 3);
     assert_eq!(atom3.span.loc, 2);
-    
+
     assert!(stream.next().is_none());
 }
 
 #[test]
 fn test_stream_peek() {
     let mut stream = Stream::new("abc".to_string());
-    
+
     // Peek should show first char without consuming
     let peeked = stream.peek().unwrap();
     assert_eq!(peeked.slot, 'a');
     assert_eq!(peeked.span.line, 1);
     assert_eq!(peeked.span.col, 1);
     assert_eq!(peeked.span.loc, 0);
-    
+
     // Peek again should show same char
     let peeked2 = stream.peek().unwrap();
     assert_eq!(peeked2.slot, 'a');
-    
+
     // Next should return the peeked char
     let atom = stream.next().unwrap();
     assert_eq!(atom.slot, 'a');
-    
+
     // Now peek should show next char
     let peeked3 = stream.peek().unwrap();
     assert_eq!(peeked3.slot, 'b');
@@ -107,7 +107,7 @@ fn test_stream_peek() {
 #[test]
 fn test_stream_push() {
     let mut stream = Stream::new("bc".to_string());
-    
+
     let pushed_atom = WithSpan {
         slot: 'a',
         span: Span {
@@ -116,28 +116,30 @@ fn test_stream_push() {
             loc: 0,
         },
     };
-    
+
     stream.push(pushed_atom);
-    
+
     // Should get the pushed atom first
     let atom = stream.next().unwrap();
     assert_eq!(atom.slot, 'a');
     assert_eq!(atom.span.line, 1);
     assert_eq!(atom.span.col, 0);
     assert_eq!(atom.span.loc, 0);
-    
+
     // Then the original string chars
     let atom2 = stream.next().unwrap();
     assert_eq!(atom2.slot, 'b');
-    
+
     let atom3 = stream.next().unwrap();
     assert_eq!(atom3.slot, 'c');
 }
 
 #[test]
 fn test_stream_skip_sep() {
+    // Text has no separator atoms, so `skip_sep` skips nothing and reports nothing skipped.
     let mut stream = Stream::new("test".to_string());
-    assert!(stream.skip_sep());
+    assert!(!stream.skip_sep());
+    assert_eq!(stream.next().unwrap().slot, 't');
 }
 
 #[test]
@@ -170,19 +172,19 @@ fn test_parse_char_classes() {
 fn test_parse_with_newlines_and_spaces() {
     // Test parsing chars from multi-line strings
     let mut stream = Stream::new("a\n b\tc".to_string());
-    
+
     // Parse 'a'
     let result = Symbol::<chars::_a>::parse_stream(&mut stream);
     assert!(result.is_ok());
-    
+
     // Parse newline
     let atom = stream.next().unwrap();
     assert_eq!(atom.slot, '\n');
-    
+
     // Parse space
     let result = Symbol::<chars::Space>::parse_stream(&mut stream);
     assert!(result.is_ok());
-    
+
     // Parse 'b'
     let result = Symbol::<chars::_b>::parse_stream(&mut stream);
     assert!(result.is_ok());
@@ -192,19 +194,19 @@ fn test_parse_with_newlines_and_spaces() {
 fn test_parse_pushback_functionality() {
     let input = "abc".to_string();
     let mut stream = input.into_parse_stream();
-    
+
     // Try to parse 'b' (should fail)
     let result = Symbol::<chars::_b>::parse_stream(&mut stream);
     assert!(result.is_err());
-    
+
     // The 'a' should have been pushed back, so we can parse it now
     let result = Symbol::<chars::_a>::parse_stream(&mut stream);
     assert!(result.is_ok());
-    
+
     // Now we can parse 'b'
     let result = Symbol::<chars::_b>::parse_stream(&mut stream);
     assert!(result.is_ok());
-    
+
     // And finally 'c'
     let result = Symbol::<chars::_c>::parse_stream(&mut stream);
     assert!(result.is_ok());
@@ -214,48 +216,71 @@ fn test_parse_pushback_functionality() {
 fn test_multiline_position_tracking() {
     let input = "line1\nline2\n\nline4".to_string();
     let mut stream = input.into_parse_stream();
-    
+
     // First line
     let atom = stream.next().unwrap(); // 'l'
     assert_eq!(atom.span.line, 1);
     assert_eq!(atom.span.col, 1);
     assert_eq!(atom.span.loc, 0);
-    
+
     stream.next(); // 'i'
     stream.next(); // 'n'
     stream.next(); // 'e'
-    
+
     let atom = stream.next().unwrap(); // '1'
     assert_eq!(atom.span.line, 1);
     assert_eq!(atom.span.col, 5);
     assert_eq!(atom.span.loc, 4);
-    
+
     let atom = stream.next().unwrap(); // '\n'
     assert_eq!(atom.span.line, 1);
     assert_eq!(atom.span.col, 6);
     assert_eq!(atom.span.loc, 5);
-    
+
     // Second line
     let atom = stream.next().unwrap(); // 'l'
     assert_eq!(atom.span.line, 2);
     assert_eq!(atom.span.col, 1);
     assert_eq!(atom.span.loc, 6);
-    
+
     stream.next(); // 'i'
     stream.next(); // 'n'
     stream.next(); // 'e'
     stream.next(); // '2'
     stream.next(); // '\n'
-    
+
     // Empty line (just newline)
     let atom = stream.next().unwrap(); // '\n'
     assert_eq!(atom.span.line, 3);
     assert_eq!(atom.span.col, 1);
     assert_eq!(atom.span.loc, 12);
-    
+
     // Fourth line
     let atom = stream.next().unwrap(); // 'l'
     assert_eq!(atom.span.line, 4);
     assert_eq!(atom.span.col, 1);
     assert_eq!(atom.span.loc, 13);
+}
+
+#[test]
+fn test_skip_sep_consumes_whitespace_run() {
+    let mut stream = Stream::new("  \t\n x".to_string());
+    assert!(stream.skip_sep(), "a run of whitespace is a separator");
+    assert_eq!(stream.next().unwrap().slot, 'x');
+    // nothing left to skip before EOF
+    assert!(!stream.skip_sep());
+}
+
+#[test]
+fn test_skip_sep_is_idempotent_when_adjacent() {
+    let mut stream = Stream::new("ab".to_string());
+    assert!(!stream.skip_sep());
+    assert!(!stream.skip_sep());
+    assert_eq!(stream.next().unwrap().slot, 'a');
+}
+
+#[test]
+fn test_into_parse_stream_for_str() {
+    assert!(Symbol::<chars::_a>::parse("a").is_ok());
+    assert!(Symbol::<chars::_a>::parse("b").is_err());
 }

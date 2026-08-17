@@ -101,9 +101,13 @@ where
 {
     type Error = ParseError<crate::span::SpanOf<Atom>>;
 
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
         let open = O::parse_stream(&mut *stream).map_err(Into::into)?;
+        crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
         let slot = T::parse_stream(&mut *stream).map_err(Into::into)?;
+        crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
         let close = C::parse_stream(&mut *stream).map_err(Into::into)?;
         Ok(Group { open, slot, close })
     }
@@ -158,7 +162,9 @@ where
         Slot::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
     {
         let open = O::parse_stream(&mut *stream).map_err(Into::into)?;
+        crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
         let slot = Slot::parse_stream(&mut *stream).map_err(Into::into)?;
+        crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
         let close = C::parse_stream(&mut *stream).map_err(Into::into)?;
         Ok((
             slot,

@@ -82,6 +82,7 @@ pub struct CStrRaw {
 
 mod display_impl;
 mod parse_impl;
+mod parse_text_impl;
 mod unparse_impl;
 #[cfg(test)]
 mod tests {
@@ -126,19 +127,19 @@ mod tests {
     fn test_bytechar_parsing_escape_sequences() {
         let result = parse_tokens::<ByteChar>("b'\\n'").unwrap();
         assert_eq!(result.value, b'\n');
-        
+
         let result = parse_tokens::<ByteChar>("b'\\t'").unwrap();
         assert_eq!(result.value, b'\t');
-        
+
         let result = parse_tokens::<ByteChar>("b'\\r'").unwrap();
         assert_eq!(result.value, b'\r');
-        
+
         let result = parse_tokens::<ByteChar>("b'\\\\'").unwrap();
         assert_eq!(result.value, b'\\');
-        
+
         let result = parse_tokens::<ByteChar>("b'\\''").unwrap();
         assert_eq!(result.value, b'\'');
-        
+
         let result = parse_tokens::<ByteChar>("b'\\0'").unwrap();
         assert_eq!(result.value, 0);
     }
@@ -152,7 +153,7 @@ mod tests {
     fn test_char_parsing_simple() {
         let result = parse_tokens::<Char>("'a'").unwrap();
         assert_eq!(result.value, 'a');
-        
+
         let result = parse_tokens::<Char>("'1'").unwrap();
         assert_eq!(result.value, '1');
     }
@@ -161,19 +162,19 @@ mod tests {
     fn test_char_parsing_escape_sequences() {
         let result = parse_tokens::<Char>("'\\n'").unwrap();
         assert_eq!(result.value, '\n');
-        
+
         let result = parse_tokens::<Char>("'\\t'").unwrap();
         assert_eq!(result.value, '\t');
-        
+
         let result = parse_tokens::<Char>("'\\r'").unwrap();
         assert_eq!(result.value, '\r');
-        
+
         let result = parse_tokens::<Char>("'\\\\'").unwrap();
         assert_eq!(result.value, '\\');
-        
+
         let result = parse_tokens::<Char>("'\\''").unwrap();
         assert_eq!(result.value, '\'');
-        
+
         let result = parse_tokens::<Char>("'\\0'").unwrap();
         assert_eq!(result.value, '\0');
     }
@@ -188,7 +189,7 @@ mod tests {
         let result = parse_tokens::<Integer>("42").unwrap();
         assert_eq!(result.value, "42");
         assert_eq!(result.suffix, None);
-        
+
         let result = parse_tokens::<Integer>("0").unwrap();
         assert_eq!(result.value, "0");
         assert_eq!(result.suffix, None);
@@ -199,11 +200,11 @@ mod tests {
         let result = parse_tokens::<Integer>("42u32").unwrap();
         assert_eq!(result.value, "42");
         assert_eq!(result.suffix, Some("u32".to_string()));
-        
+
         let result = parse_tokens::<Integer>("123i64").unwrap();
         assert_eq!(result.value, "123");
         assert_eq!(result.suffix, Some("i64".to_string()));
-        
+
         let result = parse_tokens::<Integer>("456usize").unwrap();
         assert_eq!(result.value, "456");
         assert_eq!(result.suffix, Some("usize".to_string()));
@@ -214,7 +215,7 @@ mod tests {
         let result = parse_tokens::<Integer>("1_000_000").unwrap();
         assert_eq!(result.value, "1_000_000");
         assert_eq!(result.suffix, None);
-        
+
         let result = parse_tokens::<Integer>("1_000u64").unwrap();
         assert_eq!(result.value, "1_000");
         assert_eq!(result.suffix, Some("u64".to_string()));
@@ -231,7 +232,7 @@ mod tests {
         let result = parse_tokens::<Float>("3.14").unwrap();
         assert_eq!(result.value, "3.14");
         assert_eq!(result.suffix, None);
-        
+
         let result = parse_tokens::<Float>("0.5").unwrap();
         assert_eq!(result.value, "0.5");
         assert_eq!(result.suffix, None);
@@ -242,7 +243,7 @@ mod tests {
         let result = parse_tokens::<Float>("3.14f32").unwrap();
         assert_eq!(result.value, "3.14");
         assert_eq!(result.suffix, Some("f32".to_string()));
-        
+
         let result = parse_tokens::<Float>("2.718f64").unwrap();
         assert_eq!(result.value, "2.718");
         assert_eq!(result.suffix, Some("f64".to_string()));
@@ -254,7 +255,7 @@ mod tests {
         let result = parse_tokens::<Float>("1.0e10").unwrap();
         assert_eq!(result.value, "1.0e10");
         assert_eq!(result.suffix, None);
-        
+
         let result = parse_tokens::<Float>("1.5e-3").unwrap();
         assert_eq!(result.value, "1.5e-3");
         assert_eq!(result.suffix, None);
@@ -270,7 +271,7 @@ mod tests {
     fn test_str_parsing_simple() {
         let result = parse_tokens::<Str>("\"hello\"").unwrap();
         assert_eq!(result.value, "hello");
-        
+
         let result = parse_tokens::<Str>("\"\"").unwrap();
         assert_eq!(result.value, "");
     }
@@ -279,7 +280,7 @@ mod tests {
     fn test_str_parsing_with_escapes() {
         let result = parse_tokens::<Str>("\"hello\\nworld\"").unwrap();
         assert_eq!(result.value, "hello\\nworld");
-        
+
         let result = parse_tokens::<Str>("\"quote: \\\"text\\\"\"").unwrap();
         assert_eq!(result.value, "quote: \\\"text\\\"");
     }
@@ -310,7 +311,7 @@ mod tests {
     fn test_bytestr_parsing() {
         let result = parse_tokens::<ByteStr>("b\"hello\"").unwrap();
         assert_eq!(result.value, b"hello");
-        
+
         let result = parse_tokens::<ByteStr>("b\"\"").unwrap();
         assert_eq!(result.value, b"");
     }
@@ -339,7 +340,7 @@ mod tests {
     fn test_cstr_parsing() {
         let result = parse_tokens::<CStr>("c\"hello\"").unwrap();
         assert_eq!(result.value, "hello");
-        
+
         let result = parse_tokens::<CStr>("c\"\"").unwrap();
         assert_eq!(result.value, "");
     }
@@ -368,32 +369,112 @@ mod tests {
     fn test_display_implementations() {
         assert_eq!(Bool { value: true }.to_string(), "true");
         assert_eq!(Bool { value: false }.to_string(), "false");
-        
+
         assert_eq!(ByteChar { value: b'a' }.to_string(), "b'a'");
         assert_eq!(ByteChar { value: b'\n' }.to_string(), "b'\\n'");
         assert_eq!(ByteChar { value: 255 }.to_string(), "b'\\xff'");
-        
+
         assert_eq!(Char { value: 'a' }.to_string(), "'a'");
         assert_eq!(Char { value: '\n' }.to_string(), "'\\n'");
-        
-        assert_eq!(Integer { value: "42".to_string(), suffix: None }.to_string(), "42");
-        assert_eq!(Integer { value: "42".to_string(), suffix: Some("u32".to_string()) }.to_string(), "42u32");
-        
-        assert_eq!(Float { value: "3.14".to_string(), suffix: None }.to_string(), "3.14");
-        assert_eq!(Float { value: "3.14".to_string(), suffix: Some("f32".to_string()) }.to_string(), "3.14f32");
-        
-        assert_eq!(Str { value: "hello".to_string() }.to_string(), "\"hello\"");
-        assert_eq!(Str { value: "say \"hi\"".to_string() }.to_string(), "\"say \\\"hi\\\"\"");
-        
-        assert_eq!(StrRaw { value: "hello".to_string(), hash_count: 0 }.to_string(), "r\"hello\"");
-        assert_eq!(StrRaw { value: "hello".to_string(), hash_count: 2 }.to_string(), "r##\"hello\"##");
-        
-        assert_eq!(ByteStr { value: b"hello".to_vec() }.to_string(), "b\"hello\"");
-        
-        assert_eq!(ByteStrRaw { value: b"hello".to_vec(), hash_count: 1 }.to_string(), "br#\"hello\"#");
-        
-        assert_eq!(CStr { value: "hello".to_string() }.to_string(), "c\"hello\"");
-        
-        assert_eq!(CStrRaw { value: "hello".to_string(), hash_count: 1 }.to_string(), "cr#\"hello\"#");
+
+        assert_eq!(
+            Integer {
+                value: "42".to_string(),
+                suffix: None
+            }
+            .to_string(),
+            "42"
+        );
+        assert_eq!(
+            Integer {
+                value: "42".to_string(),
+                suffix: Some("u32".to_string())
+            }
+            .to_string(),
+            "42u32"
+        );
+
+        assert_eq!(
+            Float {
+                value: "3.14".to_string(),
+                suffix: None
+            }
+            .to_string(),
+            "3.14"
+        );
+        assert_eq!(
+            Float {
+                value: "3.14".to_string(),
+                suffix: Some("f32".to_string())
+            }
+            .to_string(),
+            "3.14f32"
+        );
+
+        assert_eq!(
+            Str {
+                value: "hello".to_string()
+            }
+            .to_string(),
+            "\"hello\""
+        );
+        assert_eq!(
+            Str {
+                value: "say \"hi\"".to_string()
+            }
+            .to_string(),
+            "\"say \\\"hi\\\"\""
+        );
+
+        assert_eq!(
+            StrRaw {
+                value: "hello".to_string(),
+                hash_count: 0
+            }
+            .to_string(),
+            "r\"hello\""
+        );
+        assert_eq!(
+            StrRaw {
+                value: "hello".to_string(),
+                hash_count: 2
+            }
+            .to_string(),
+            "r##\"hello\"##"
+        );
+
+        assert_eq!(
+            ByteStr {
+                value: b"hello".to_vec()
+            }
+            .to_string(),
+            "b\"hello\""
+        );
+
+        assert_eq!(
+            ByteStrRaw {
+                value: b"hello".to_vec(),
+                hash_count: 1
+            }
+            .to_string(),
+            "br#\"hello\"#"
+        );
+
+        assert_eq!(
+            CStr {
+                value: "hello".to_string()
+            }
+            .to_string(),
+            "c\"hello\""
+        );
+
+        assert_eq!(
+            CStrRaw {
+                value: "hello".to_string(),
+                hash_count: 1
+            }
+            .to_string(),
+            "cr#\"hello\"#"
+        );
     }
 }

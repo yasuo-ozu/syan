@@ -98,8 +98,13 @@ where
     T: Parse<Atom>,
 {
     type Error = T::Error;
-    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(stream: &mut __S) -> Result<Self, Self::Error> {
-        struct SubStream<Slot, S>(Slot, S);
+    fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
+        stream: &mut __S,
+    ) -> Result<Self, Self::Error> {
+        // The accumulator starts empty rather than at `S::default()`: a default span is a real
+        // value that `migrate` has to compare against, and a source whose `migrate` breaks ties
+        // toward `self` would then discard the first atom's span.
+        struct SubStream<Slot, S>(Slot, Option<S>);
 
         impl<Slot, Atom, S: Span> ParseStream for SubStream<Slot, S>
         where
@@ -111,7 +116,11 @@ where
 
             fn next(&mut self) -> Option<Self::Atom> {
                 if let Some(atom) = self.0.next() {
-                    self.1 = self.1.clone().migrate(atom.span());
+                    let span = atom.span();
+                    self.1 = Some(match self.1.take() {
+                        Some(acc) => acc.migrate(span),
+                        None => span,
+                    });
                     Some(atom)
                 } else {
                     None
@@ -150,11 +159,11 @@ where
                 self.0.skip_sep()
             }
         }
-        let mut stream = SubStream(stream.into_parse_stream(), Atom::Span::default());
+        let mut stream = SubStream(stream.into_parse_stream(), None);
         let slot = T::parse_stream(&mut stream)?;
         Ok(WithSpan {
             slot,
-            span: stream.1,
+            span: stream.1.unwrap_or_default(),
         })
     }
 }

@@ -13,8 +13,12 @@ use template_quote::quote;
 #[test]
 fn method_attempt_wraps_value() {
     // `value.attempt()` wraps a parsed value into the `Attempt` marker (sugar for `Attempt(value)`).
-    let int = Integer { value: "5".into(), suffix: None };
-    let a: Attempt<Integer> = int.attempt();
+    let int = Integer {
+        value: "5".into(),
+        suffix: None,
+    };
+    // `Integer` parses from several atom types, so name the one whose `attempt()` this is.
+    let a: Attempt<Integer> = Parse::<proc_macro2::TokenTree>::attempt(int);
     assert_eq!(a.value, "5"); // via `Deref`
 }
 

@@ -56,7 +56,7 @@ pub trait ParseStream {
     /// Check the spacing before the next atom: `is_joint` demands no separator here, `false` demands
     /// one. Fails with [`ParseError::Spacing`](crate::error::ParseError::Spacing) if the input
     /// disagrees.
-    fn validate_spacing<S: Span + 'static>(
+    fn validate_spacing<S: Span>(
         &mut self,
         is_joint: bool,
     ) -> Result<(), crate::error::ParseError<S>>
@@ -107,7 +107,6 @@ pub trait ParseStream {
         }
     }
 }
-
 
 impl<T: ?Sized> ParseStream for &'_ mut T
 where
