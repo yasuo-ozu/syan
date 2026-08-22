@@ -7,13 +7,37 @@ use core::convert::Infallible;
 pub trait Error: Sized {
     /// Fold the failures of every alternative into a single error.
     fn from_cause(cause: Vec<Self>) -> Self;
+
+    /// Fold the failures of an **ordered choice** — alternatives all attempted from the same
+    /// position, as a derived `enum` attempts its variants. That common start is what makes the
+    /// failures comparable, so this is the only fold that may rank them;
+    /// [`from_cause`](Self::from_cause) takes causes from anywhere and cannot.
+    fn from_alternatives(cause: Vec<Self>) -> Self {
+        Self::from_cause(cause)
+    }
 }
 
 impl<S: Span> Error for ParseError<S> {
     fn from_cause(cause: Vec<Self>) -> Self {
-        // The aggregate takes the FIRST alternative's span: with no record of how far each
-        // alternative got, that is the only deterministic choice available.
+        // Unranked causes: the aggregate takes the FIRST one's span, since spans from unrelated
+        // attempts (a `#[group]`'s content parses on a stream of its own) are not comparable.
         let span = cause.first().map(|c| c.span().clone()).unwrap_or_default();
+        ParseError::Alternatives {
+            span,
+            alts: cause.into_boxed_slice(),
+        }
+    }
+
+    fn from_alternatives(cause: Vec<Self>) -> Self {
+        // Farthest failure wins: the alternative that got closest to matching is where the input
+        // actually goes wrong. `migrate` is the source's own "which position reaches further" rule
+        // and keeps `self` on a tie, so an all-tied aggregate still reports the first alternative.
+        // Reducing rather than folding from `S::default()` keeps that tie off a synthetic span.
+        let span = cause
+            .iter()
+            .map(|c| c.span().clone())
+            .reduce(|acc, span| acc.migrate(span))
+            .unwrap_or_default();
         ParseError::Alternatives {
             span,
             alts: cause.into_boxed_slice(),

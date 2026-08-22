@@ -3,7 +3,8 @@ use super::*;
 /// ABLATION HOOK (measurement only, not a feature).
 ///
 /// With `SYAN_ABLATE_NO_AGGREGATE=1` and `SYAN_ABLATE_CRATE=<crate>`, an enum's failed alternatives
-/// are **dropped as they arrive** instead of being collected into a `Vec` for `Error::from_cause`.
+/// are **dropped as they arrive** instead of being collected into a `Vec` for
+/// `Error::from_alternatives`.
 /// The leaves still construct their `ParseError`; what disappears is the aggregation — the `Vec` and
 /// the `Alternatives` `Box<[Self]>`. That is exactly what the planned `Silent` error-logger policy
 /// can remove, so this measures its ceiling against unchanged parse bodies.
@@ -621,7 +622,7 @@ impl Adt for DataEnum {
                 #errors_decl
                 #(#blocks)*
                 ::core::result::Result::Err(
-                    <#tp_error_final as #syan::error::Error>::from_cause(#causes)
+                    <#tp_error_final as #syan::error::Error>::from_alternatives(#causes)
                 )
             };
         }
@@ -638,7 +639,7 @@ impl Adt for DataEnum {
         // A variant whose fields are exactly the prefix is an unconditional fallback (empty suffix); the
         // FIRST such variant ends the chain (later variants are unreachable). It becomes the closure's tail
         // `Ok(..)`; the variants before it each get a suffix `dup` and `return` on success. With a fallback
-        // a failed suffix is discarded; without one the suffix errors are collected for `from_cause`.
+        // a failed suffix is discarded; without one the suffix errors are collected for aggregation.
         let fallback = variants.iter().position(|(_, fs)| fs.len() == lcp);
         let tried = &variants[..fallback.unwrap_or(variants.len())];
         let has_fallback = fallback.is_some();
@@ -681,12 +682,12 @@ impl Adt for DataEnum {
             }
             None if ablate_no_aggregate() => quote! {
                 ::core::result::Result::Err(
-                    <#tp_error_final as #syan::error::Error>::from_cause(::std::vec::Vec::new())
+                    <#tp_error_final as #syan::error::Error>::from_alternatives(::std::vec::Vec::new())
                 )
             },
             None => quote! {
                 ::core::result::Result::Err(
-                    <#tp_error_final as #syan::error::Error>::from_cause(__syan_errors)
+                    <#tp_error_final as #syan::error::Error>::from_alternatives(__syan_errors)
                 )
             },
         };

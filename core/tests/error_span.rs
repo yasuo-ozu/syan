@@ -160,3 +160,59 @@ fn the_error_is_small() {
         size_of::<ParseError<syan::source::proc_macro2::Span>>()
     );
 }
+
+// ── Ordered-choice localisation: the aggregate points at the FIRST alternative, not the FARTHEST ──
+//
+// `Error::from_cause` takes `cause.first()`'s span, because a `Vec<Self>` of alternative failures
+// carries no record of how far each alternative got. For a grammar built entirely on ordered choice
+// — which is the model `#[derive(Parse)]` implements, and what a real consumer's whole surface
+// syntax is made of — that means a syntax error is reported at the position of the first variant
+// TRIED rather than the one that actually got closest to matching. In practice the caret lands at
+// the start of a construct instead of on the offending token.
+//
+// The conventional remedy is farthest-failure: keep each alternative's consumed length and report
+// the maximum. That needs the length threaded out of each attempt and into `from_cause` (or the
+// aggregate built where the stream position is still known), which is a real change, not a tweak.
+
+/// **FAILS today: reports 0 where it should report 3.**
+///
+/// The alternative that got FURTHEST is the one a reader wants pointed at. Here `Deep` consumes
+/// three atoms before failing and `Shallow` fails on the very first, yet the aggregate reports the
+/// latter's position — purely because it is listed first.
+#[test]
+fn an_aggregate_reports_the_farthest_alternatives_position() {
+    use syan::parse::IntoParseStream;
+
+    // A REAL ordered-choice enum, parsed by the derive — the symptom is only meaningful end to end.
+    #[derive(Parse, Debug)]
+    enum Alt {
+        // Fails immediately: the input does not start with `x`.
+        Shallow(Symbol<chars::_x>),
+        // Consumes `a`, `a`, `a`, then fails looking for `z`.
+        Deep(
+            Symbol<chars::_a>,
+            Symbol<chars::_a>,
+            Symbol<chars::_a>,
+            Symbol<chars::_z>,
+        ),
+    }
+
+    let mut stream = IntoParseStream::into_parse_stream("aaab".to_string());
+    let agg = Alt::parse_stream(&mut stream).unwrap_err();
+
+    let spans: Vec<usize> = agg.alternatives().iter().map(|a| a.span().loc).collect();
+    assert_eq!(
+        spans,
+        vec![0, 3],
+        "the two alternatives should have failed at 0 (`Shallow`, on the first atom) and 3 \
+         (`Deep`, after matching three), got {spans:?}"
+    );
+
+    assert_eq!(
+        agg.span().loc,
+        3,
+        "the aggregate should report the FARTHEST alternative's position: `Deep` matched three \
+         atoms and failed on the fourth, which is where the input actually goes wrong, whereas \
+         `Shallow` failed at 0 and wins only because it is listed first"
+    );
+}
