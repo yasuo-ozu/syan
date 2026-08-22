@@ -267,16 +267,6 @@ fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
     out
 }
 
-/// Peel a field type (containers + refs) to its innermost head ident — the same heads the visitor
-/// follows. `None` for a non-path leaf or a tuple (a tuple contributes no single suspect head — the
-/// "follows nothing" lint, this fn's only caller, conservatively ignores it).
-fn peel_head(ty: &Type) -> Option<Ident> {
-    match crate::util::peel(ty, &std::collections::HashSet::new())?.head {
-        crate::util::Head::Path { head, .. } => Some(head),
-        crate::util::Head::Tuple(_) => None,
-    }
-}
-
 fn for_each_field(data: &Data, mut f: impl FnMut(&Type)) {
     match data {
         Data::Struct(s) => s.fields.iter().for_each(|fld| f(&fld.ty)),
@@ -304,7 +294,6 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     let subast = parse_subast(&input.attrs);
-    let has_subast_attr = input.attrs.iter().any(|a| a.path().is_ident("subast"));
     let field_heads = field_head_idents(input);
     for e in &subast {
         let key = e.matchkey();
@@ -318,45 +307,6 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
         }
     }
 
-    // "Follows nothing" lint: with no `#[subast]` at all, a field whose (peeled) head looks like an
-    // AST node — UpperCamelCase, not this type itself (self-recursion is implicit), not a generic
-    // param, not `PhantomData`/`String` — will be silently treated as a leaf by every visitor. Warn
-    // so the omission is intentional; silence by adding `#[subast(..)]` (or `#[subast()]` to confirm
-    // there are none). Heuristic — it can flag a genuine leaf node type (e.g. one with only a `Span`
-    // field); `#[subast()]` documents that case.
-    if !has_subast_attr {
-        let self_name = ident.to_string();
-        let param_names: std::collections::HashSet<String> = input
-            .generics
-            .params
-            .iter()
-            .map(crate::util::param_name)
-            .collect();
-        let mut suspects: Vec<String> = Vec::new();
-        for_each_field(&input.data, |ty| {
-            if let Some(head) = peel_head(ty) {
-                let h = head.to_string();
-                let looks_ast = h != self_name
-                    && h != "PhantomData"
-                    && h != "String"
-                    && !param_names.contains(&h)
-                    && h.chars().next().is_some_and(|c| c.is_uppercase());
-                if looks_ast && !suspects.contains(&h) {
-                    suspects.push(h);
-                }
-            }
-        });
-        if !suspects.is_empty() {
-            emit_warning!(
-                ident,
-                "`{}` has field type(s) ({}) that look like AST children but no `#[subast]` is \
-                 declared, so a visitor will not traverse them; add `#[subast(..)]` to follow them \
-                 (or `#[subast()]` to confirm there are none)",
-                ident,
-                suspects.join(", ")
-            );
-        }
-    }
     let subast_entry_tokens = subast_tokens(&subast);
 
     let cleaned = cleaned_definition(input);
