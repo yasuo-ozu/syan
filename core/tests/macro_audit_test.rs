@@ -23,6 +23,21 @@
 //!   be asserted by trybuild.
 //! * #[joint]/#[alone] abort message has a typo ("alonw") and prints an empty field name for tuple
 //!   fields — cosmetic.
+//! * #[derive(Ast)]: BOTH of its lints — "`#[subast]` entry `X` matches no field" and the
+//!   "follows nothing" check — are invisible to every stable user. They go through
+//!   `proc_macro_error::emit_warning!`, and proc-macro-error's own docs say "Warnings are emitted
+//!   only on nightly, they are ignored on stable". Verified by building a `Vec<Node>` field with no
+//!   `#[subast]` (silent) AND a deliberately bogus `#[subast(crate::Nonexistent)]` control (also
+//!   silent), so it is the emit layer rather than one lint. This matters more than it looks: the
+//!   "follows nothing" lint was written for exactly the failure pinned in
+//!   `macro_audit_runtime_test.rs`'s `visitor_map_value` — the diagnostic already exists and simply
+//!   cannot speak. A `compile_error!` path, a `cargo:warning=` emission, or nightly detection would
+//!   each turn it back on. Not trybuild-assertable for the same reason it is invisible.
+//! * #[derive(Ast)]: `peel_head` (ast.rs) calls `peel(ty, &HashSet::new())` with an EMPTY
+//!   `user_types`, and `peel`'s head arm only fires on `user_types.contains(..)` — so it looks
+//!   incapable of ever returning `Some`, which would make the "follows nothing" lint dead even on
+//!   nightly. UNCONFIRMED: the dead emit layer above masks it, so it needs a nightly run to
+//!   separate the two.
 
 #[test]
 fn macro_audit_compile_fail() {

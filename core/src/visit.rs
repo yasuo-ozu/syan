@@ -54,7 +54,8 @@ pub trait Repeater<const INDEX: usize> {
 // a **view of that slot** as an argument, through which the visitor edits the parent **in place** (no
 // cloning of existing nodes). The view is a trait implemented directly on the container types — so the
 // descent passes `&mut self.field` with no wrapper. Two dedicated interfaces: [`SeqView`] (Vec-like,
-// unbounded) and [`OptView`] (Option-like, ≤1).
+// unbounded) and [`OptView`] (Option-like, ≤1). A third, [`MapView`], is descent-only: a map holds the
+// node in its VALUE slot, which no positional view can address.
 //
 // The element type is a **type parameter** (`SeqView<T>`, not an associated type); the traits are
 // bare-element only — a wrapper like `Box<T>`/`Attempt<T>` implements `OptView<T>` directly (single-slot,
@@ -186,6 +187,51 @@ impl<'a, T> Iterator for SeqIterMut<'a, T> {
 }
 
 impl<'a, T> ExactSizeIterator for SeqIterMut<'a, T> {}
+
+/// A **map-like** view of an AST map field (`HashMap`/`BTreeMap`): the node sits in the VALUE slot, so
+/// the viewed element is the map's value type rather than its first type argument. Descent-only — a map
+/// slot is keyed, so there is no positional structural edit and hence no `#[seq]`/`#[opt]` counterpart;
+/// it exists so a `View` level resolves `view_iter[_mut]()` on a map just as it does on a
+/// [`SeqView`]/[`OptView`] container, still without the macro naming any container type.
+pub trait MapView<T> {
+    fn view_iter<'a>(&'a self) -> impl Iterator<Item = &'a T>
+    where
+        T: 'a;
+    /// Iterate the values by `&mut` for in-place edits (keys are untouched).
+    fn view_iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut T>
+    where
+        T: 'a;
+}
+
+impl<K, V, S> MapView<V> for std::collections::HashMap<K, V, S> {
+    fn view_iter<'a>(&'a self) -> impl Iterator<Item = &'a V>
+    where
+        V: 'a,
+    {
+        self.values()
+    }
+    fn view_iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut V>
+    where
+        V: 'a,
+    {
+        self.values_mut()
+    }
+}
+
+impl<K, V> MapView<V> for std::collections::BTreeMap<K, V> {
+    fn view_iter<'a>(&'a self) -> impl Iterator<Item = &'a V>
+    where
+        V: 'a,
+    {
+        self.values()
+    }
+    fn view_iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut V>
+    where
+        V: 'a,
+    {
+        self.values_mut()
+    }
+}
 
 /// A mutable, **Option-like** view (≤1 element) of an AST `Option` field, bare-element (nested
 /// `Box`/`Attempt` layers descend separately). A generated

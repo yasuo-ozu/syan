@@ -90,16 +90,17 @@ pub(crate) fn angle<T: quote::ToTokens>(items: &[T]) -> TokenStream {
     }
 }
 
-/// First type argument of a path segment's `<...>` (e.g. the `T` of `Vec<T>`).
-pub(crate) fn first_ty_arg(seg: &PathSegment) -> Option<&Type> {
-    if let PathArguments::AngleBracketed(ab) = &seg.arguments {
-        ab.args.iter().find_map(|a| match a {
-            GenericArgument::Type(t) => Some(t),
-            _ => None,
-        })
-    } else {
-        None
-    }
+/// The type arguments of a path segment's `<...>`, in order (the `T` of `Vec<T>`; the `K`, `V` of
+/// `HashMap<K, V>`).
+pub(crate) fn ty_args(seg: &PathSegment) -> impl Iterator<Item = &Type> {
+    let args = match &seg.arguments {
+        PathArguments::AngleBracketed(ab) => Some(ab.args.iter()),
+        _ => None,
+    };
+    args.into_iter().flatten().filter_map(|a| match a {
+        GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
 }
 
 /// The identifier of an enum/struct item (`None` for anything else).
@@ -128,10 +129,10 @@ pub(crate) enum Container {
     Opt,
 }
 
-/// How one wrapper level of a field descends. `View`: a `SeqView`/`OptView` container
-/// (`Vec`/`Option`/`Box`/`Punctuated`/user wrapper) — descended by the `view_iter[_mut]` method, resolved
-/// to the right view by the compiler (**no container type name is matched**). `Raw`: a fixed-size array or
-/// slice — descended by the slice `iter[_mut]` (arrays/slices have no `SeqView` impl).
+/// How one wrapper level of a field descends. `View`: a `SeqView`/`OptView`/`MapView` container
+/// (`Vec`/`Option`/`Box`/`Punctuated`/`HashMap`/user wrapper) — descended by the `view_iter[_mut]`
+/// method, resolved to the right view by the compiler (**no container type name is matched**). `Raw`: a
+/// fixed-size array or slice — descended by the slice `iter[_mut]` (arrays/slices have no `SeqView` impl).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum LayerKind {
     View,
@@ -163,9 +164,10 @@ fn prepend(kind: LayerKind, mut inner: Peeled) -> Peeled {
 
 /// Peel a field type to its head + the wrapper levels around it, **without matching any container type
 /// name**. A path whose last segment is in `user_types` (a type's `#[subast]` matchkeys + its own ident)
-/// is the head; any *other* path is a `View` wrapper level iff a head is reachable through its first type
-/// argument — so `Vec`/`Option`/`Box`/`Punctuated` and user wrappers are handled uniformly, while
-/// `Vec<String>` (no head below) is a leaf. Arrays/slices are `Raw` levels; a tuple with a followed
+/// is the head; any *other* path is a `View` wrapper level iff a head is reachable through one of its type
+/// arguments (the first such, scanned in order — so a map's VALUE slot is found once its KEY turns out to
+/// hold no head) — so `Vec`/`Option`/`Box`/`Punctuated`/`HashMap` and user wrappers are handled uniformly,
+/// while `Vec<String>` (no head below) is a leaf. Arrays/slices are `Raw` levels; a tuple with a followed
 /// element is a `Head::Tuple`. `None` ⇒ no followed head (a leaf).
 pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
     match ty {
@@ -190,7 +192,9 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
                     shared_ref: false,
                 });
             }
-            peel(first_ty_arg(seg)?, user_types).map(|inner| prepend(LayerKind::View, inner))
+            ty_args(seg)
+                .find_map(|a| peel(a, user_types))
+                .map(|inner| prepend(LayerKind::View, inner))
         }
         // A tuple is a head iff some element is followed; each element is lowered by the caller.
         Type::Tuple(t) if t.elems.iter().any(|e| peel(e, user_types).is_some()) => Some(Peeled {
@@ -215,8 +219,8 @@ pub(crate) fn innermost_acc(conts: &[LayerKind], binding: &TokenStream) -> Token
 
 /// Wrap an already-lowered `body` (dispatching at `innermost_acc(conts, binding)`) in the wrapper levels
 /// `conts` (outer→inner): a `View` level is a `for` over `view_iter[_mut]()` (resolved to `SeqView`/
-/// `OptView` by the compiler), a `Raw` level a `for` over the slice `iter[_mut]()`. Level `i` binds
-/// `__nc{i+1}`, iterating `__nc{i}` (or `binding` at `i == 0`) — so nested wrappers nest the loops.
+/// `OptView`/`MapView` by the compiler), a `Raw` level a `for` over the slice `iter[_mut]()`. Level `i`
+/// binds `__nc{i+1}`, iterating `__nc{i}` (or `binding` at `i == 0`) — so nested wrappers nest the loops.
 pub(crate) fn fold_containers(
     conts: &[LayerKind],
     binding: &TokenStream,

@@ -434,11 +434,11 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         }
 
         // Bring the view methods into scope (unnamed) so a `View`-level descent in any free fn
-        // resolves `view_iter[_mut]()` to `SeqView`/`OptView` by the compiler — no container name is
-        // named. One copy for the whole module (every generated free fn shares this scope) instead of
-        // one per visited type.
+        // resolves `view_iter[_mut]()` to `SeqView`/`OptView`/`MapView` by the compiler — no container
+        // name is named. One copy for the whole module (every generated free fn shares this scope)
+        // instead of one per visited type.
         #[allow(unused_imports)]
-        use ::syan::visit::{OptView as _, SeqView as _};
+        use ::syan::visit::{MapView as _, OptView as _, SeqView as _};
 
         #shared
         #mutable
