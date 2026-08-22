@@ -1,7 +1,7 @@
 [package]
 name = "syan-macro"
 description = "Syntactic and structural parser fundamentals, reimplementing syn crate"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Yasuo Ozu <yasuo@ozu.email>"]
