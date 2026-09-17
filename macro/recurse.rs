@@ -192,7 +192,8 @@ fn expand_items(
             if !derives_any(attrs, &[*name]) {
                 continue;
             }
-            let generated = expand_routed(item, tr, syan, nonce);
+            let mut generated = expand_routed(item, tr, syan, nonce);
+            reduce_group_bounds(&mut generated, name, syan);
             let base = ex.items.len();
             ex.derived.push(Derived {
                 owner: owner.clone(),
@@ -510,6 +511,7 @@ fn make_natural_item(item: &Item) -> Item {
 //    opt-out and leaves it alone, while a bare single-segment reference is a cycle edge to contract.
 //    So `Integer: ::syan::parse::parse::Parse<A>` and `__SyanMacro_Atom: ::syan::span::Spanned`
 //    survive untouched, with no supertrait-alias laundering.
+// Before either, `reduce_group_bounds` pre-peels the `Group<T, O, C>` type form (see there).
 // (There used to be a third rewrite here: every field-parse call's stream argument was wrapped in
 // `syan::parse::erase(…)`, because the growth was in the *stream type* — `&mut &mut …`, one layer per
 // descent level — a monomorphization cycle rather than a trait cycle. `Parse`'s required method now
@@ -608,6 +610,96 @@ fn expand_routed(item: &Item, tr: &(&'static str, Path), syan: &Path, nonce: u64
         ),
     };
     file.items
+}
+
+/// The type form of `#[group]`. decycle peels a wrapped cyclic bound down to the member it reaches,
+/// which is sound for a container whose impl asks nothing beyond the member's (`Vec<Stmt<S>>: Parse<A>`
+/// ⇐ `Stmt<S>: Parse<A>`) — but `Group<T, O, C>`'s impls also need the delimiters, and those premises
+/// would be dropped with the peel. So the bound is split here into the attribute form's pair: a routed
+/// bound on the slot alone (peelable) and an unrouted one carrying the delimiters (`GroupShape` on the
+/// empty holder for `Parse`; `GroupUnparse` / `GroupSpanned`, which never look at the slot, on the
+/// group itself for `Unparse` / `Spanned`).
+fn reduce_group_bounds(items: &mut [Item], name: &str, syan: &Path) {
+    for item in items {
+        let Some(wc) = (match item {
+            Item::Impl(im) => im.generics.where_clause.as_mut(),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let mut out: Punctuated<syn::WherePredicate, Token![,]> = Punctuated::new();
+        for pred in &wc.predicates {
+            let Some((pt, bound)) = routed_type_bound(pred, name) else {
+                out.push(pred.clone());
+                continue;
+            };
+            let Some((slot, holder)) = group_type_parts(&pt.bounded_ty) else {
+                out.push(pred.clone());
+                continue;
+            };
+            let group = &pt.bounded_ty;
+            let args = &bound.path.segments.last().unwrap().arguments;
+            match name {
+                "Parse" => {
+                    out.push(syn::parse_quote!(#holder: #syan::nested::group::GroupShape #args));
+                    out.push(syn::parse_quote!(#slot: #bound));
+                }
+                "Unparse" => {
+                    out.push(syn::parse_quote!(#group: #syan::nested::group::GroupUnparse #args));
+                    out.push(syn::parse_quote!(#slot: #bound));
+                }
+                _ => out.push(syn::parse_quote!(#group: #syan::nested::group::GroupSpanned #args)),
+            }
+        }
+        wc.predicates = out;
+    }
+}
+
+/// A `Ty: <path>::Name<..>` predicate — one plain trait bound, no `for<..>` binder — naming the routed
+/// trait `name` by its last segment.
+fn routed_type_bound<'p>(
+    pred: &'p syn::WherePredicate,
+    name: &str,
+) -> Option<(&'p syn::PredicateType, &'p syn::TraitBound)> {
+    let syn::WherePredicate::Type(pt) = pred else {
+        return None;
+    };
+    if pt.lifetimes.is_some() || pt.bounds.len() != 1 {
+        return None;
+    }
+    let syn::TypeParamBound::Trait(bound) = pt.bounds.first()? else {
+        return None;
+    };
+    (bound.path.segments.last()?.ident == name).then_some((pt, bound))
+}
+
+/// `(slot, holder)` of a `Group<T, O, C>` or `Group{Paren,Brace,Bracket}<T, S>` type: its first type
+/// argument, and the type with that argument replaced by `()`. Matched by name and arity only, like
+/// `#[group]`'s own holder, since a type alias is opaque to a macro.
+fn group_type_parts(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let seg = tp.path.segments.last()?;
+    let arity = match seg.ident.to_string().as_str() {
+        "Group" => 3,
+        "GroupParen" | "GroupBrace" | "GroupBracket" => 2,
+        _ => return None,
+    };
+    if crate::util::ty_args(seg).count() != arity {
+        return None;
+    }
+    let mut holder = tp.clone();
+    let syn::PathArguments::AngleBracketed(args) = &mut holder.path.segments.last_mut()?.arguments
+    else {
+        return None;
+    };
+    let slot = args.args.iter_mut().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })?;
+    let slot = std::mem::replace(slot, syn::parse_quote!(()));
+    Some((slot, syn::Type::Path(holder)))
 }
 
 /// The idents of the `#[group]` substruct definitions a derive emitted.

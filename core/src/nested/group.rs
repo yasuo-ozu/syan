@@ -5,6 +5,9 @@ use crate::span::WithSpan;
 use crate::symbol::chars as punct;
 /// Parses `T` between an opening and a closing delimiter. Reach for the [`GroupParen`],
 /// [`GroupBrace`] and [`GroupBracket`] aliases rather than naming `O` and `C` by hand.
+///
+/// A `Group<T, ..>` field and a `Group<(), ..>` holder with `#[group(self.holder)]` fields are two
+/// spellings of the same grammar, inside a `#[recurse]` cycle as well — see [`GroupShape`].
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Group<T, O, C> {
     pub open: O,
@@ -18,21 +21,8 @@ pub struct Group<T, O, C> {
 #[cfg(feature = "proc_macro2")]
 macro_rules! impl_group_unparse_tt {
     ($open:ident, $close:ident, $delim:ident) => {
-        impl<T, S> Unparse<proc_macro2::TokenTree>
+        impl<T, S> GroupUnparse<proc_macro2::TokenTree>
             for Group<T, WithSpan<punct::$open, S>, WithSpan<punct::$close, S>>
-        where
-            T: Unparse<proc_macro2::TokenTree>,
-        {
-            fn unparse<E: crate::parse::unparse::Emitter<proc_macro2::TokenTree>>(
-                &self,
-                sink: &mut E,
-            ) -> Result<(), E::Error> {
-                emit_tt_group(&self.slot, proc_macro2::Delimiter::$delim, sink)
-            }
-        }
-
-        impl<S> GroupUnparse<proc_macro2::TokenTree>
-            for Group<(), WithSpan<punct::$open, S>, WithSpan<punct::$close, S>>
         {
             fn unparse_group<Slot, E>(
                 &self,
@@ -75,40 +65,54 @@ impl_group_unparse_tt!(OpenBrace, CloseBrace, Brace);
 #[cfg(feature = "proc_macro2")]
 impl_group_unparse_tt!(OpenBracket, CloseBracket, Bracket);
 
-// The span comes from the delimiters alone, deliberately not requiring `T: Spanned` — an empty group
-// (`Group<(), ..>`) still has a span. `#[derive(Spanned)]` would fold the slot in and lose that.
-impl<T, O, C> Spanned for Group<T, O, C>
+/// The span of a group's delimiters, whatever its slot. This is the whole of `Group`'s [`Spanned`]:
+/// deliberately not requiring `T: Spanned`, so an empty `Group<(), ..>` still has a span (a derived
+/// `Spanned` would fold the slot in). Under its own name because `#[recurse]` does not route it,
+/// which is what lets a `Group<T, O, C>` field's `Spanned` bound carry no cycle edge — see
+/// [`GroupShape`].
+pub trait GroupSpanned {
+    type Span: crate::span::Span;
+
+    fn group_span(&self) -> Self::Span;
+}
+
+impl<T, O, C> GroupSpanned for Group<T, O, C>
 where
     O: Spanned,
     C: Spanned<Span = O::Span>,
 {
     type Span = O::Span;
 
-    fn span(&self) -> Self::Span {
+    fn group_span(&self) -> Self::Span {
         crate::span::Span::migrate(self.open.span(), self.close.span())
     }
 }
 
+impl<T, O, C> Spanned for Group<T, O, C>
+where
+    Self: GroupSpanned,
+{
+    type Span = <Self as GroupSpanned>::Span;
+
+    fn span(&self) -> Self::Span {
+        self.group_span()
+    }
+}
+
+// Premises in the attribute form's shape (holder + slot), which is what `#[recurse]` reduces a
+// `Group<T, O, C>` field's bound to; spelled on `O`/`C` they would be unprovable there.
 impl<Atom: crate::span::Spanned, T, O, C> Parse<Atom> for Group<T, O, C>
 where
-    Atom: crate::span::Spanned,
+    Group<(), O, C>: GroupShape<Atom>,
     T: Parse<Atom>,
-    T::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
-    O: Parse<Atom>,
-    O::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
-    C: Parse<Atom>,
-    C::Error: Into<ParseError<crate::span::SpanOf<Atom>>>,
 {
     type Error = ParseError<crate::span::SpanOf<Atom>>;
 
     fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = Atom>>(
         stream: &mut __S,
     ) -> Result<Self, Self::Error> {
-        let open = O::parse_stream(&mut *stream).map_err(Into::into)?;
-        crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
-        let slot = T::parse_stream(&mut *stream).map_err(Into::into)?;
-        crate::parse::parse_stream::ParseStream::skip_sep(&mut *stream);
-        let close = C::parse_stream(&mut *stream).map_err(Into::into)?;
+        let (slot, Group { open, close, .. }) =
+            <Group<(), O, C> as GroupShape<Atom>>::parse_group::<T, __S>(stream)?;
         Ok(Group { open, slot, close })
     }
 }
@@ -118,7 +122,8 @@ where
 ///
 /// `Slot` is a method generic and the result is `(Slot, Self)`, so the obligation `FieldTy:
 /// GroupShape<Atom>` mentions neither the content type nor a projection — that is what lets a
-/// `#[recurse]` cycle pass through a `#[group]` field. Do not lift `Slot` to the trait.
+/// `#[recurse]` cycle pass through a `#[group]` field, and through a `Group<T, ..>`-typed one, whose
+/// bound `#[recurse]` reduces to this plus `T: Parse<Atom>`. Do not lift `Slot` to the trait.
 ///
 /// Implemented two ways: the generic sequencing impl below parses open, content and close as three
 /// atoms, while `crate::source::proc_macro2` implements it per delimiter, consuming a group as a
@@ -135,6 +140,9 @@ pub trait GroupShape<Atom: crate::span::Spanned>: Sized {
 
 /// The [`GroupShape`] counterpart for emitting: writes the delimited group back out around `slot`.
 /// Both the holder and the content are taken by reference, so nothing is cloned.
+///
+/// `Group` implements it filled or not — only the delimiters are read, so on a filled group this emits
+/// the `slot` argument, never `self.slot`; `Unparse for Group` is what emits its own.
 pub trait GroupUnparse<Atom> {
     /// Emit the delimiters around `slot`.
     fn unparse_group<Slot, E>(
@@ -177,7 +185,21 @@ where
     }
 }
 
-impl<Atom, O, C> GroupUnparse<Atom> for Group<(), O, C>
+// Same premise shape as `Parse` above, for the same reason.
+impl<Atom, T, O, C> Unparse<Atom> for Group<T, O, C>
+where
+    Self: GroupUnparse<Atom>,
+    T: Unparse<Atom>,
+{
+    fn unparse<E: crate::parse::unparse::Emitter<Atom>>(
+        &self,
+        sink: &mut E,
+    ) -> Result<(), E::Error> {
+        self.unparse_group(&self.slot, sink)
+    }
+}
+
+impl<Atom, T, O, C> GroupUnparse<Atom> for Group<T, O, C>
 where
     O: Unparse<Atom>,
     C: Unparse<Atom>,
