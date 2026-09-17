@@ -62,12 +62,33 @@ pub trait Parse<Atom: ::syan::span::Spanned>: ::core::marker::Sized {
     /// Parse from anything that can become a stream — `String`, `TokenStream`, an existing stream.
     ///
     /// Provided, so implementors only write [`parse_stream`](Self::parse_stream).
+    ///
+    /// **Whatever is left over is ignored.** `Self` may match a prefix and the rest of the input is
+    /// silently dropped — a top-level `Vec<T>` or `Option<T>` then never fails at all, because it
+    /// simply stops at the first atom it cannot read. Use [`parse_all`](Self::parse_all) to require
+    /// the whole input to be consumed.
     fn parse(
         stream: impl ::syan::parse::into_parse_stream::IntoParseStream<Atom = Atom>,
     ) -> ::core::result::Result<Self, Self::Error> {
         Self::parse_stream(
             &mut ::syan::parse::into_parse_stream::IntoParseStream::into_parse_stream(stream),
         )
+    }
+
+    /// Parse, and require the input to be exhausted — "parse this whole file".
+    ///
+    /// Same as [`parse`](Self::parse) followed by [`Eof`](::syan::nested::eof::Eof), so trailing
+    /// separators are fine but trailing content is an error. The error type is the universal
+    /// [`ParseError`](::syan::error::ParseError), since the leftover-input failure is not one
+    /// `Self::Error` can necessarily express.
+    fn parse_all(
+        stream: impl ::syan::parse::into_parse_stream::IntoParseStream<Atom = Atom>,
+    ) -> ::core::result::Result<Self, ::syan::error::ParseError<::syan::span::SpanOf<Atom>>> {
+        let mut stream =
+            ::syan::parse::into_parse_stream::IntoParseStream::into_parse_stream(stream);
+        let value = Self::parse_stream(&mut stream).map_err(::core::convert::Into::into)?;
+        <::syan::nested::eof::Eof as ::syan::parse::parse::Parse<Atom>>::parse_stream(&mut stream)?;
+        ::core::result::Result::Ok(value)
     }
 
     /// Wrap this value in [`Attempt`](::syan::nested::Attempt), the **atomic-parse** marker: parsing
