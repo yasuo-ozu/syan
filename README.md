@@ -245,6 +245,21 @@ until you print it.
 
 - `proc_macro2` (default) — the `TokenStream` source and its literal types. Turn it off and the
   dependency goes away, leaving the text (`&str`, `String`) and byte (`&[u8]`) sources.
+- `serde` — `Serialize`/`Deserialize` for the tree types, so a parsed AST can be stored or sent.
+  Text and byte spans are real positions and survive; a `proc_macro2::Span` is an opaque compiler
+  handle and is written as unit. `ParseError` is `Serialize` only — its detail is a `&'static str`.
+
+  The encoding is a faithful image of the tree: every punctuation ZST becomes `{"slot":null,
+  "span":{…}}`, every span `{line,col,loc}`, every enum externally tagged. That round-trips, which is
+  what storage and transport need. It is *not* a shape anything renders — a viewer wants one uniform
+  node with the punctuation dropped, which is a lossy projection only your grammar can define, so it
+  cannot carry `Deserialize`. A type gets one `Serialize` impl: derive it for persistence, and write
+  a display encoding as a wrapper (`Dump<'a, T>(&'a T)`) if you need one.
+
+  A node spelled with `Token!`/`Symbol!` needs `#[serde(bound(..))]`, because serde cannot infer
+  bounds through a type macro — see the [`Token!`](https://docs.rs/syan/latest/syan/symbol/macro.Token.html)
+  docs. An explicit bound *replaces* serde's inference rather than adding to it, so name **every**
+  type parameter the node has, not just the span.
 
 ## License
 

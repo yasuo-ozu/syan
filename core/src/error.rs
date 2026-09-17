@@ -54,6 +54,7 @@ impl Error for Infallible {
 /// Which kind of literal a [`ParseError::Literal`] is about.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LitKind {
     Bool,
     Char,
@@ -89,6 +90,7 @@ impl LitKind {
 /// to `()`, so an atom that carries no spans needs no annotation.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum ParseError<S = ()> {
     /// A specific thing was expected here and something else was found.
     Expected { span: S, what: &'static str },

@@ -15,24 +15,28 @@ use crate::source::proc_macro2::Span;
 
 /// A boolean literal, `true` or `false`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Bool {
     pub value: bool,
 }
 
 /// A byte character literal, `b'a'`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ByteChar {
     pub value: u8,
 }
 
 /// A character literal, `'a'`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Char {
     pub value: char,
 }
 
 /// An integer literal, `42` or `1_000u64`. `value` keeps any underscores and drops the suffix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Integer {
     pub value: String,
     pub suffix: Option<String>,
@@ -40,6 +44,7 @@ pub struct Integer {
 
 /// A floating-point literal, `3.14` or `2.5f64`. `value` drops the suffix.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Float {
     pub value: String,
     pub suffix: Option<String>,
@@ -47,12 +52,14 @@ pub struct Float {
 
 /// A string literal, `"text"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Str {
     pub value: String,
 }
 
 /// A raw string literal, `r"text"` or `r#"text"#`, where `hash_count` is the number of `#`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StrRaw {
     pub value: String,
     pub hash_count: usize,
@@ -60,12 +67,14 @@ pub struct StrRaw {
 
 /// A byte string literal, `b"text"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ByteStr {
     pub value: Vec<u8>,
 }
 
 /// A raw byte string literal, `br"text"` or `br#"text"#`, where `hash_count` is the number of `#`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ByteStrRaw {
     pub value: Vec<u8>,
     pub hash_count: usize,
@@ -73,12 +82,14 @@ pub struct ByteStrRaw {
 
 /// A C string literal, `c"text"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CStr {
     pub value: String,
 }
 
 /// A raw C string literal, `cr"text"` or `cr#"text"#`, where `hash_count` is the number of `#`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CStrRaw {
     pub value: String,
     pub hash_count: usize,
