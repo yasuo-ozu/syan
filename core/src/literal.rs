@@ -3,6 +3,15 @@
 //! Pick the type that matches the literal you expect: [`Integer`], [`Float`], [`Bool`], [`Char`],
 //! [`ByteChar`], [`Str`], [`ByteStr`], [`CStr`], or one of the `Raw` variants. The string forms
 //! store their contents exactly as written, escapes unresolved; the character forms resolve theirs.
+//!
+//! Every one of them parses from a `TokenTree` and from a text atom alike — `WithSpan<char, S>` for
+//! a [`string`](crate::source::string) source and `WithSpan<u8, S>` for a
+//! [`bytes`](crate::source::bytes) one. The text scanners are in `parse_text_impl` ([`Integer`])
+//! and `parse_text_more` (everything else); the latter's module docs list where they differ from
+//! the `TokenTree` impls, which see a literal the lexer has already delimited.
+//!
+//! [`Ident`] is not a Rust literal but belongs with them: it is the general word leaf a text
+//! grammar needs, with its character class a type parameter.
 
 #[cfg(feature = "proc_macro2")]
 use crate::error::ParseError;
@@ -96,9 +105,13 @@ pub struct CStrRaw {
 }
 
 mod display_impl;
+pub mod ident;
 #[cfg(feature = "proc_macro2")]
 mod parse_impl;
 mod parse_text_impl;
+mod parse_text_more;
+
+pub use ident::Ident;
 #[cfg(feature = "proc_macro2")]
 mod unparse_impl;
 #[cfg(all(test, feature = "proc_macro2"))]
