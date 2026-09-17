@@ -137,6 +137,17 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// 3. Reshape each cycle member's generated `impl` into the form `decycle` can contract, and hand the
 ///    module to `decycle`.
 ///
+/// # Groups
+///
+/// Both spellings of a delimited group work on a cycle edge: a `Group<(), ..>` holder followed by
+/// `#[group(self.holder)]` fields, or a `Group<T, ..>` (`GroupParen<T, S>`, …) field with the recursive
+/// type in `T`. The latter's `Group<T, ..>: Parse<A>` bound is split into the holder's `GroupShape`
+/// (an ordinary premise) and `T: Parse<A>` (the cycle edge) before `decycle` sees it, since peeling it
+/// whole would discard the delimiters' premise; `Unparse`/`Spanned` go through `GroupUnparse` /
+/// `GroupSpanned` the same way. The group is recognised by name and arity — `Group` with three type
+/// arguments, or `GroupParen`/`GroupBrace`/`GroupBracket` with two — so a user alias over one must be
+/// spelled out on a cycle edge.
+///
 /// # Which traits are routed
 ///
 /// **`Parse`, `Unparse` and `Spanned`** all go through `decycle`. Depth is **unbounded** modulo the
