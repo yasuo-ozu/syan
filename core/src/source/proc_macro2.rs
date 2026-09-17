@@ -13,6 +13,24 @@ use crate::symbol::Symbol;
 #[derive(Clone, Debug, Default)]
 pub struct Span(Option<(proc_macro2::Span, proc_macro2::Span)>);
 
+/// A `proc_macro2::Span` is an opaque handle into the compiler's source map, so it cannot survive
+/// the process. The span is written as unit and read back as [`Span::default`] -- an AST round-trips
+/// structurally, but its token-source positions do not. Text and byte sources keep real positions.
+#[cfg(feature = "serde")]
+impl serde::Serialize for Span {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_unit()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Span {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <() as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Span(None))
+    }
+}
+
 impl crate::span::Span for Span {
     fn migrate(self, other: Self) -> Self {
         match (self.0, other.0) {

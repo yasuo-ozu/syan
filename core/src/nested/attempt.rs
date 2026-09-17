@@ -13,6 +13,7 @@ use core::ops::{Deref, DerefMut};
 /// Requires `Atom: Clone` (the rewind duplicates the stream). `Attempt` `Deref`s to `T` and forwards
 /// [`Unparse`]/[`Spanned`], and a `visitor!()` walks straight through it to `T`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Attempt<T>(pub T);
 
 impl<T> Deref for Attempt<T> {

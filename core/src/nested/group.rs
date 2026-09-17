@@ -6,6 +6,7 @@ use crate::symbol::chars as punct;
 /// Parses `T` between an opening and a closing delimiter. Reach for the [`GroupParen`],
 /// [`GroupBrace`] and [`GroupBracket`] aliases rather than naming `O` and `C` by hand.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Group<T, O, C> {
     pub open: O,
     pub slot: T,

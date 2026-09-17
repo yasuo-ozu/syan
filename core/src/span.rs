@@ -60,6 +60,7 @@ impl<T: Spanned> Spanned for &'_ mut T {
 /// `WithSpan<T, S>` parses a `T` and records the span of everything it consumed.
 #[derive(Default, Clone, Debug)]
 #[implement]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WithSpan<T, S> {
     #[implement(
         traits::PartialEq,
