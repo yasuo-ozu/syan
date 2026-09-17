@@ -51,7 +51,7 @@ where
     ) -> Result<Self, Self::Error> {
         let head = Head::parse_stream(&mut *stream).map_err(Into::into)?;
         if stream.skip_sep() {
-            let span = stream.peek().map(|a| a.span()).unwrap_or_default();
+            let span = stream.pos();
             return Err(ParseError::spacing(span, true));
         }
         let rem = <Joint<Rem>>::parse_stream(&mut *stream)?.0;
