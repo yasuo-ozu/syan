@@ -9,7 +9,7 @@ use crate::span::WithSpan;
 use core::convert::Infallible;
 
 /// Where a `char` sits in the source text.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     pub line: usize,
