@@ -21,17 +21,24 @@ struct SpannedBytes<'a> {
     loc: usize,
 }
 
+impl SpannedBytes<'_> {
+    /// Where the next byte would start — past the last one served once the slice is exhausted.
+    fn cursor(&self) -> Span {
+        Span {
+            line: self.line,
+            col: self.col,
+            loc: self.loc,
+        }
+    }
+}
+
 impl Iterator for SpannedBytes<'_> {
     type Item = WithSpan<u8, Span>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let b = *self.src.get(self.idx)?;
         self.idx += 1;
-        let span = Span {
-            line: self.line,
-            col: self.col,
-            loc: self.loc,
-        };
+        let span = self.cursor();
         if b == b'\n' {
             self.line += 1;
             self.col = 1;
@@ -91,6 +98,11 @@ impl ParseStream for Stream<'_> {
         Ok(())
     }
 
+    fn pos(&mut self) -> Span {
+        let peeked = self.0.peek().map(|a| a.span.clone());
+        peeked.unwrap_or_else(|| self.0.source().cursor())
+    }
+
     /// ASCII whitespace is the separator. Consumes a run of it and reports whether there was any,
     /// which is what tells [`Joint`](crate::nested::Joint) the atoms around it were not adjacent.
     fn skip_sep(&mut self) -> bool {
@@ -131,7 +143,7 @@ macro_rules! impl_parse_for_byte {
                             stream.push(atom);
                             Err(ParseError::expected(span, concat!("the byte `", stringify!($name), "`")))
                         }
-                        None => Err(ParseError::eof(Sp::default())),
+                        None => Err(ParseError::eof(stream.pos())),
                     }
                 }
             }

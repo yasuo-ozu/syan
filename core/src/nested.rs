@@ -1,5 +1,7 @@
 /// [`Attempt`] — parse a `T`, rewinding the stream if it fails.
 pub mod attempt;
+/// [`Eof`] — matches only where the input has run out.
+pub mod eof;
 /// [`Group`](group::Group) and its `GroupParen`/`GroupBrace`/`GroupBracket` aliases — a delimited group.
 pub mod group;
 /// [`Joint`] — a tuple of parts with no separator allowed between them.
@@ -10,6 +12,7 @@ pub mod punctuated;
 pub mod unordered;
 
 pub use attempt::Attempt;
+pub use eof::Eof;
 pub use joint::Joint;
 pub use punctuated::Punctuated;
 pub use unordered::Unordered;
