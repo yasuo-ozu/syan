@@ -202,7 +202,11 @@ fn main() {
     for src in cases {
         let pretty = format(src).expect("parse");
         assert_eq!(pretty, format(&pretty).expect("reparse"), "not idempotent");
-        println!("{:22} -> {}", format!("{src:?}"), pretty.replace('\n', "\\n"));
+        println!(
+            "{:22} -> {}",
+            format!("{src:?}"),
+            pretty.replace('\n', "\\n")
+        );
     }
     // The property that matters: no comment is dropped.
     for src in cases {
