@@ -18,6 +18,65 @@ pub struct Punctuated<Item, Punct> {
     inner: PunctuatedInner<Item, Punct>,
 }
 
+/// Encoded as `{ items, puncts }` rather than by deriving on the private inner shape, so the wire
+/// format does not mirror the field layout. The invariant `puncts.len() == items.len() - 1` (and
+/// both empty for an empty list) is re-checked on the way in.
+#[cfg(feature = "serde")]
+impl<Item: serde::Serialize, Punct: serde::Serialize> serde::Serialize for Punctuated<Item, Punct> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut items = Vec::with_capacity(self.len());
+        let mut puncts = Vec::new();
+        if let Some((first, rest)) = &self.inner.0 {
+            items.push(&**first);
+            for (punct, item) in rest {
+                puncts.push(punct);
+                items.push(item);
+            }
+        }
+        let mut st = serializer.serialize_struct("Punctuated", 2)?;
+        st.serialize_field("items", &items)?;
+        st.serialize_field("puncts", &puncts)?;
+        st.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, Item, Punct> serde::Deserialize<'de> for Punctuated<Item, Punct>
+where
+    Item: serde::Deserialize<'de>,
+    Punct: serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(bound(
+            deserialize = "Item: serde::Deserialize<'de>, Punct: serde::Deserialize<'de>"
+        ))]
+        struct Wire<Item, Punct> {
+            items: Vec<Item>,
+            puncts: Vec<Punct>,
+        }
+        let Wire { items, puncts } = Wire::<Item, Punct>::deserialize(deserializer)?;
+        if items.len() != puncts.len() + usize::from(!items.is_empty()) {
+            return Err(serde::de::Error::custom(format!(
+                "Punctuated expects one fewer punct than items, got {} items and {} puncts",
+                items.len(),
+                puncts.len()
+            )));
+        }
+        let mut items = items.into_iter();
+        let Some(first) = items.next() else {
+            return Ok(Self::default());
+        };
+        Ok(Self {
+            inner: PunctuatedInner(Some((
+                Box::new(first),
+                puncts.into_iter().zip(items).collect(),
+            ))),
+        })
+    }
+}
+
 impl<Item, Punct> Default for Punctuated<Item, Punct> {
     fn default() -> Self {
         Self {

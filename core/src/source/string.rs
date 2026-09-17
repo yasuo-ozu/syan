@@ -10,6 +10,7 @@ use core::convert::Infallible;
 
 /// Where a `char` sits in the source text.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     pub line: usize,
     pub col: usize,

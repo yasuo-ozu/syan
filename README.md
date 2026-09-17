@@ -245,6 +245,9 @@ until you print it.
 
 - `proc_macro2` (default) — the `TokenStream` source and its literal types. Turn it off and the
   dependency goes away, leaving the text (`&str`, `String`) and byte (`&[u8]`) sources.
+- `serde` — `Serialize`/`Deserialize` for the tree types, so a parsed AST can be stored or sent.
+  Text and byte spans are real positions and survive; a `proc_macro2::Span` is an opaque compiler
+  handle and is written as unit. `ParseError` is `Serialize` only — its detail is a `&'static str`.
 
 ## License
 

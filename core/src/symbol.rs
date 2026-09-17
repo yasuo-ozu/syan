@@ -24,6 +24,7 @@ pub mod chars {
             #[doc(hidden)]
             #[allow(non_camel_case_types)]
             #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+            #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
             pub struct $name;
         };
         ((@add_doc $_:lifetime $name:ident $(($token:tt))?  $char:literal)) => {
@@ -39,6 +40,7 @@ pub mod chars {
             #[doc = "```"]
             #[allow(non_camel_case_types)]
             #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+            #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
             pub struct $name;
         };
         ($dollar:tt $($($lt:lifetime)? $name:ident $(($token:tt))?@$char:tt)*) => {
@@ -175,6 +177,24 @@ mod imp {
         }
     }
 
+    /// The symbol is a ZST: `T` spells its characters at the type level and carries no data, so it
+    /// is written as unit and read back as itself. Deliberately no `T: Serialize` bound -- requiring
+    /// one would force every `chars::*` marker to be serializable for no gain.
+    #[cfg(feature = "serde")]
+    impl<T> serde::Serialize for _Symbol<T> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_unit()
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    impl<'de, T> serde::Deserialize<'de> for _Symbol<T> {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            <() as serde::Deserialize>::deserialize(deserializer)?;
+            Ok(_Symbol::Symbol)
+        }
+    }
+
     impl<Atom, T> crate::parse::Parse<Atom> for _Symbol<T>
     where
         Atom: crate::span::Spanned + super::chars::AtomParsedToAllChars,
@@ -306,6 +326,15 @@ macro_rules! _Token {
 /// type Example = Symbol!(test_123);
 /// // Encodes as: Joint<(_t, _e, _s, _t, __, _1, _2, _3)>
 /// ```
+/// # Deriving on a node that uses it
+///
+/// A type macro in a field position blocks the *built-in* derives — rustc rejects `#[derive(Debug)]`
+/// (or `Clone`, `PartialEq`, …) on an item containing one, with "`derive` cannot be used on items
+/// with type macros". Proc-macro derives such as [`Parse`](macro@crate::parse::Parse) are unaffected.
+///
+/// With the `serde` feature, `Serialize`/`Deserialize` also derive fine, but serde cannot see
+/// through the macro to infer bounds — see [`Token!`](macro@crate::symbol::Token) for the
+/// `#[serde(bound(..))]` this needs.
 #[doc(inline)]
 pub use crate::_Symbol as Symbol;
 
@@ -336,6 +365,31 @@ pub use crate::_Symbol as Symbol;
 ///
 /// The token is spelled the same way as in [`Symbol!`]: an identifier, a punctuation character, a
 /// number, or a character literal.
+///
+/// # Deriving on a node that uses it
+///
+/// Like [`Symbol!`], this is a type macro, so the *built-in* derives cannot be used on a struct that
+/// names it in a field — rustc rejects `#[derive(Debug)]` on an item containing a type macro.
+/// `#[derive(Parse)]` and other proc-macro derives are unaffected.
+///
+/// With the `serde` feature, serde's derive works but cannot infer bounds through the macro, so the
+/// span parameter needs one spelled out:
+///
+/// ```
+/// # #[cfg(feature = "serde")] {
+/// # use serde::{Deserialize, Serialize};
+/// # use syan::literal::Integer;
+/// # use syan::parse::Parse;
+/// # use syan::symbol::Token;
+/// #[derive(Parse, Serialize, Deserialize)]
+/// #[serde(bound(serialize = "S: Serialize", deserialize = "S: Deserialize<'de>"))]
+/// struct Assign<S> {
+///     name: Token![S => x],
+///     eq: Token![S => =],
+///     value: Integer,
+/// }
+/// # }
+/// ```
 ///
 /// [`Symbol!`]: macro@crate::symbol::Symbol
 #[doc(inline)]
