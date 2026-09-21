@@ -191,12 +191,12 @@ pub trait Repeater<const INDEX: usize> {
 // descent passes `&mut self.field` with no wrapper. Two are edit targets: [`SeqView`] (Vec-like,
 // unbounded) and [`OptView`] (Option-like, ≤1). Two are descent-only: [`MapView`], because a map holds
 // the node in its VALUE slot, which no positional view can address; and [`SlotView`], because a
-// shared-ownership handle always holds exactly one node and can neither be emptied nor filled.
+// transparent wrapper always holds exactly one node and can neither be emptied nor filled.
 //
 // The element type is a **type parameter** (`SeqView<T>`, not an associated type); the traits are
-// bare-element only — a wrapper like `Box<T>`/`Attempt<T>` implements `OptView<T>` directly (single-slot,
-// always-full) and `Rc<T>`/`Arc<T>` implement [`SlotView<T>`](SlotView); the visitor descends *through*
-// wrapped shapes by recursing per layer, not via any wrapped-element impl.
+// bare-element only — a wrapper like `Box<T>`/`Attempt<T>` is a [`SlotView<T>`](SlotView) through the
+// blanket over [`Deref`](core::ops::Deref), and the visitor descends *through* wrapped shapes by
+// recursing per layer, not via any wrapped-element impl.
 
 /// A mutable, **sequence-like** view of an AST collection field (`Vec`/`VecDeque`/`Punctuated`),
 /// bare-element — the element type is `T` itself, never a wrapped `Box<T>`. A generated
@@ -369,8 +369,8 @@ impl<K, V> MapView<V> for std::collections::BTreeMap<K, V> {
     }
 }
 
-/// A mutable, **Option-like** view (≤1 element) of an AST `Option` field, bare-element (nested
-/// `Box`/`Rc`/`Attempt` layers descend separately). A generated
+/// A mutable, **Option-like** view (≤1 element) of an AST `Option` field, bare-element (a nested
+/// `Box`/`Attempt` layer descends separately, as a [`SlotView`]). A generated
 /// `visit_<t>_opt(&mut self, &mut impl OptView<T>)` receives one.
 pub trait OptView<T> {
     fn is_some(&self) -> bool;
@@ -399,10 +399,10 @@ pub trait OptView<T> {
 }
 
 // `SeqView`/`OptView` are **bare-element**: the container holds the viewed node `T` directly (no element
-// adapter). A transparent single-slot wrapper (`Box<T>`/`Attempt<T>`/user wrappers) implements `OptView<T>`
-// (always present, so a 1-element view) so the visitor descends *through* it uniformly via
-// `view_iter_mut`, recursing per level. `take` can't empty a fixed single slot, so it is unreachable — a
-// single wrapper is descent-only, never a `#[seq]`/`#[opt]` edit target.
+// adapter). A transparent single-slot wrapper (`Box<T>`/`Attempt<T>`/user wrappers) is reached by
+// [`SlotView`] instead, so the visitor descends *through* it uniformly via `view_iter_mut`, recursing
+// per level. Such a slot can be neither emptied nor filled, so it is descent-only — never a
+// `#[seq]`/`#[opt]` edit target.
 
 impl<T> SeqView<T> for Vec<T> {
     fn len(&self) -> usize {
@@ -477,93 +477,40 @@ impl<T> OptView<T> for Option<T> {
     }
 }
 
-impl<T> OptView<T> for Box<T> {
-    fn is_some(&self) -> bool {
-        true
-    }
-    fn get(&self) -> Option<&T> {
-        Some(&**self)
-    }
-    fn get_mut(&mut self) -> Option<&mut T> {
-        Some(&mut **self)
-    }
-    fn set(&mut self, value: T) {
-        **self = value;
-    }
-    fn take(&mut self) -> Option<T> {
-        unreachable!("Box<T> is a single-slot view; `take` would empty it")
-    }
-}
-
-impl<T> OptView<T> for crate::nested::Attempt<T> {
-    fn is_some(&self) -> bool {
-        true
-    }
-    fn get(&self) -> Option<&T> {
-        Some(&self.0)
-    }
-    fn get_mut(&mut self) -> Option<&mut T> {
-        Some(&mut self.0)
-    }
-    fn set(&mut self, value: T) {
-        self.0 = value;
-    }
-    fn take(&mut self) -> Option<T> {
-        unreachable!("Attempt<T> is a single-slot view; `take` would empty it")
-    }
-}
-
-/// A **single-slot** view: a wrapper that always holds exactly one node, never zero.
+/// A **transparent single-slot** wrapper: one that converts straight to the node it holds, such as
+/// `Box<T>` or [`Attempt<T>`](crate::nested::Attempt). Blanket-implemented over
+/// [`Deref`](core::ops::Deref), so a consumer's own wrapper descends with no view impl of its own —
+/// one `impl Deref<Target = Node> for MyWrapper` is enough.
 ///
-/// Distinct from [`OptView`] on purpose. An `Option` slot can be empty, filled, or emptied, so it
-/// has `is_some`/`set`/`take`; a shared-ownership handle has none of those states — it holds one
-/// node for its whole life. Modelling it as an `OptView` would mean an `is_some` that is always
-/// `true` and a `take` that cannot be written. Descent-only: never a `#[seq]`/`#[opt]` edit target.
+/// [`Deref`](core::ops::Deref), not [`AsRef`], is what makes this precise. `Vec<T>` derefs to
+/// `[T]` — unsized, so a `Deref<Target = T>` bound never matches it — while `Option<T>` does not
+/// deref at all. Both keep their own view. `AsRef` cannot be used here: std's reflexive
+/// `impl AsRef<Vec<T>> for Vec<T>` is sized, so a blanket over it catches `Vec` as well and
+/// `view_iter` becomes ambiguous.
 pub trait SlotView<T> {
-    fn get(&self) -> &T;
-    /// Edit the node in place.
-    fn get_mut(&mut self) -> &mut T;
-
-    /// Replace the node the slot holds (the slot itself always remains).
-    fn set(&mut self, value: T) {
-        *self.get_mut() = value;
-    }
     /// Iterate the node by shared ref — always exactly one. Mirrors [`SeqView::view_iter`].
-    fn view_iter(&self) -> core::iter::Once<&T> {
-        core::iter::once(self.get())
-    }
+    fn view_iter(&self) -> core::iter::Once<&T>;
+}
+
+/// The `&mut` half, over [`DerefMut`](core::ops::DerefMut).
+///
+/// `Rc<T>` and `Arc<T>` deref but deliberately have no [`DerefMut`](core::ops::DerefMut): shared ownership
+/// cannot hand out `&mut` to its contents, since two handles could then alias it. They therefore
+/// descend on neither side — a field of that shape is a compile error, not a silent skip. Reach for
+/// `Rc<RefCell<T>>` and visit what you take out of it, or keep the shared subtree out of the walk.
+pub trait SlotViewMut<T> {
     /// Iterate the node by `&mut` — always exactly one. Mirrors [`SeqView::view_iter_mut`].
+    fn view_iter_mut(&mut self) -> core::iter::Once<&mut T>;
+}
+
+impl<W: core::ops::Deref<Target = T> + ?Sized, T> SlotView<T> for W {
+    fn view_iter(&self) -> core::iter::Once<&T> {
+        core::iter::once(self)
+    }
+}
+
+impl<W: core::ops::DerefMut<Target = T> + ?Sized, T> SlotViewMut<T> for W {
     fn view_iter_mut(&mut self) -> core::iter::Once<&mut T> {
-        core::iter::once(self.get_mut())
-    }
-}
-
-/// Shared-ownership slots descend like [`Box`], with one difference that is visible to a caller:
-/// `visit_mut` goes through [`std::rc::Rc::make_mut`], so a node reached through an `Rc` that is
-/// *shared* is **cloned before it is edited** and the other holders keep the original. Mutating
-/// shared data cannot both apply and stay shared; copy-on-write is the resolution that keeps a
-/// traversal complete and deterministic.
-///
-/// [`std::rc::Rc::get_mut`] was the alternative — edit only when uniquely owned — and is rejected
-/// because it makes the set of visited nodes depend on the reference count, so the same visitor
-/// over the same tree would descend differently depending on who else holds a handle.
-///
-/// The `T: Clone` bound is what `make_mut` needs. A non-`Clone` node type in an `Rc` therefore has
-/// no view at all, rather than a silently shared-only one.
-impl<T: Clone> SlotView<T> for std::rc::Rc<T> {
-    fn get(&self) -> &T {
-        self
-    }
-    fn get_mut(&mut self) -> &mut T {
-        std::rc::Rc::make_mut(self)
-    }
-}
-
-impl<T: Clone> SlotView<T> for std::sync::Arc<T> {
-    fn get(&self) -> &T {
-        self
-    }
-    fn get_mut(&mut self) -> &mut T {
-        std::sync::Arc::make_mut(self)
+        core::iter::once(self)
     }
 }
