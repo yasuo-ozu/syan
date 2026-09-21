@@ -126,6 +126,14 @@ pub use syan_macro::Ast;
 ///     fn into_visitor(self) -> impl Visit { Driver(ExprHook(self)) }
 /// }
 ///
+/// impl<__V: Visit> Visit for &mut __V { .. }                       // pass `&mut pass`
+/// impl<__V0: Visit, __V1: Visit> Visit for (__V0, __V1) { .. }     // several passes, one walk
+///
+/// // a visitor inside a `Slot` (`Box<MyPass>`, `Attempt`, your own wrapper)
+/// impl<__S: SlotMut> Visit for syan::visit::SlotDriver<__S> where __S::Target: Visit { .. }
+/// impl<__S: SlotMut> IntoVisitor<syan::visit::WrappedVisitor> for __S
+///     where __S::Target: Visit { .. }
+///
 /// impl super::Expr {
 ///     pub fn visit<__T>(&self, visitor: impl IntoVisitor<__T>) -> &Self { .. }
 /// }
@@ -144,6 +152,12 @@ pub use syan_macro::Ast;
 /// one loop per wrapper layer. There are 8 traits and 20 `into_visitor` impls in all — the tuple
 /// arities, and a `_mut` twin for each.
 ///
+/// Visitors compose two ways. A **tuple of visitors** (arity 2..=8) implements `Visit` itself, so
+/// every element sees every node in one traversal and the tuple can go anywhere one visitor can. A
+/// visitor held in a [`Slot`] arrives through `IntoVisitor` rather than `Visit`, because a blanket
+/// `impl Visit for T where T: SlotMut` and the tuple impls overlap as far as coherence can tell.
+/// `node.visit(Box::new(pass))` therefore works, but the wrapper is taken by value.
+///
 /// A `#[seq]` field adds `visit_<type>_seq`, and `#[opt]` adds `visit_<type>_opt`. Both are on
 /// `VisitMut` only, and both hand you a view of the *parent slot* — a [`SeqView`] or [`OptView`] —
 /// so an override can `push`, `remove` or `retain_mut` rather than only read each element. The
@@ -151,7 +165,7 @@ pub use syan_macro::Ast;
 /// such as `Option<Box<T>>` cannot be edited in place, and the macro says so.
 ///
 /// The walk never names a container type. A field is stepped through `view_iter`, which the
-/// compiler resolves to [`SeqView`], [`OptView`], [`MapView`] or [`SlotView`]. So `Box<T>` and
+/// compiler resolves to [`SeqView`], [`OptView`], [`MapView`] or [`Slot`]. So `Box<T>` and
 /// `Vec<T>` generate the same code, and nested wrappers nest the loops.
 ///
 /// Every listed type needs `#[derive(Ast)]`: the macro reads its shape from the metadata that
@@ -190,13 +204,12 @@ pub trait Repeater<const INDEX: usize> {
 // cloning of existing nodes). The view is a trait implemented directly on the container types — so the
 // descent passes `&mut self.field` with no wrapper. Two are edit targets: [`SeqView`] (Vec-like,
 // unbounded) and [`OptView`] (Option-like, ≤1). Two are descent-only: [`MapView`], because a map holds
-// the node in its VALUE slot, which no positional view can address; and [`SlotView`], because a
+// the node in its VALUE slot, which no positional view can address; and [`Slot`], because a
 // transparent wrapper always holds exactly one node and can neither be emptied nor filled.
 //
 // The element type is a **type parameter** (`SeqView<T>`, not an associated type); the traits are
-// bare-element only — a wrapper like `Box<T>`/`Attempt<T>` is a [`SlotView<T>`](SlotView) through the
-// blanket over [`Deref`](core::ops::Deref), and the visitor descends *through* wrapped shapes by
-// recursing per layer, not via any wrapped-element impl.
+// bare-element only — a wrapper like `Box<T>`/`Attempt<T>` is a [`Slot`] instead, and the visitor
+// descends *through* wrapped shapes by recursing per layer, not via any wrapped-element impl.
 
 /// A mutable, **sequence-like** view of an AST collection field (`Vec`/`VecDeque`/`Punctuated`),
 /// bare-element — the element type is `T` itself, never a wrapped `Box<T>`. A generated
@@ -370,7 +383,7 @@ impl<K, V> MapView<V> for std::collections::BTreeMap<K, V> {
 }
 
 /// A mutable, **Option-like** view (≤1 element) of an AST `Option` field, bare-element (a nested
-/// `Box`/`Attempt` layer descends separately, as a [`SlotView`]). A generated
+/// `Box`/`Attempt` layer descends separately, as a [`Slot`]). A generated
 /// `visit_<t>_opt(&mut self, &mut impl OptView<T>)` receives one.
 pub trait OptView<T> {
     fn is_some(&self) -> bool;
@@ -400,7 +413,7 @@ pub trait OptView<T> {
 
 // `SeqView`/`OptView` are **bare-element**: the container holds the viewed node `T` directly (no element
 // adapter). A transparent single-slot wrapper (`Box<T>`/`Attempt<T>`/user wrappers) is reached by
-// [`SlotView`] instead, so the visitor descends *through* it uniformly via `view_iter_mut`, recursing
+// [`Slot`] instead, so the visitor descends *through* it uniformly via `view_iter_mut`, recursing
 // per level. Such a slot can be neither emptied nor filled, so it is descent-only — never a
 // `#[seq]`/`#[opt]` edit target.
 
@@ -477,40 +490,74 @@ impl<T> OptView<T> for Option<T> {
     }
 }
 
-/// A **transparent single-slot** wrapper: one that converts straight to the node it holds, such as
-/// `Box<T>` or [`Attempt<T>`](crate::nested::Attempt). Blanket-implemented over
-/// [`Deref`](core::ops::Deref), so a consumer's own wrapper descends with no view impl of its own —
-/// one `impl Deref<Target = Node> for MyWrapper` is enough.
+/// A **transparent single-slot** wrapper: one that holds exactly one value, such as `Box<T>` or
+/// [`Attempt<T>`](crate::nested::Attempt). A consumer's own wrapper joins the walk with one impl.
 ///
-/// [`Deref`](core::ops::Deref), not [`AsRef`], is what makes this precise. `Vec<T>` derefs to
-/// `[T]` — unsized, so a `Deref<Target = T>` bound never matches it — while `Option<T>` does not
-/// deref at all. Both keep their own view. `AsRef` cannot be used here: std's reflexive
-/// `impl AsRef<Vec<T>> for Vec<T>` is sized, so a blanket over it catches `Vec` as well and
-/// `view_iter` becomes ambiguous.
-pub trait SlotView<T> {
-    /// Iterate the node by shared ref — always exactly one. Mirrors [`SeqView::view_iter`].
-    fn view_iter(&self) -> core::iter::Once<&T>;
-}
-
-/// The `&mut` half, over [`DerefMut`](core::ops::DerefMut).
+/// Two roles, both served by the same impl. On an AST field it is the fourth container shape
+/// alongside [`SeqView`], [`OptView`] and [`MapView`] — descent-only, since a fixed slot can be
+/// neither emptied nor filled. On a *visitor* it lets a wrapped visitor stand in for the visitor
+/// itself, the way `&mut V` already does.
 ///
-/// `Rc<T>` and `Arc<T>` deref but deliberately have no [`DerefMut`](core::ops::DerefMut): shared ownership
-/// cannot hand out `&mut` to its contents, since two handles could then alias it. They therefore
-/// descend on neither side — a field of that shape is a compile error, not a silent skip. Reach for
-/// `Rc<RefCell<T>>` and visit what you take out of it, or keep the shared subtree out of the walk.
-pub trait SlotViewMut<T> {
-    /// Iterate the node by `&mut` — always exactly one. Mirrors [`SeqView::view_iter_mut`].
-    fn view_iter_mut(&mut self) -> core::iter::Once<&mut T>;
-}
-
-impl<W: core::ops::Deref<Target = T> + ?Sized, T> SlotView<T> for W {
-    fn view_iter(&self) -> core::iter::Once<&T> {
-        core::iter::once(self)
+/// Deliberately **not** blanket-implemented over [`Deref`](core::ops::Deref): std's
+/// `impl<T: ?Sized> Deref for &T` would make every shared reference a `Slot` holding its referent,
+/// so a field whose container has no view impl would resolve `view_iter` to the reference itself and
+/// fail with a baffling type mismatch instead of "no method named `view_iter`". No reference type is a
+/// `Slot`.
+pub trait Slot {
+    /// The value in the slot.
+    type Target: ?Sized;
+    /// Borrow the value.
+    fn get(&self) -> &Self::Target;
+    /// Iterate the value by shared ref — always exactly one. Mirrors [`SeqView::view_iter`].
+    fn view_iter(&self) -> core::iter::Once<&Self::Target> {
+        core::iter::once(self.get())
     }
 }
 
-impl<W: core::ops::DerefMut<Target = T> + ?Sized, T> SlotViewMut<T> for W {
-    fn view_iter_mut(&mut self) -> core::iter::Once<&mut T> {
-        core::iter::once(self)
+/// The `&mut` half of [`Slot`].
+pub trait SlotMut: Slot {
+    /// Borrow the value mutably.
+    fn get_mut(&mut self) -> &mut Self::Target;
+    /// Iterate the value by `&mut` — always exactly one. Mirrors [`SeqView::view_iter_mut`].
+    fn view_iter_mut(&mut self) -> core::iter::Once<&mut Self::Target> {
+        core::iter::once(self.get_mut())
+    }
+}
+
+/// Adapts a visitor held in a [`Slot`] — `Box<MyPass>`, an [`Attempt`](crate::nested::Attempt), or a
+/// consumer's own wrapper — to a `visitor!`-generated visitor trait, so `node.visit(wrapped)` works.
+///
+/// Lives here rather than in the generated module so that an *extending* visitor
+/// (`visitor!(base => ..)`) and its base can each implement their own trait for the same type; a type
+/// minted per module could not satisfy the base trait as a supertrait.
+pub struct SlotDriver<S>(pub S);
+
+/// Marker selecting the [`SlotDriver`] `IntoVisitor` impl, distinguishing it from the closure and
+/// tuple-of-closures impls.
+pub struct WrappedVisitor;
+
+impl<T: ?Sized> Slot for Box<T> {
+    type Target = T;
+    fn get(&self) -> &T {
+        self
+    }
+}
+
+impl<T: ?Sized> SlotMut for Box<T> {
+    fn get_mut(&mut self) -> &mut T {
+        self
+    }
+}
+
+impl<T> Slot for crate::nested::Attempt<T> {
+    type Target = T;
+    fn get(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> SlotMut for crate::nested::Attempt<T> {
+    fn get_mut(&mut self) -> &mut T {
+        &mut self.0
     }
 }

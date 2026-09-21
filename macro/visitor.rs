@@ -438,7 +438,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         // name is named. One copy for the whole module (every generated free fn shares this scope)
         // instead of one per visited type.
         #[allow(unused_imports)]
-        use ::syan::visit::{MapView as _, OptView as _, SeqView as _, SlotView as _, SlotViewMut as _};
+        use ::syan::visit::{MapView as _, OptView as _, SeqView as _, Slot as _, SlotMut as _};
 
         #shared
         #mutable

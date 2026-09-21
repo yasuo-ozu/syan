@@ -475,7 +475,7 @@ mod rec_cross {
     }
 }
 
-// `#[opt]` on a `Box`-topped field is no longer an edit target: `Box<T>` is a `SlotView<T>`
+// `#[opt]` on a `Box`-topped field is no longer an edit target: `Box<T>` is a `Slot`
 // (descent-only, blanket over `Deref`), not an `OptView<T>`. A `Box` cannot be emptied, so
 // `take`/`clear` never applied to one anyway. `ui/visitor_edit_marker_boxed.rs` covers the
 // rejection.

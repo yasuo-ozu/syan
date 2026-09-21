@@ -1,10 +1,10 @@
 //! `SeqView`/`OptView` are **bare-element**: `Vec<T>: SeqView<T>`, `Option<T>: OptView<T>`. A transparent
-//! single-slot wrapper (`Box<T>`/`Attempt<T>`) is `SlotView<T>` (always one node), so a `Vec<Box<T>>`
-//! is `SeqView<Box<T>>` (element `Box<T>`) — the visitor descends the box as a further `SlotView<T>`
+//! single-slot wrapper (`Box<T>`/`Attempt<T>`) is a `Slot` (always one node), so a `Vec<Box<T>>`
+//! is `SeqView<Box<T>>` (element `Box<T>`) — the visitor descends the box as a further `Slot`
 //! level.
 //! In-place iteration via `view_iter[_mut]`; structural changes via `retain_mut`/`push`/`insert`/`remove`.
 
-use syan::visit::{OptView, SeqView, SlotView, SlotViewMut};
+use syan::visit::{OptView, SeqView, Slot, SlotMut};
 
 #[test]
 fn iter_reads_every_element() {
@@ -45,13 +45,13 @@ fn optview_iter_and_iter_mut() {
     }
     assert_eq!(o, Some(101));
 
-    // single-slot wrapper: `Box<T>: SlotView<T>` (blanket over `Deref`), always exactly one.
+    // single-slot wrapper: `Box<T>: Slot<Target = T>`, always exactly one.
     let mut b: Box<i32> = Box::new(7);
-    for x in <Box<i32> as SlotViewMut<i32>>::view_iter_mut(&mut b) {
+    for x in <Box<i32> as SlotMut>::view_iter_mut(&mut b) {
         *x += 1;
     }
     assert_eq!(*b, 8);
-    assert_eq!(<Box<i32> as SlotView<i32>>::view_iter(&b).count(), 1);
+    assert_eq!(<Box<i32> as Slot>::view_iter(&b).count(), 1);
 }
 
 #[test]

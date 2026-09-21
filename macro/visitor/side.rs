@@ -310,6 +310,7 @@ pub(crate) fn gen_side(
         }
     };
 
+    // `impl Visit for &mut V`: the receiver a caller passes to `node.visit(&mut pass)`.
     let blanket_ref_impl = quote! {
         #(if !struct_only) {
             impl< #(#g_params,)* #p_v: #visit_tr #g_use > #visit_tr #g_use for &mut #p_v #uw {
@@ -326,6 +327,80 @@ pub(crate) fn gen_side(
             }
         }
     };
+
+    // A visitor inside a single-slot wrapper (`Box<MyPass>`, `Attempt`, a consumer's own) stands in for
+    // the visitor itself. This cannot be `impl Visit for T where T: SlotMut` — that blanket and the
+    // tuple impls below both cover `(V0, V1)` as far as coherence can tell (syan is upstream and could
+    // add a tuple `Slot` impl), so it goes through `IntoVisitor` under its own marker instead, which
+    // keeps `node.visit(wrapped)` working. `SlotMut`, not `Slot`, on both sides: a `visit_*` method
+    // takes `&mut self`, so reaching the inner visitor is a mutable borrow either way.
+    let slot_visitor = {
+        let d = quote!(::syan::visit::SlotDriver);
+        let m = quote!(::syan::visit::WrappedVisitor);
+        quote! {
+            #(if !struct_only) {
+                impl< #(#g_params,)* __SyanS: ::syan::visit::SlotMut > #visit_tr #g_use for #d<__SyanS>
+                where
+                    __SyanS::Target: #visit_tr #g_use,
+                    #(#union_where,)*
+                {
+                    #(for s in &sides) {
+                        fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
+                            <__SyanS::Target as #visit_tr #g_use>::#{&s.method}(
+                                ::syan::visit::SlotMut::get_mut(&mut self.0), i,
+                            )
+                        }
+                        #(for spec in &s.views) {
+                            fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
+                                <__SyanS::Target as #visit_tr #g_use>::#{&spec.method}(
+                                    ::syan::visit::SlotMut::get_mut(&mut self.0), v,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                impl< #(#g_params,)* __SyanS: ::syan::visit::SlotMut > #into_vis_tr < #(#g_args,)* #m > for __SyanS
+                where
+                    __SyanS::Target: #visit_tr #g_use,
+                    #(#union_where,)*
+                {
+                    fn #into_vis_fn(self) -> impl #visit_tr #g_use {
+                        #d(self)
+                    }
+                }
+            }
+        }
+    };
+
+    // A tuple of visitors is a visitor: every element sees every node, in one traversal. Arity 2..=8,
+    // mirroring the closure-tuple `IntoVisitor` impls.
+    let tuple_visit_impls: Vec<TokenStream> = (2..=8usize)
+        .map(|n| {
+            let ps: Vec<Ident> = (0..n).map(|k| id(&format!("__SyanV{k}"))).collect();
+            let ix: Vec<syn::Index> = (0..n).map(syn::Index::from).collect();
+            quote! {
+                #(if !struct_only) {
+                    impl< #(#g_params,)* #(for p in &ps) { #p: #visit_tr #g_use, } > #visit_tr #g_use for ( #(#ps,)* ) #uw {
+                        #(for s in &sides) {
+                            fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
+                                #(for (p, k) in ps.iter().zip(&ix)) {
+                                    <#p as #visit_tr #g_use>::#{&s.method}(&mut self.#k, i);
+                                }
+                            }
+                            #(for spec in &s.views) {
+                                fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
+                                    #(for (p, k) in ps.iter().zip(&ix)) {
+                                        <#p as #visit_tr #g_use>::#{&spec.method}(&mut self.#k, v);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
 
     let free_fns = quote! {
         #(for s in &sides) {
@@ -418,6 +493,8 @@ pub(crate) fn gen_side(
     quote! {
         #trait_def
         #blanket_ref_impl
+        #slot_visitor
+        #(for imp in &tuple_visit_impls) { #imp }
         #free_fns
         #closure_machinery
         // Inherent entry points (no trait import needed at the call site).

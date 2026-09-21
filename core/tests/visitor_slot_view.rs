@@ -1,25 +1,25 @@
-//! Transparent single-slot wrappers descend through the `SlotView` blanket over `Deref`/`DerefMut`.
+//! Transparent single-slot wrappers descend as a [`Slot`](syan::visit::Slot).
 //!
-//! `Box` and `Attempt` are covered, and so is a consumer's own wrapper — one `Deref` impl is the
-//! whole cost of entry, with no view trait to implement. `Rc`/`Arc` are deliberately absent: they
-//! have no `DerefMut`, so a shared slot descends on neither side.
+//! `Box` and `Attempt` ship with impls; a consumer's own wrapper joins with one `Slot`/`SlotMut` pair.
+//! No reference type is a `Slot`, deliberately — a blanket over `Deref` would catch `&T` and turn a
+//! missing view impl into a type mismatch instead of "no method named `view_iter`".
 #![allow(dead_code)]
 
 mod ast {
     use syan::visit::Ast;
 
-    /// A consumer wrapper with nothing but `Deref`/`DerefMut` — no view impl of its own.
+    /// A consumer wrapper that joins the walk with one `Slot`/`SlotMut` pair.
     #[derive(Debug, Clone)]
     pub struct MyPtr<T>(pub Box<T>);
 
-    impl<T> std::ops::Deref for MyPtr<T> {
+    impl<T> syan::visit::Slot for MyPtr<T> {
         type Target = T;
-        fn deref(&self) -> &T {
+        fn get(&self) -> &T {
             &self.0
         }
     }
-    impl<T> std::ops::DerefMut for MyPtr<T> {
-        fn deref_mut(&mut self) -> &mut T {
+    impl<T> syan::visit::SlotMut for MyPtr<T> {
+        fn get_mut(&mut self) -> &mut T {
             &mut self.0
         }
     }
@@ -95,6 +95,6 @@ fn visit_mut_reaches_through_every_wrapper() {
 #[test]
 fn layers_nest() {
     let mut h = sample();
-    h.nested.push(Node::Leaf(6));
+    h.nested.0.push(Node::Leaf(6));
     assert_eq!(seen(&h), vec![1, 2, 3, 4, 5, 6]);
 }
