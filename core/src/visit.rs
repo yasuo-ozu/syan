@@ -22,6 +22,141 @@ pub use syan_macro::Ast;
 ///
 /// This captures `$crate` (the path to `syan` from the caller) and forwards it to the proc-macro,
 /// so the syan crate is resolved automatically (no `#[syan(..)]` needed).
+///
+/// # What it generates
+///
+/// Everything below is emitted twice: once by shared reference, and once by `&mut` with a `_mut`
+/// suffix.
+///
+/// * **`Visit`** — one `visit_<type>` method per listed type. Each default recurses, so you
+///   override only the nodes you care about.
+/// * **`visit_<type>`** — a free function that walks one node's children. The trait method is the
+///   hook; this is the descent. Call it from an override to keep going.
+/// * **`Hook`, `Driver`, `<Type>Hook`, `IntoVisitor`** — adapters that let a closure act as a
+///   visitor. The closure's argument type picks the node it sees. A tuple of closures runs them all
+///   in one traversal.
+/// * **`visit`** — an inherent method on each listed type, so a walk starts with `node.visit(..)`.
+///
+/// # Generated names
+///
+/// For a listed type `T`, written `t` in snake_case:
+///
+/// | | shared (`Visit`) | by `&mut` (`VisitMut`) |
+/// |---|---|---|
+/// | the node | `visit_t` | `visit_t_mut` |
+/// | a `#[seq]` field | — | `visit_t_seq` |
+/// | a `#[opt]` field | — | `visit_t_opt` |
+/// | closure hook | `hook_t` | `hook_t_mut` |
+/// | entry point | `T::visit` | `T::visit_mut` |
+///
+/// The `_seq` and `_opt` methods are on `VisitMut` only. A view exists to *edit* the parent slot;
+/// reading needs nothing beyond the element, which `visit_t` already gives. They take no extra
+/// `_mut` suffix, because the trait they sit on is already the `&mut` one.
+///
+/// ```
+/// mod ast {
+///     use syan::visit::Ast;
+///
+///     #[derive(Ast)]
+///     #[subast(crate::ast::Expr)]
+///     pub enum Expr { Lit(u32), Neg(Box<Expr>), Many(#[seq] Vec<Expr>) }
+///
+///     pub mod visit { syan::visit::visitor!(super::Expr); }
+/// }
+///
+/// fn main() {
+///     use ast::{visit, Expr};
+///     use syan::visit::SeqView;
+///
+///     // A closure sees one node type.
+///     let mut n = 0;
+///     Expr::Neg(Box::new(Expr::Lit(1))).visit(|_: &Expr| n += 1);
+///     assert_eq!(n, 2);
+///
+///     // `#[seq]` adds `visit_expr_seq`, which hands you the parent slot, not just the element.
+///     struct DropLits;
+///     impl visit::VisitMut for DropLits {
+///         fn visit_expr_seq<V: SeqView<Expr>>(&mut self, v: &mut V) {
+///             v.retain_mut(|e| !matches!(e, Expr::Lit(_)));
+///         }
+///     }
+///     let mut e = Expr::Many(vec![Expr::Lit(1), Expr::Neg(Box::new(Expr::Lit(2)))]);
+///     e.visit_mut(&mut DropLits);
+///     assert!(matches!(&e, Expr::Many(v) if v.len() == 1));
+///
+///     // A struct overrides one method and calls the free fn to keep descending.
+///     struct Depth { max: usize, at: usize }
+///     impl visit::Visit for Depth {
+///         fn visit_expr(&mut self, i: &Expr) {
+///             self.at += 1;
+///             self.max = self.max.max(self.at);
+///             visit::visit_expr(self, i);
+///             self.at -= 1;
+///         }
+///     }
+///     let mut d = Depth { max: 0, at: 0 };
+///     Expr::Neg(Box::new(Expr::Lit(1))).visit(&mut d);
+///     assert_eq!(d.max, 2);
+/// }
+/// ```
+///
+/// # What it expands to
+///
+/// For the `Expr` above, the module gets about 390 lines. The parts that matter:
+///
+/// ```ignore
+/// pub trait Visit {
+///     fn visit_expr(&mut self, i: &super::Expr) { visit_expr(self, i) }
+/// }
+///
+/// pub fn visit_expr<__V: Visit + ?Sized>(this: &mut __V, i: &super::Expr) {
+///     match i {
+///         super::Expr::Lit(_) => {}
+///         super::Expr::Neg(__f0_0) => {
+///             for __nc1 in __f0_0.view_iter() { this.visit_expr(__nc1); }
+///         }
+///     }
+/// }
+///
+/// pub trait Hook { fn hook_expr(&mut self, i: &super::Expr) { let _ = i; } }
+/// pub struct Driver<__H>(pub __H);            // Hook   -> Visit
+/// pub struct ExprHook<__F>(pub __F);          // FnMut  -> Hook
+///
+/// impl<__F: FnMut(&super::Expr)> IntoVisitor<super::Expr> for __F {
+///     fn into_visitor(self) -> impl Visit { Driver(ExprHook(self)) }
+/// }
+///
+/// impl super::Expr {
+///     pub fn visit<__T>(&self, visitor: impl IntoVisitor<__T>) -> &Self { .. }
+/// }
+///
+/// // On `VisitMut`, because a `#[seq]` field can be edited, not just read:
+/// pub trait VisitMut {
+///     fn visit_expr_mut(&mut self, i: &mut super::Expr) { visit_expr_mut(self, i) }
+///
+///     fn visit_expr_seq<__VW: SeqView<super::Expr>>(&mut self, v: &mut __VW) {
+///         for __syan_e in SeqView::view_iter_mut(v) { self.visit_expr_mut(__syan_e); }
+///     }
+/// }
+/// ```
+///
+/// `Lit(u32)` produces an empty arm because `u32` is not a visited type. `Neg(Box<Expr>)` produces
+/// one loop per wrapper layer. There are 8 traits and 20 `into_visitor` impls in all — the tuple
+/// arities, and a `_mut` twin for each.
+///
+/// A `#[seq]` field adds `visit_<type>_seq`, and `#[opt]` adds `visit_<type>_opt`. Both are on
+/// `VisitMut` only, and both hand you a view of the *parent slot* — a [`SeqView`] or [`OptView`] —
+/// so an override can `push`, `remove` or `retain_mut` rather than only read each element. The
+/// default just descends. The marked field must be a bare `Vec<T>` or `Option<T>`: a wrapped one
+/// such as `Option<Box<T>>` cannot be edited in place, and the macro says so.
+///
+/// The walk never names a container type. A field is stepped through `view_iter`, which the
+/// compiler resolves to [`SeqView`], [`OptView`], [`MapView`] or [`SlotView`]. So `Box<T>` and
+/// `Vec<T>` generate the same code, and nested wrappers nest the loops.
+///
+/// Every listed type needs `#[derive(Ast)]`: the macro reads its shape from the metadata that
+/// derive emits. Generated names come from a type's last path segment, so two listed types ending
+/// in the same ident are rejected.
 #[macro_export]
 macro_rules! visitor {
     ($($t:tt)*) => {
