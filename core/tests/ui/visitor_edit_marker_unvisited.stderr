@@ -1,4 +1,4 @@
-error: a `#[seq]` field's element type is not a visited type — mark only a field whose element is a container of a type listed in `visitor!(..)` (or reached via `#[subast]`)
+error: a `#[seq]` field's element type is not a visited type — mark only a field whose element is a container of a type both listed in `visitor!(..)` and reached via `#[subast]`
   --> tests/ui/visitor_edit_marker_unvisited.rs:15:16
    |
 15 |     pub items: Vec<String>, // `String` is not a visited AST type

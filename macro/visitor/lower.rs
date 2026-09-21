@@ -101,7 +101,7 @@ fn abort_marker_not_visited(ty: &Type, kind: &Container, single: bool) -> ! {
     abort!(
         ty,
         "a `#[{}]` field's element type is not a visited type — mark only a field whose element is \
-         a {}container of a type listed in `visitor!(..)` (or reached via `#[subast]`)",
+         a {}container of a type both listed in `visitor!(..)` and reached via `#[subast]`",
         marker,
         extra
     );
