@@ -159,6 +159,10 @@ where
             fn skip_sep(&mut self) -> bool {
                 self.0.skip_sep()
             }
+
+            fn pos(&mut self) -> S {
+                self.0.pos()
+            }
         }
         let mut stream = SubStream(stream.into_parse_stream(), None);
         let slot = T::parse_stream(&mut stream)?;

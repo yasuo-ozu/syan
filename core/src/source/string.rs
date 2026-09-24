@@ -39,17 +39,24 @@ struct SpannedChars {
     loc: usize,
 }
 
+impl SpannedChars {
+    /// Where the next `char` would start — past the last one served once the text is exhausted.
+    fn cursor(&self) -> Span {
+        Span {
+            line: self.line,
+            col: self.col,
+            loc: self.loc,
+        }
+    }
+}
+
 impl Iterator for SpannedChars {
     type Item = WithSpan<char, Span>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let ch = self.src[self.byte..].chars().next()?;
         self.byte += ch.len_utf8();
-        let span = Span {
-            line: self.line,
-            col: self.col,
-            loc: self.loc,
-        };
+        let span = self.cursor();
         if ch == '\n' {
             self.line += 1;
             self.col = 1;
@@ -109,6 +116,11 @@ impl ParseStream for Stream {
         Ok(())
     }
 
+    fn pos(&mut self) -> Span {
+        let peeked = self.0.peek().map(|a| a.span.clone());
+        peeked.unwrap_or_else(|| self.0.source().cursor())
+    }
+
     /// Whitespace is the separator in text. Consumes a run of it and reports whether there was any,
     /// which is what tells [`Joint`](crate::nested::Joint) the atoms around it were not adjacent.
     fn skip_sep(&mut self) -> bool {
@@ -159,7 +171,7 @@ macro_rules! impl_parse_for_char {
                             stream.push(atom);
                             Err(ParseError::expected(span, concat!("the character `", stringify!($name), "`")))
                         }
-                        None => Err(ParseError::eof(Span::default())),
+                        None => Err(ParseError::eof(stream.pos())),
                     }
                 }
             }
