@@ -20,6 +20,7 @@ readme = "README.md"
 parametrized = "0.1.8"
 newer-type = "0.1.1"
 proc-macro2 = { version = "1.0", optional = true }
+serde = { version = "1.0", optional = true, features = ["derive"] }
 syan-macro = { path = "../macro", version = "0.2.2" }
 decycle = "0.5.2"
 
@@ -27,7 +28,14 @@ decycle = "0.5.2"
 template-quote = "0.4"
 type-macro-derive-tricks = "0.2"
 trybuild = { version = "1.0", features = ["diff"] }
+serde_json = "1.0"
 
 [features]
 default = ["proc_macro2"]
 proc_macro2 = ["dep:proc-macro2"]
+serde = ["dep:serde"]
+
+# Build the published docs with every feature on. `serde` is off by default, so without this its
+# impls — the whole point of the feature — would be missing from the page a reader lands on.
+[package.metadata.docs.rs]
+all-features = true

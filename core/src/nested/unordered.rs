@@ -9,6 +9,7 @@ use crate::span::{Span, Spanned};
 /// [`Unparse`] emits them back faithfully. Parsing is greedy `T`-first: it tries `T U`, and only on
 /// failure backtracks and tries `U T`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Unordered<T, U> {
     pub t: T,
     pub u: U,

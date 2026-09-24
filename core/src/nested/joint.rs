@@ -9,6 +9,7 @@ use newer_type::{implement, traits};
 /// without intervening space.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[implement(traits::Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Joint<Tuple>(pub Tuple);
 
 impl<Tuple: Default> Default for Joint<Tuple> {
