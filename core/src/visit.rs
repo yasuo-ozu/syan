@@ -116,72 +116,110 @@ pub use syan_macro::Ast;
 ///
 /// # What it expands to
 ///
-/// For the `Expr` above, the module gets about a thousand lines. The parts that matter:
+/// Two small nodes, one of each marker — a `#[seq]` list and an `#[opt]` slot:
+///
+/// ```ignore
+/// #[derive(Ast)]
+/// pub struct Doc {
+///     #[seq] items: Vec<Item>,
+///     #[opt] footer: Option<Item>,
+/// }
+///
+/// #[derive(Ast)]
+/// pub struct Item(u32);
+///
+/// pub mod visit { syan::visit::visitor!(crate::Doc, crate::Item); }
+/// ```
+///
+/// That module is about a thousand lines. The parts that matter:
 ///
 /// ```ignore
 /// pub trait Visit {
-///     fn visit_expr(&mut self, i: &super::Expr) { visit_expr(self, i) }
-/// }
+///     fn visit_doc(&mut self, i: &crate::Doc) { visit_doc(self, i) }
+///     fn visit_item(&mut self, i: &crate::Item) { visit_item(self, i) }
 ///
-/// pub fn visit_expr<__V: Visit + ?Sized>(this: &mut __V, i: &super::Expr) {
-///     match i {
-///         super::Expr::Lit(_) => {}
-///         super::Expr::Neg(__f0_0) => {
-///             syan::visit::Walk::<__SyanWalkTag, Thru<Here>, _>::walk(__f0_0, this);
-///         }
-///         super::Expr::Many(__f0_0) => {
-///             syan::visit::Walk::<__SyanWalkTag, Thru<Here>, _>::walk(__f0_0, this);
-///         }
+///     // One method per marker, taking the parent slot rather than an element.
+///     fn visit_item_seq<__VW: SeqView<crate::Item>>(&mut self, v: &__VW) {
+///         for e in SeqView::view_iter(v) { self.visit_item(e); }
+///     }
+///     fn visit_item_opt<__OW: OptView<crate::Item>>(&mut self, v: &__OW) {
+///         if let Some(e) = OptView::get(v) { self.visit_item(e); }
 ///     }
 /// }
 ///
-/// // A closure becomes a visitor through hidden adapters — shown only so the shape is not a
-/// // mystery; none of these names is part of the API.
-/// impl<__F: FnMut(&super::Expr)> IntoVisitor<super::Expr> for __F {
-///     fn into_visitor(self) -> impl Visit { /* .. */ }
+/// pub fn visit_doc<__V: Visit + ?Sized>(this: &mut __V, i: &crate::Doc) {
+///     let crate::Doc { items, footer, .. } = i;
+///     this.visit_item_seq(items);
+///     this.visit_item_opt(footer);
 /// }
 ///
-/// impl<__V: Visit> Visit for &mut __V { .. }                       // pass `&mut pass`
-/// impl<__V0: Visit, __V1: Visit> Visit for (__V0, __V1) { .. }     // several passes, one walk
+/// pub fn visit_item<__V: Visit + ?Sized>(this: &mut __V, i: &crate::Item) {}
 ///
-/// impl<__V: Visit> Visit for Box<__V> { .. }                     // node.visit(Box::new(pass))
-///
-/// // the descent side: this node hands itself to the visitor
-/// impl<__V: Visit> syan::visit::Walk<__SyanWalkTag, __V> for super::Expr {
-///     fn walk(&self, v: &mut __V) { v.visit_expr(self) }
+/// impl crate::Doc {
+///     pub fn visit<__T>(&self, visitor: impl IntoVisitor<__T>) -> &Self {
+///         let mut visitor = visitor.into_visitor();
+///         visitor.visit_doc(self);
+///         self
+///     }
+/// }
+/// impl crate::Item {
+///     pub fn visit<__T>(&self, visitor: impl IntoVisitor<__T>) -> &Self {
+///         let mut visitor = visitor.into_visitor();
+///         visitor.visit_item(self);
+///         self
+///     }
 /// }
 ///
-/// impl super::Expr {
-///     pub fn visit<__T>(&self, visitor: impl IntoVisitor<__T>) -> &Self { .. }
-/// }
-///
-/// // On `VisitMut`, because a `#[seq]` field can be edited, not just read:
 /// pub trait VisitMut {
-///     fn visit_expr_mut(&mut self, i: &mut super::Expr) { visit_expr_mut(self, i) }
+///     fn visit_doc_mut(&mut self, i: &mut crate::Doc) { visit_doc_mut(self, i) }
+///     fn visit_item_mut(&mut self, i: &mut crate::Item) { visit_item_mut(self, i) }
 ///
-///     fn visit_expr_seq_mut<__VW: SeqView<super::Expr>>(&mut self, v: &mut __VW) {
-///         for __syan_e in SeqView::view_iter_mut(v) { self.visit_expr_mut(__syan_e); }
+///     fn visit_item_seq_mut<__VW: SeqView<crate::Item>>(&mut self, v: &mut __VW) {
+///         for e in SeqView::view_iter_mut(v) { self.visit_item_mut(e); }
+///     }
+///     fn visit_item_opt_mut<__OW: OptView<crate::Item>>(&mut self, v: &mut __OW) {
+///         if let Some(e) = OptView::get_mut(v) { self.visit_item_mut(e); }
+///     }
+/// }
+///
+/// pub fn visit_doc_mut<__V: VisitMut + ?Sized>(this: &mut __V, i: &mut crate::Doc) {
+///     let crate::Doc { items, footer, .. } = i;
+///     this.visit_item_seq_mut(items);
+///     this.visit_item_opt_mut(footer);
+/// }
+///
+/// pub fn visit_item_mut<__V: VisitMut + ?Sized>(this: &mut __V, i: &mut crate::Item) {}
+///
+/// impl crate::Doc {
+///     pub fn visit_mut<__T>(&mut self, visitor: impl IntoVisitorMut<__T>) -> &mut Self {
+///         let mut visitor = visitor.into_visitor_mut();
+///         visitor.visit_doc_mut(self);
+///         self
+///     }
+/// }
+/// impl crate::Item {
+///     pub fn visit_mut<__T>(&mut self, visitor: impl IntoVisitorMut<__T>) -> &mut Self {
+///         let mut visitor = visitor.into_visitor_mut();
+///         visitor.visit_item_mut(self);
+///         self
 ///     }
 /// }
 /// ```
 ///
-/// `Lit(u32)` produces an empty arm because `u32` is not a visited type. `Neg(Box<Expr>)` and
-/// `Many(Vec<Expr>)` produce the *same* call — one [`Walk`] per followed field, differing only in
-/// the [`indicator`], which is why a `Box` and a `Vec` generate identical code. Four traits are
-/// public — `Visit`, `VisitMut`, `IntoVisitor`, `IntoVisitorMut` — with an `into_visitor` impl per
-/// tuple arity; the closure adapters beside them are hidden.
+/// `visit_item` has an empty body because `u32` is not a visited type. `Doc`'s two fields differ
+/// only in their marker: drop both and each becomes a single [`Walk`] call instead — the *same*
+/// call, since `Vec<Item>` and `Option<Item>` have the same shape and no container type is ever
+/// named. Four traits are public — `Visit`, `VisitMut`, `IntoVisitor`, `IntoVisitorMut` — with an
+/// `into_visitor` impl per tuple arity; the closure adapters beside them are hidden.
 ///
 /// Visitors compose two ways. A **tuple of visitors** (arity 2..=8) implements `Visit` itself, so
 /// every element sees every node in one traversal and the tuple can go anywhere one visitor can. A
 /// `Box` around a visitor is also a visitor, so `node.visit(Box::new(pass))` works — taken by value.
 /// A wrapper of your own forwards in one line, the same way `Box` does.
 ///
-/// A `#[seq]` field adds `visit_<type>_seq` on `Visit` and `visit_<type>_seq_mut` on `VisitMut`;
-/// `#[opt]` adds the `_opt` pair. Each hands you a view of the *parent slot* — a [`SeqView`] or
-/// [`OptView`] — rather than one element: by `&` to observe it, by `&mut` to `push`, `remove` or
-/// `retain_mut`. Both defaults just descend. The marked field must be a bare `Vec<T>` or
-/// `Option<T>`: a wrapped one such as `Option<Box<T>>` cannot be edited in place, and the macro
-/// says so.
+/// A marked field must be a **bare** `Vec<T>` or `Option<T>`: a wrapped one such as
+/// `Option<Box<T>>` cannot be edited in place, and the macro says so rather than generating a view
+/// that cannot work.
 ///
 /// The walk never names a container type, or a leaf type. Each followed field is one [`Walk`] call
 /// carrying an [`indicator`] computed from the field's shape — `Vec<(Length, Line)>` is walked at
