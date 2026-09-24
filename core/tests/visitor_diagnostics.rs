@@ -15,6 +15,9 @@ fn visitor_diagnostics() {
     // `#[seq]`/`#[opt]` (no auto-detection); overriding them for an unmarked field is a "not a member of
     // trait" error.
     t.compile_fail("tests/ui/visitor_edit_unmarked_no_view.rs");
+    // Two different paths ending in the same ident inside one definition: the head match is by last
+    // segment, so they cannot be told apart.
+    t.compile_fail("tests/ui/ambiguous_last_ident.rs");
     // A `#[seq]`/`#[opt]` field can't view an inherited (non-targeted) type — clean error, not E0599.
     t.compile_fail("tests/ui/visitor_edit_seq_inherited.rs");
     // Marker on a non-viewable / container-less / non-visited field → clean abort, not a cryptic trait error.

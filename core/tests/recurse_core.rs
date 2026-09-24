@@ -238,7 +238,7 @@ mod fixes {
     }
 
     mod other {
-        pub struct Stmt;
+        pub struct Foreign;
     }
 
     #[recurse]
@@ -250,7 +250,12 @@ mod fixes {
         #[subast()]
         pub enum Expr<S> {
             ToStmt(Box<Stmt<S>>),
-            Foreign(super::other::Stmt), // unrelated leaf; last segment == cycle type name `Stmt`
+            // NOTE: this variant used to be `Foreign(super::other::Stmt)` — an unrelated type whose
+            // last segment collides with the cycle type `Stmt`. `#[derive(Ast)]` now rejects that
+            // outright (a head is matched by last segment, so the two cannot be told apart); the
+            // shape moved to `tests/ui/ambiguous_last_ident.rs`. What remains here is the part that
+            // still holds: a foreign field is a leaf.
+            Foreign(super::other::Foreign),
             Lit(PhantomData<S>),
         }
 
@@ -267,9 +272,10 @@ mod fixes {
     }
 
     #[test]
-    fn bug7_foreign_field_sharing_cycle_last_segment_is_a_leaf() {
-        // The generated visitor used to mis-call `visit_stmt` on the foreign `super::other::Stmt`;
-        // compiling the `visitor!()` is the regression check.
+    fn bug7_foreign_field_is_a_leaf() {
+        // A field of a type the visitor does not know is a leaf; compiling the `visitor!()` is the
+        // check. The name-collision half of the original bug7 is now refused by `#[derive(Ast)]` —
+        // see `tests/ui/ambiguous_last_ident.rs`.
         struct V;
         impl v_ast::Visit<()> for V {}
         let _ = V;

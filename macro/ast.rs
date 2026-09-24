@@ -1,6 +1,6 @@
 use crate::util::{angle, gargs, gparams, to_snake};
 use proc_macro2::{Literal, Span, TokenStream};
-use proc_macro_error::{abort, emit_warning};
+use proc_macro_error::{emit_error, emit_warning};
 use std::collections::HashMap;
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
@@ -98,11 +98,14 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
         }
         let list = match &attr.meta {
             Meta::List(ml) => ml.tokens.clone(),
-            _ => abort!(attr, "`#[subast(..)]` takes a parenthesized list of paths"),
+            _ => {
+                emit_error!(attr, "`#[subast(..)]` takes a parenthesized list of paths");
+                continue;
+            }
         };
         match Punctuated::<SubastEntry, Token![,]>::parse_terminated.parse2(list) {
             Ok(parsed) => entries.extend(parsed),
-            Err(e) => abort!(e.span(), "invalid `#[subast(..)]`: {}", e),
+            Err(e) => emit_error!(e.span(), "invalid `#[subast(..)]`: {}", e),
         }
     }
     // Reject a non-fully-qualified path with a clear, actionable message — otherwise it surfaces far
@@ -110,7 +113,7 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
     for e in &entries {
         if !subast_path_is_rooted(&e.path) {
             let p = &e.path;
-            abort!(
+            emit_error!(
                 e.path,
                 "`#[subast(..)]` path `{}` is not fully qualified. Use a `crate`-rooted path \
                  (`crate::path::to::{}`) — or an external-crate path (`other_crate::path::{}`) for a \
@@ -134,7 +137,7 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
             for s in &mut stripped.segments {
                 s.arguments = PathArguments::None;
             }
-            abort!(
+            emit_error!(
                 e.path,
                 "`#[subast(..)]` path `{}` carries generic arguments; a subast entry names a type by \
                  path only (it is used as a metadata-macro fetch target and a match scrutinee, where \
@@ -148,7 +151,7 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
     for e in &entries {
         let key = e.matchkey().to_string();
         if seen.insert(key.clone(), ()).is_some() {
-            abort!(
+            emit_error!(
                 e.path,
                 "two `#[subast(..)]` entries share the last segment `{}`; alias one (`path as Alias`)",
                 key
@@ -294,6 +297,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
+    check_ambiguous_last_idents(input);
     let subast = parse_subast(&input.attrs);
     let field_heads = field_head_idents(input);
     for e in &subast {
@@ -368,5 +372,72 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
 
         #[doc(hidden)]
         #{ &input.vis } use #macro_name as #ident;
+    }
+}
+
+/// A path with its generic arguments stripped, as a comparable spelling (`Vec<Box<T>>` → `Vec`).
+fn bare_path(p: &Path) -> String {
+    let lead = if p.leading_colon.is_some() { "::" } else { "" };
+    let segs: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
+    format!("{lead}{}", segs.join("::"))
+}
+
+/// Collect every path a field type mentions, keyed by its last segment, remembering one occurrence of
+/// each distinct spelling so a diagnostic can point at it.
+fn collect_type_paths(ty: &Type, out: &mut std::collections::HashMap<String, Vec<(String, Path)>>) {
+    match ty {
+        Type::Path(tp) => {
+            if let Some(last) = tp.path.segments.last() {
+                let bare = bare_path(&tp.path);
+                let slot = out.entry(last.ident.to_string()).or_default();
+                if !slot.iter().any(|(s, _)| s == &bare) {
+                    slot.push((bare, tp.path.clone()));
+                }
+            }
+            for seg in &tp.path.segments {
+                if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+                    for arg in &ab.args {
+                        if let GenericArgument::Type(t) = arg {
+                            collect_type_paths(t, out);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Reference(r) => collect_type_paths(&r.elem, out),
+        Type::Slice(s) => collect_type_paths(&s.elem, out),
+        Type::Array(a) => collect_type_paths(&a.elem, out),
+        Type::Paren(p) => collect_type_paths(&p.elem, out),
+        Type::Group(g) => collect_type_paths(&g.elem, out),
+        Type::Tuple(t) => t.elems.iter().for_each(|e| collect_type_paths(e, out)),
+        _ => {}
+    }
+}
+
+/// Reject a definition whose fields spell two *different* paths ending in the same identifier.
+///
+/// A visitor recognises a field's head by its **last path segment**, so within one definition those
+/// two are indistinguishable: whichever is the visited type, the other is matched as well. Catching it
+/// here points at the definition that carries the ambiguity, rather than leaving it to surface as a
+/// mis-resolved field — or, worse, as a field that silently stops being followed.
+fn check_ambiguous_last_idents(input: &DeriveInput) {
+    let mut by_last: std::collections::HashMap<String, Vec<(String, Path)>> =
+        std::collections::HashMap::new();
+    for_each_field(&input.data, |ty| collect_type_paths(ty, &mut by_last));
+    for (last, spellings) in &by_last {
+        if spellings.len() < 2 {
+            continue;
+        }
+        let names: Vec<&str> = spellings.iter().map(|(s, _)| s.as_str()).collect();
+        emit_error!(
+            spellings[1].1,
+            "this type's fields spell {} different paths ending in `{}` ({}); a visitor matches a \
+             field's head by its last path segment, so they cannot be told apart",
+            spellings.len(),
+            last,
+            names.join(", ");
+            help = "give one a distinct name, or name it through a `#[subast(<path> as Alias)]` \
+                    entry and write that alias in the field"
+        );
     }
 }
