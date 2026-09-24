@@ -134,6 +134,14 @@ pub(crate) struct Lower<'a> {
     pub(crate) inherited_heads: &'a RefCell<Vec<(String, TokenStream, Ident)>>,
 }
 
+/// Whether `ty` is a `PhantomData<..>` — a field that mentions a type parameter while holding no
+/// value of it, so handing it a visited type loses nothing. Diagnostic-only; see
+/// [`Lower::check_generic_element`].
+fn is_phantom_data(ty: &Type) -> bool {
+    matches!(ty, Type::Path(tp)
+        if tp.path.segments.last().is_some_and(|s| s.ident == "PhantomData"))
+}
+
 impl<'a> Lower<'a> {
     fn amp(&self) -> TokenStream {
         if self.mutable {
@@ -296,6 +304,91 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Abort when a field hands a visited type to a node through a generic parameter that the node
+    /// does not follow — `Brackets<Qubit<S>, S>` where `Brackets<T, S>` holds `items: Vec<T>`.
+    ///
+    /// `peel` never treats a bare type parameter as a head, so `Vec<T>` is a leaf in `Brackets`'
+    /// own definition, and the `Qubit`s put there are unreachable however the visitor is written —
+    /// a hand-implemented `Visit` would not be called for them either. Nothing about the shape says
+    /// so, and the walk simply returns nothing, so say it here.
+    ///
+    /// Only fires where something is demonstrably lost: the argument must itself reach a visited
+    /// type, and the parameter it fills must be held by the node in a position the walk would have
+    /// descended. `PhantomData` is excluded by name — it is the one std type whose whole purpose is
+    /// to mention a parameter while holding no value of it, so a `PhantomData<T>` field loses
+    /// nothing. That is a diagnostic-only name match; the walk itself still names no container.
+    fn check_generic_element(
+        &self,
+        field_ty: &Type,
+        args: &PathArguments,
+        head_path: &Path,
+        owner_types: &HashSet<String>,
+    ) {
+        let PathArguments::AngleBracketed(ab) = args else {
+            return;
+        };
+        // `done_by_path` is keyed by the `visitor!(..)` paths (`crate::…`), but `head_path` came from
+        // a `#[subast]` entry, which the metadata macro re-roots to `$crate::…`. Fold the root so the
+        // two meet; a miss here only costs the diagnostic, never correctness.
+        let key = norm_path(head_path).replace("$crate", "crate");
+        let Some(def) = self.done_by_path.get(&key) else {
+            return;
+        };
+        let head_params = match item_generics(&def.def) {
+            Some(g) => gparams(g),
+            None => return,
+        };
+        let head_types = self_and_subast_keys(item_ident(&def.def), &def.subast);
+
+        // Walk argument and parameter lists together, both filtered to types: a lifetime argument
+        // never fills a type parameter.
+        let mut params = head_params.iter().filter_map(|p| match p {
+            GenericParam::Type(t) => Some(&t.ident),
+            _ => None,
+        });
+        for arg in &ab.args {
+            let GenericArgument::Type(arg_ty) = arg else {
+                continue;
+            };
+            let Some(param) = params.next() else { return };
+            // Does this argument carry anything the owner visits?
+            if peel(arg_ty, owner_types).is_none() {
+                continue;
+            }
+            // Does the head hold that parameter somewhere the walk would have gone?
+            let mut probe = head_types.clone();
+            probe.insert(param.to_string());
+            let mut lost = false;
+            for_each_field_type(&def.def, &mut |ft| {
+                if is_phantom_data(ft) {
+                    return;
+                }
+                if let Some(pp) = peel(ft, &probe) {
+                    if matches!(&pp.head, Head::Path { head, .. } if head == param) {
+                        lost = true;
+                    }
+                }
+            });
+            if lost {
+                let head = last_ident(head_path);
+                abort!(
+                    field_ty,
+                    "`{}` is handed to `{}`'s type parameter `{}`, which `{}` holds but the walk \
+                     cannot descend through — a bare type parameter is never a visited head, so \
+                     those nodes are unreachable however the visitor is written. Give `{}` a field \
+                     of the concrete type instead of `{}`, or list the instantiated node and reach \
+                     it from there",
+                    quote!(#arg_ty).to_string().replace(' ', ""),
+                    head,
+                    param,
+                    head,
+                    head,
+                    param,
+                );
+            }
+        }
+    }
+
     /// Lower one field. `binding` is the destructured field (a `&Field`/`&mut Field`). `view` is the
     /// field's `#[seq]`/`#[opt]` marker (the visitor dispatches such a field through its container-edit
     /// view). Returns the visit statement(s), or `None` for a leaf / finite dead-end (binds `_`).
@@ -343,6 +436,10 @@ impl<'a> Lower<'a> {
                 .map(|e| (last_ident(&e.path).clone(), e.path.clone())),
             Head::Tuple(_) => None,
         };
+
+        if let (Head::Path { args, .. }, Some((_, hpath))) = (&p.head, &resolved) {
+            self.check_generic_element(ty, args, hpath, &user_types);
+        }
 
         // A `#[seq]`/`#[opt]`-marked field is edited in place through the whole field's `SeqView`/`OptView`
         // (`visit_mut` only). The field must be a **single** container of the visited head

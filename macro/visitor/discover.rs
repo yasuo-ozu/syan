@@ -52,7 +52,7 @@ fn discover_followed(
     }
 }
 
-fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
+pub(crate) fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
     match def {
         Item::Enum(e) => {
             for v in &e.variants {

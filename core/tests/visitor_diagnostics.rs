@@ -24,4 +24,7 @@ fn visitor_diagnostics() {
     // A `#[seq]`/`#[opt]` field whose top-level type wraps a container (`Box<Vec<T>>`) is not an edit
     // target — edit views need a bare single container (the field still descends).
     t.compile_fail("tests/ui/visitor_edit_marker_boxed.rs");
+    // Handing a visited type to a generic parameter the node holds but never follows (`Brackets<T, S>`
+    // with `items: Vec<T>`) puts those nodes out of reach — previously a silent empty walk.
+    t.compile_fail("tests/ui/visitor_generic_element.rs");
 }

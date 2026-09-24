@@ -230,7 +230,20 @@ pub(crate) fn gen_side(
         mut_sfx = mt(mutable),
         base_note = if mutable { " The by-`&mut` variant of `Visit`." } else { "" },
     );
-    let inherent_doc = format!("Visit `self` with any `{visit_tr}`, returning `self` to chain.");
+    // In method-mode the visited set is heterogeneous, so the trait's methods carry their own
+    // generics and a closure cannot implement it (a closure is not `for<T>` generic). Say so here:
+    // passing one otherwise fails as a bare `expected &mut _, found closure` type mismatch, which
+    // names neither the closure machinery nor the reason it is absent.
+    let inherent_doc = if struct_only {
+        format!(
+            "Visit `self` with any `{visit_tr}`, returning `self` to chain. This visitor is \
+             heterogeneous — some visited type fills another's parameter concretely, or bounds it — \
+             so `{visit_tr}`'s methods are themselves generic and a **closure cannot be used** \
+             here; pass `&mut` a type implementing `{visit_tr}`."
+        )
+    } else {
+        format!("Visit `self` with any `{visit_tr}`, returning `self` to chain.")
+    };
 
     // Inherent `visit` / `visit_mut` per type (replaces the Visitable trait). Each type's own
     // params go on the impl; any extra union params go on the method (so a type that doesn't use
