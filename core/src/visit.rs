@@ -687,6 +687,26 @@ impl<M, H, V: ?Sized, T: WalkMut<M, H, V>> WalkMut<M, Thru<H>, V> for crate::nes
     }
 }
 
+// A delimited group walks its content and not its delimiters: `O` and `C` are punctuation tokens,
+// never AST nodes. Descent-only like every other single-slot wrapper — a `Group` holds exactly one
+// `T`, so there is nothing for `SeqView`'s `push`/`remove` or `OptView`'s `take` to mean, and
+// `#[seq]`/`#[opt]` on such a field stays the error it already was.
+impl<M, H, V: ?Sized, T: Walk<M, H, V>, O, C> Walk<M, Thru<H>, V>
+    for crate::nested::group::Group<T, O, C>
+{
+    fn walk(&self, v: &mut V) {
+        self.slot.walk(v);
+    }
+}
+
+impl<M, H, V: ?Sized, T: WalkMut<M, H, V>, O, C> WalkMut<M, Thru<H>, V>
+    for crate::nested::group::Group<T, O, C>
+{
+    fn walk_mut(&mut self, v: &mut V) {
+        self.slot.walk_mut(v);
+    }
+}
+
 // One impl per arity, fully generic in the slot types: a slot's indicator decides whether it is walked,
 // so `(Length, Line)` and `(Line, Line)` are this same impl at `(Skip, Here)` and `(Here, Here)`.
 macro_rules! walk_tuple {
