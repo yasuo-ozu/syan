@@ -47,10 +47,10 @@ mod v {
 /// Drop `0 ;` statements from the grouped `Vec`; clear the grouped `Option` tail if it is `7 ;`.
 struct Editor;
 impl<S> v::VisitMut<S> for Editor {
-    fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
+    fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
         v.retain_mut(|s| s.n.value != "0");
     }
-    fn visit_stmt_opt<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
+    fn visit_stmt_opt_mut<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
         if matches!(v.get(), Some(s) if s.n.value == "7") {
             v.take();
         }
@@ -154,7 +154,8 @@ mod rec {
             Block {
                 brace: GroupBrace<(), S>,
                 #[group(self.brace)]
-                #[seq] // grouped, self-recursive Vec-like slot -> visit_expr_seq
+                #[seq]
+                // grouped, self-recursive Vec-like slot -> visit_expr_seq_mut
                 items: Vec<Expr<S>>,
             },
             Lit(Integer),
@@ -168,7 +169,7 @@ mod rec {
     // Descend every grouped block, then drop `0` literals at each depth.
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_expr_seq<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
+        fn visit_expr_seq_mut<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
             for e in v.view_iter_mut() {
                 v::visit_expr_mut(self, e); // recurse into nested blocks
             }

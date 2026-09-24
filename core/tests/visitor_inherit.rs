@@ -69,6 +69,52 @@ mod basic {
     }
 }
 
+// An *inherited* type is walked without the extending node repeating it in `#[subast]`: `ext`
+// learns the base's list from the base itself, so the entry would only say what it already knows.
+// (Every other module here still writes one, so this is the only place that pins it.)
+mod inherited_needs_no_subast {
+    use core::marker::PhantomData;
+    use syan::visit::Ast;
+
+    #[derive(Ast)]
+    pub enum Expr<S> {
+        Lit(PhantomData<S>),
+    }
+
+    #[derive(Ast)] // deliberately no `#[subast(crate::inherited_needs_no_subast::Expr)]`
+    pub enum Stmt<S> {
+        E(Box<Expr<S>>),
+        Empty(PhantomData<S>),
+    }
+
+    pub mod base {
+        syan::visit::visitor!(super::Expr);
+    }
+    pub mod ext {
+        syan::visit::visitor!(super::base => super::Stmt);
+    }
+
+    #[derive(Default)]
+    struct Counter {
+        exprs: u32,
+    }
+    impl<S> base::Visit<S> for Counter {
+        fn visit_expr(&mut self, i: &Expr<S>) {
+            self.exprs += 1;
+            base::visit_expr(self, i);
+        }
+    }
+    impl<S> ext::Visit<S> for Counter {}
+
+    #[test]
+    fn inherited_type_is_walked_without_a_subast_entry() {
+        let ast: Stmt<()> = Stmt::E(Box::new(Expr::Lit(PhantomData)));
+        let mut counter = Counter::default();
+        ast.visit(&mut counter);
+        assert_eq!(counter.exprs, 1);
+    }
+}
+
 // Extension whose generic union is *wider* than the base's: the new trait must reference the
 // supertrait at the *base's* arity (`base::Visit<S>`), not the widened union (`base::Visit<S, T>`
 // would be E0107).

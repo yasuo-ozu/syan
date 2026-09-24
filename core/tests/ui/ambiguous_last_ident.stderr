@@ -1,0 +1,8 @@
+error: this type's fields spell 2 different paths ending in `Stmt` (Stmt, crate::other::Stmt); a visitor matches a field's head by its last path segment, so they cannot be told apart
+
+         = help: give one a distinct name, or name it through a `#[subast(<path> as Alias)]` entry and write that alias in the field
+
+  --> tests/ui/ambiguous_last_ident.rs:19:13
+   |
+19 |     Foreign(crate::other::Stmt),
+   |             ^^^^^^^^^^^^^^^^^^

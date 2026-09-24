@@ -1,8 +1,13 @@
 //! Build-time diagnostics for visitor footguns (clear errors instead of opaque cascades). See the
 //! `tests/ui/*.rs` companions.
 
+mod ui_toolchain;
+
 #[test]
 fn visitor_diagnostics() {
+    if !ui_toolchain::should_run("visitor_diagnostics") {
+        return;
+    }
     let t = trybuild::TestCases::new();
     // Two visited types sharing a last segment collide on generated names.
     t.compile_fail("tests/ui/visited_collision.rs");
@@ -15,6 +20,9 @@ fn visitor_diagnostics() {
     // `#[seq]`/`#[opt]` (no auto-detection); overriding them for an unmarked field is a "not a member of
     // trait" error.
     t.compile_fail("tests/ui/visitor_edit_unmarked_no_view.rs");
+    // Two different paths ending in the same ident inside one definition: the head match is by last
+    // segment, so they cannot be told apart.
+    t.compile_fail("tests/ui/ambiguous_last_ident.rs");
     // A `#[seq]`/`#[opt]` field can't view an inherited (non-targeted) type — clean error, not E0599.
     t.compile_fail("tests/ui/visitor_edit_seq_inherited.rs");
     // Marker on a non-viewable / container-less / non-visited field → clean abort, not a cryptic trait error.
@@ -24,4 +32,7 @@ fn visitor_diagnostics() {
     // A `#[seq]`/`#[opt]` field whose top-level type wraps a container (`Box<Vec<T>>`) is not an edit
     // target — edit views need a bare single container (the field still descends).
     t.compile_fail("tests/ui/visitor_edit_marker_boxed.rs");
+    // Handing a visited type to a generic parameter the node holds but never follows (`Brackets<T, S>`
+    // with `items: Vec<T>`) puts those nodes out of reach — previously a silent empty walk.
+    t.compile_fail("tests/ui/visitor_generic_element.rs");
 }

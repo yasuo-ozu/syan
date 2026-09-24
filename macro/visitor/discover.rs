@@ -8,8 +8,9 @@ pub(crate) fn followed_intermediates(
     subast: &[SubEntry],
     method_set: &HashSet<String>,
     self_ident: Option<&Ident>,
+    reachable_keys: &HashSet<String>,
 ) -> Vec<Path> {
-    let user_types = self_and_subast_keys(self_ident, subast);
+    let user_types = self_and_subast_keys(self_ident, subast, reachable_keys);
     let mut out = Vec::new();
     for_each_field_type(def, &mut |ty| {
         discover_followed(ty, subast, method_set, self_ident, &user_types, &mut out)
@@ -49,24 +50,6 @@ fn discover_followed(
                 }
             }
         }
-    }
-}
-
-fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
-    match def {
-        Item::Enum(e) => {
-            for v in &e.variants {
-                for field in &v.fields {
-                    f(&field.ty);
-                }
-            }
-        }
-        Item::Struct(s) => {
-            for field in &s.fields {
-                f(&field.ty);
-            }
-        }
-        _ => {}
     }
 }
 

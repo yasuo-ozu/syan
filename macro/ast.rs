@@ -1,7 +1,7 @@
-use crate::util::{angle, gargs, gparams, to_snake};
+use crate::util::{angle, data_field_iter, for_each_type_path, gargs, gparams, to_snake};
 use proc_macro2::{Literal, Span, TokenStream};
-use proc_macro_error::{abort, emit_warning};
-use std::collections::HashMap;
+use proc_macro_error::{emit_error, emit_warning};
+use std::collections::{HashMap, HashSet};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::*;
@@ -77,7 +77,7 @@ pub(crate) fn crate_rooted_tokens(path: &Path) -> TokenStream {
 /// `$crate::…` for downstream), or an external-crate path (`other_crate::…`) — i.e. a multi-segment path
 /// whose first segment is not `self`/`super`. NOT rooted: a bare single-segment ident, or a
 /// `self::`/`super::`-relative path — those resolve in the *consumer's* context, not the definition's.
-fn subast_path_is_rooted(path: &Path) -> bool {
+pub(crate) fn subast_path_is_rooted(path: &Path) -> bool {
     if path.leading_colon.is_some() {
         return true;
     }
@@ -98,19 +98,32 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
         }
         let list = match &attr.meta {
             Meta::List(ml) => ml.tokens.clone(),
-            _ => abort!(attr, "`#[subast(..)]` takes a parenthesized list of paths"),
+            _ => {
+                emit_error!(attr, "`#[subast(..)]` takes a parenthesized list of paths");
+                continue;
+            }
         };
         match Punctuated::<SubastEntry, Token![,]>::parse_terminated.parse2(list) {
             Ok(parsed) => entries.extend(parsed),
-            Err(e) => abort!(e.span(), "invalid `#[subast(..)]`: {}", e),
+            Err(e) => emit_error!(e.span(), "invalid `#[subast(..)]`: {}", e),
         }
     }
-    // Reject a non-fully-qualified path with a clear, actionable message — otherwise it surfaces far
-    // away as a cryptic "cannot find macro/type" (or wrong-type) error when a visitor drills the entry.
+    // Every entry must be rooted, whatever it names. The path has two jobs: as a *match key* only the
+    // last segment is compared, so the root is irrelevant there — but as a *fetch target* for a type
+    // `visitor!(..)` does not list, it is invoked as a macro to pull that type's definition, in the
+    // visitor's scope, where a bare or `self::`/`super::`-relative path means something else.
+    //
+    // The rule is unconditional rather than applied only to fetched entries, because which entries are
+    // fetched depends on the `visitor!(..)` list — so a conditional rule would accept an attribute
+    // today and reject it when someone stops listing that type, and would report at the `visitor!`
+    // invocation rather than at the attribute. A derive-emitted `pub use` could launder a relative path
+    // (a `use` resolves where it is written), but only one level deep: past the first hop the alias
+    // hides the module the next fetch needs, so the restriction would come back a level further from
+    // the code that has to change.
     for e in &entries {
         if !subast_path_is_rooted(&e.path) {
             let p = &e.path;
-            abort!(
+            emit_error!(
                 e.path,
                 "`#[subast(..)]` path `{}` is not fully qualified. Use a `crate`-rooted path \
                  (`crate::path::to::{}`) — or an external-crate path (`other_crate::path::{}`) for a \
@@ -134,7 +147,7 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
             for s in &mut stripped.segments {
                 s.arguments = PathArguments::None;
             }
-            abort!(
+            emit_error!(
                 e.path,
                 "`#[subast(..)]` path `{}` carries generic arguments; a subast entry names a type by \
                  path only (it is used as a metadata-macro fetch target and a match scrutinee, where \
@@ -148,7 +161,7 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
     for e in &entries {
         let key = e.matchkey().to_string();
         if seen.insert(key.clone(), ()).is_some() {
-            abort!(
+            emit_error!(
                 e.path,
                 "two `#[subast(..)]` entries share the last segment `{}`; alias one (`path as Alias`)",
                 key
@@ -159,14 +172,15 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
 }
 
 /// Produce a cleaned copy of the input definition (attributes stripped, except the field-level
-/// `#[seq]`/`#[opt]` view markers which are preserved so `__visitor_build` sees them) so it can be
+/// `#[seq]`/`#[opt]`/`#[skip]` markers, preserved so `__visitor_build` sees them) so it can be
 /// embedded verbatim inside the metadata `macro_rules!` and re-parsed as a `syn::Item`.
 pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
-    // Keep only the `#[seq]`/`#[opt]` field markers (the visitor reads them to dispatch a field through
-    // its `SeqView`/`OptView` edit method); drop everything else.
+    // Keep only the field markers the visitor reads: `#[seq]`/`#[opt]` dispatch a field through its
+    // `SeqView`/`OptView` edit method, `#[skip]` stops it being followed at all. Drop everything else.
     fn clean_field_attrs(f: &mut Field) {
-        f.attrs
-            .retain(|a| a.path().is_ident("seq") || a.path().is_ident("opt"));
+        f.attrs.retain(|a| {
+            a.path().is_ident("seq") || a.path().is_ident("opt") || a.path().is_ident("skip")
+        });
         f.vis = Visibility::Inherited;
     }
     let mut di = input.clone();
@@ -230,52 +244,22 @@ fn build_referrer(input: &DeriveInput) -> Option<type_leak::Referrer> {
     Some(leaker.finish())
 }
 
-/// Collect every ident that appears as a path-segment head anywhere inside a field type (so
-/// `Vec<Box<Stmt<S>>>` contributes `Vec`, `Box`, `Stmt`, `S`). Used only to warn about `#[subast]`
-/// entries that match no field — an over-approximation, so it never false-warns.
-fn collect_type_idents(ty: &Type, out: &mut std::collections::HashSet<String>) {
-    match ty {
-        Type::Path(tp) => {
-            for seg in &tp.path.segments {
-                out.insert(seg.ident.to_string());
-                if let PathArguments::AngleBracketed(ab) = &seg.arguments {
-                    for arg in &ab.args {
-                        if let GenericArgument::Type(t) = arg {
-                            collect_type_idents(t, out);
-                        }
-                    }
-                }
-            }
-        }
-        Type::Reference(r) => collect_type_idents(&r.elem, out),
-        Type::Slice(s) => collect_type_idents(&s.elem, out),
-        Type::Array(a) => collect_type_idents(&a.elem, out),
-        Type::Paren(p) => collect_type_idents(&p.elem, out),
-        Type::Group(g) => collect_type_idents(&g.elem, out),
-        Type::Tuple(t) => {
-            for e in &t.elems {
-                collect_type_idents(e, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    for_each_field(&input.data, |ty| collect_type_idents(ty, &mut out));
+/// Every ident that appears as a path segment anywhere inside a field type (so `Vec<Box<Stmt<S>>>`
+/// contributes `Vec`, `Box`, `Stmt`, `S`). Used only to warn about `#[subast]` entries that match no
+/// field — an over-approximation, so it never false-warns.
+fn field_head_idents(input: &DeriveInput) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for_each_field_type_of(&input.data, &mut |ty| {
+        for_each_type_path(ty, &mut |tp| {
+            out.extend(tp.path.segments.iter().map(|s| s.ident.to_string()));
+        })
+    });
     out
 }
 
-fn for_each_field(data: &Data, mut f: impl FnMut(&Type)) {
-    match data {
-        Data::Struct(s) => s.fields.iter().for_each(|fld| f(&fld.ty)),
-        Data::Enum(e) => e
-            .variants
-            .iter()
-            .for_each(|v| v.fields.iter().for_each(|fld| f(&fld.ty))),
-        Data::Union(u) => u.fields.named.iter().for_each(|fld| f(&fld.ty)),
-    }
+/// Call `f` for every field type of a derive input's body.
+fn for_each_field_type_of(data: &Data, f: &mut dyn FnMut(&Type)) {
+    data_field_iter(data).for_each(|fld| f(&fld.ty));
 }
 
 /// `#[derive(Ast)]` expansion.
@@ -293,6 +277,7 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
+    check_ambiguous_last_idents(input);
     let subast = parse_subast(&input.attrs);
     let field_heads = field_head_idents(input);
     for e in &subast {
@@ -367,5 +352,51 @@ pub fn derive_ast(input: &DeriveInput, nonce: u64, syan: &Path) -> TokenStream {
 
         #[doc(hidden)]
         #{ &input.vis } use #macro_name as #ident;
+    }
+}
+
+/// A path with its generic arguments stripped, as a comparable spelling (`Vec<Box<T>>` → `Vec`).
+fn bare_path(p: &Path) -> String {
+    let lead = if p.leading_colon.is_some() { "::" } else { "" };
+    let segs: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
+    format!("{lead}{}", segs.join("::"))
+}
+
+/// Reject a definition whose fields spell two *different* paths ending in the same identifier.
+///
+/// A visitor recognises a field's head by its **last path segment**, so within one definition those
+/// two are indistinguishable: whichever is the visited type, the other is matched as well. Catching it
+/// here points at the definition that carries the ambiguity, rather than leaving it to surface as a
+/// mis-resolved field — or, worse, as a field that silently stops being followed.
+fn check_ambiguous_last_idents(input: &DeriveInput) {
+    // Every path a field mentions, keyed by its last segment, keeping one occurrence of each distinct
+    // spelling so a diagnostic can point at it.
+    let mut by_last: HashMap<String, Vec<(String, Path)>> = HashMap::new();
+    for_each_field_type_of(&input.data, &mut |ty| {
+        for_each_type_path(ty, &mut |tp| {
+            let bare = bare_path(&tp.path);
+            let slot = by_last
+                .entry(tp.path.segments.last().unwrap().ident.to_string())
+                .or_default();
+            if !slot.iter().any(|(s, _)| s == &bare) {
+                slot.push((bare, tp.path.clone()));
+            }
+        })
+    });
+    for (last, spellings) in &by_last {
+        if spellings.len() < 2 {
+            continue;
+        }
+        let names: Vec<&str> = spellings.iter().map(|(s, _)| s.as_str()).collect();
+        emit_error!(
+            spellings[1].1,
+            "this type's fields spell {} different paths ending in `{}` ({}); a visitor matches a \
+             field's head by its last path segment, so they cannot be told apart",
+            spellings.len(),
+            last,
+            names.join(", ");
+            help = "give one a distinct name, or name it through a `#[subast(<path> as Alias)]` \
+                    entry and write that alias in the field"
+        );
     }
 }

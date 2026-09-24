@@ -1,0 +1,10 @@
+error: `Qubit<S>` is handed to `Brackets`'s type parameter `T`, which `Brackets` holds but the walk cannot descend through — a bare type parameter is never a visited head, so those nodes are unreachable however the visitor is written. Give `Brackets` a field of the concrete type instead of `T`, or list the instantiated node and reach it from there
+  --> tests/ui/visitor_generic_element.rs:21:12
+   |
+21 |     pub b: Brackets<Qubit<S>, S>,
+   |            ^^^^^^^^^^^^^^^^^^^^^
+...
+25 |     syan::visit::visitor!(crate::Qubit, crate::Brackets, crate::Stmt);
+   |     ----------------------------------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `crate::Stmt` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

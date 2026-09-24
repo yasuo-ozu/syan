@@ -69,7 +69,7 @@ mod plain_mut {
 
     struct Doubler;
     impl<S> v::VisitMut<S> for Doubler {
-        // No view override — the default `visit_n_seq` descends each element through `visit_n_mut`.
+        // No view override — the default `visit_n_seq_mut` descends each element through `visit_n_mut`.
         fn visit_n_mut(&mut self, n: &mut N<S>) {
             n.0 *= 2;
         }
@@ -109,7 +109,7 @@ mod views {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
+        fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
             for s in v.view_iter_mut() {
                 if s.0 == 2 {
                     *s = Stmt(102, PhantomData);
@@ -118,7 +118,7 @@ mod views {
             v.retain_mut(|s| s.0 != 0);
             v.push(Stmt(7, PhantomData));
         }
-        fn visit_stmt_opt<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
+        fn visit_stmt_opt_mut<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
             match v.get().map(|s| s.0) {
                 Some(0) => v.clear(),
                 Some(2) => v.set(Stmt(102, PhantomData)),
@@ -225,7 +225,7 @@ mod rec {
         #[derive(Debug, Ast)]
         #[subast()]
         pub enum Expr<S> {
-            Many(#[seq] Vec<Expr<S>>), // self-recursive Vec-like slot (Vec gives the indirection) -> visit_expr_seq
+            Many(#[seq] Vec<Expr<S>>), // self-recursive Vec-like slot (Vec gives the indirection) -> visit_expr_seq_mut
             Lit(i64, PhantomData<S>),
         }
     }
@@ -236,7 +236,7 @@ mod rec {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_expr_seq<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
+        fn visit_expr_seq_mut<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
             for e in v.view_iter_mut() {
                 match e {
                     ast::Expr::Lit(0, _) => {} // dropped by retain below
@@ -369,10 +369,10 @@ mod drill {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_leaf_seq<V: SeqView<Leaf<S>>>(&mut self, v: &mut V) {
+        fn visit_leaf_seq_mut<V: SeqView<Leaf<S>>>(&mut self, v: &mut V) {
             v.retain_mut(|l| l.0 != 0); // drop zeros from the drilled Vec
         }
-        fn visit_leaf_opt<O: OptView<Leaf<S>>>(&mut self, v: &mut O) {
+        fn visit_leaf_opt_mut<O: OptView<Leaf<S>>>(&mut self, v: &mut O) {
             if matches!(v.get(), Some(l) if l.0 == 0) {
                 v.clear(); // drop a zero from the drilled Option
             }
@@ -396,16 +396,16 @@ mod drill {
         assert_eq!(
             top.mid.leaves.iter().map(|l| l.0).collect::<Vec<_>>(),
             vec![1, 2],
-            "Vec<Leaf> inside the drilled Mid edited via visit_leaf_seq"
+            "Vec<Leaf> inside the drilled Mid edited via visit_leaf_seq_mut"
         );
         assert!(
             top.mid.last.is_none(),
-            "Option<Leaf> inside the drilled Mid cleared via visit_leaf_opt"
+            "Option<Leaf> inside the drilled Mid cleared via visit_leaf_opt_mut"
         );
     }
 }
 
-// ── multi-type `#[recurse]` cycle: edit the cross-edge `Vec<Stmt>` from `visit_stmt_seq` ────────────
+// ── multi-type `#[recurse]` cycle: edit the cross-edge `Vec<Stmt>` from `visit_stmt_seq_mut` ────────────
 mod rec_cross {
     use super::*;
     use syan::parse::recurse;
@@ -419,7 +419,7 @@ mod rec_cross {
         #[derive(Debug, Ast)]
         #[subast(crate::rec_cross::ast::Stmt)]
         pub enum Expr<S> {
-            Block(#[seq] Vec<Stmt<S>>), // cross-edge: holds `Stmt` Vec-like -> visit_stmt_seq
+            Block(#[seq] Vec<Stmt<S>>), // cross-edge: holds `Stmt` Vec-like -> visit_stmt_seq_mut
             Lit(i64, PhantomData<S>),
         }
 
@@ -437,7 +437,7 @@ mod rec_cross {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq<V: SeqView<ast::Stmt<S>>>(&mut self, v: &mut V) {
+        fn visit_stmt_seq_mut<V: SeqView<ast::Stmt<S>>>(&mut self, v: &mut V) {
             for s in v.view_iter_mut() {
                 if !matches!(s, ast::Stmt::Nop(0, _)) {
                     v::visit_stmt_mut(self, s); // descend (Stmt::Expr -> nested Block)
@@ -475,48 +475,7 @@ mod rec_cross {
     }
 }
 
-// ── `#[opt]` on a `Box`-topped field: `Box<Head>` is a single-slot `OptView<Head>` (always present), so
-//    it IS a valid opt edit target — get/get_mut/set edit the boxed node in place. (`take`/`clear` would
-//    panic — a `Box` can't be emptied — so only get/get_mut/set apply. A `Box<Vec>`/`Box<Option>` wraps a
-//    container and is NOT an edit target: see `ui/visitor_edit_marker_boxed.rs`.) ─────────────────────
-mod boxed_opt {
-    use super::*;
-    use syan::visit::{Ast, OptView};
-
-    #[derive(Debug, Ast)]
-    pub struct Leaf<S>(pub i64, pub PhantomData<S>);
-
-    #[derive(Debug, Ast)]
-    #[subast(crate::boxed_opt::Leaf)]
-    pub struct Holder<S> {
-        #[opt]
-        pub boxed: Box<Leaf<S>>,
-    }
-
-    pub mod v {
-        syan::visit::visitor!(super::Holder, super::Leaf);
-    }
-
-    struct Editor;
-    impl<S> v::VisitMut<S> for Editor {
-        fn visit_leaf_opt<O: OptView<Leaf<S>>>(&mut self, v: &mut O) {
-            assert!(
-                v.is_some(),
-                "a Box<Leaf> single-slot view is always present"
-            );
-            if let Some(l) = v.get_mut() {
-                l.0 += 100; // edit the boxed node in place
-            }
-            v.set(Leaf(v.get().unwrap().0 + 1, PhantomData)); // replace the boxed node
-        }
-    }
-
-    #[test]
-    fn opt_edits_boxed_single_node() {
-        let mut h: Holder<()> = Holder {
-            boxed: Box::new(Leaf(5, PhantomData)),
-        };
-        h.visit_mut(&mut Editor);
-        assert_eq!(h.boxed.0, 106, "5 -> +100 (get_mut) -> +1 (set) = 106");
-    }
-}
+// `#[opt]` on a `Box`-topped field is no longer an edit target: `Box<T>` is a `Slot`
+// (descent-only, blanket over `Deref`), not an `OptView<T>`. A `Box` cannot be emptied, so
+// `take`/`clear` never applied to one anyway. `ui/visitor_edit_marker_boxed.rs` covers the
+// rejection.

@@ -15,7 +15,11 @@ pub(crate) struct BuildInput {
     pub(crate) build: Path,
     pub(crate) nonce: TokenStream,
     pub(crate) visited: Vec<Path>,
-    pub(crate) inherited: Vec<Ident>,
+    /// Types inherited from the base, as `path as matchkey` rather than bare idents, so a field
+    /// holding an inherited type is followed without a `#[subast]` entry repeating what the base
+    /// already knows. Requalified against the base path on arrival, so the paths stay resolvable
+    /// through any number of generations.
+    pub(crate) inherited: Vec<SubEntry>,
     /// The base visitor's generic-param union (when inheriting), supplied by the base's
     /// `__syan_visited` macro, so the new trait can reference `base::Visit<..>` with the *base's*
     /// arity instead of the new union's.
@@ -40,7 +44,7 @@ impl BuildInput {
         self.visited
             .iter()
             .map(|p| last_ident(p).to_string())
-            .chain(self.inherited.iter().map(|i| i.to_string()))
+            .chain(self.inherited.iter().map(|e| e.key.to_string()))
             .collect()
     }
 }
@@ -111,18 +115,28 @@ pub(crate) fn emit_ancestors(anc: &[AncIn]) -> TokenStream {
 }
 
 /// The `__syan_visited` export — a `#[macro_export]` muncher that, when a downstream `visitor!(self =>
-/// New)` invokes it, appends this visitor's visited+inherited idents (`@inh`), param union (`@bg`), and
-/// ancestor chain (`@an`).
+/// New)` invokes it, appends everything this visitor can reach as `path as matchkey` (`@inh`), its
+/// param union (`@bg`), and its ancestor chain (`@an`).
+///
+/// Paths, not bare idents: the extender needs to *name* an inherited type to emit its `Walk` impl and
+/// to follow a field holding it, and it has no other way to learn where that type lives. The same
+/// channel already carries the ancestor chain, and for the same reason.
 pub(crate) fn emit_visited_macro(
     st: &BuildInput,
     g_params: &[GenericParam],
     anc_export: TokenStream,
 ) -> TokenStream {
-    let all_visible: Vec<Ident> = st
+    let all_visible: Vec<TokenStream> = st
         .visited
         .iter()
-        .map(|p| last_ident(p).clone())
-        .chain(st.inherited.iter().cloned())
+        .map(|p| {
+            let k = last_ident(p);
+            quote!( #p as #k )
+        })
+        .chain(st.inherited.iter().map(|e| {
+            let (p, k) = (&e.path, &e.key);
+            quote!( #p as #k )
+        }))
         .collect();
     let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
     quote! {
@@ -134,7 +148,7 @@ pub(crate) fn emit_visited_macro(
         macro_rules! #vmacro {
             (@visited $cb:path { $($pre:tt)* }) => {
                 $cb ! {
-                    $($pre)* @inh { #(#all_visible)* } @bg { #(#g_params),* } @an { #anc_export }
+                    $($pre)* @inh { #(#all_visible),* } @bg { #(#g_params),* } @an { #anc_export }
                 }
             };
         }
@@ -316,7 +330,7 @@ impl Parse for BuildInput {
                         .collect();
                 }
                 // `@inherited` is the carried set; `@inh` is appended by a base's visited-list macro.
-                "inherited" | "inh" => inherited.extend(parse_idents(content)?),
+                "inherited" | "inh" => inherited.extend(parse_subentries(content)?),
                 // `@baseg` is the carried base generics; `@bg` is appended by a base's macro.
                 "baseg" | "bg" => {
                     if !content.is_empty() {
@@ -383,7 +397,7 @@ pub(crate) fn state_tokens(
     build: &Path,
     nonce: &TokenStream,
     visited: &[Path],
-    inherited: &[Ident],
+    inherited: &[SubEntry],
     base_generics: &[GenericParam],
     anc: &TokenStream, // emit_ancestors(&base_ancestors) or quote!()
     fetching: &TokenStream,
@@ -395,7 +409,7 @@ pub(crate) fn state_tokens(
         @build { #build }
         @nonce { #nonce }
         @visited { #(#visited),* }
-        @inherited { #(#inherited)* }
+        @inherited { #(for e in inherited), { #{&e.path} as #{&e.key} } }
         @baseg { #(#base_generics),* }
         @anc { #anc }
         @fetching { #fetching }
@@ -428,7 +442,9 @@ pub fn build(input: TokenStream) -> TokenStream {
             .map(|d| norm_path(&d.path))
             .chain(st.rest.iter().map(norm_path))
             .collect();
-        for entry_path in followed_intermediates(&def, &subast, &method_set, self_ident) {
+        for entry_path in
+            followed_intermediates(&def, &subast, &method_set, self_ident, &method_set)
+        {
             if seen.insert(norm_path(&entry_path)) {
                 st.rest.push(entry_path);
             }
@@ -484,4 +500,21 @@ fn emit_done(done: &[DoneType]) -> TokenStream {
         })
         .collect();
     quote!( #(#blocks)* )
+}
+
+/// Whether a path recorded by `base`'s visitor has to be rewritten before this module can use it.
+///
+/// `self::`/`super::` are relative to the *base's* module, which is never this one — always rewrite,
+/// or a base and an extender at different nesting depths silently name different types. `crate::`
+/// already names the right crate when the base lives in this one, and must be re-rooted only when it
+/// does not. An absolute or external-crate path needs nothing.
+pub(crate) fn needs_requalify(p: &Path, base: &Path) -> bool {
+    if p.leading_colon.is_some() {
+        return false;
+    }
+    match p.segments.first().map(|s| s.ident.to_string()).as_deref() {
+        Some("self") | Some("super") => true,
+        Some("crate") => base_host_crate(base).is_some(),
+        _ => false,
+    }
 }

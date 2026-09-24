@@ -20,16 +20,15 @@ pub(crate) fn tuple_impls(
     g_params: &[GenericParam],
     g_args: &[TokenStream],
     g_use: &TokenStream,
-    mutable: bool,
+    side: Side,
     union_where: &[WherePredicate],
 ) -> Vec<TokenStream> {
-    let suffix = if mutable { "Mut" } else { "" };
-    let into_vis_tr = Ident::new(&format!("IntoVisitor{suffix}"), Span::call_site());
-    let into_hook_tr = Ident::new(&format!("IntoHook{suffix}"), Span::call_site());
-    let into_vis_fn = Ident::new(&format!("into_visitor{}", mt(mutable)), Span::call_site());
-    let into_hook_fn = Ident::new(&format!("into_hook{}", mt(mutable)), Span::call_site());
-    let visit_tr = Ident::new(&format!("Visit{suffix}"), Span::call_site());
-    let driver = Ident::new(&format!("Driver{suffix}"), Span::call_site());
+    let into_vis_tr = side.ty("IntoVisitor");
+    let into_hook_tr = side.ty("IntoHook");
+    let into_vis_fn = side.func("into_visitor");
+    let into_hook_fn = side.func("into_hook");
+    let visit_tr = side.visit_trait();
+    let driver = side.ty("Driver");
     // Helper param prefixes that avoid the visited types' own generic param names (so a visited type
     // may declare a param literally named `__F0`/`__T0`/…).
     let reserved: HashSet<String> = g_params.iter().map(param_name).collect();
@@ -80,12 +79,11 @@ fn field_view(attrs: &[Attribute]) -> Option<Container> {
     }
 }
 
-/// The bare marker word (`"seq"`/`"opt"`) for a view kind, for diagnostics.
-fn marker_word(kind: &Container) -> &'static str {
-    match kind {
-        Container::Seq => "seq",
-        Container::Opt => "opt",
-    }
+/// Whether a field carries `#[skip]`: never followed, whatever its type. The only way to say "this
+/// reachable type must not be walked here" once a field is followed because its type is visited
+/// rather than because the node repeated that in `#[subast]`.
+fn field_skips(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("skip"))
 }
 
 /// Abort: a `#[seq]`/`#[opt]`-marked field's element isn't a visited type. `single` distinguishes
@@ -96,15 +94,43 @@ fn marker_word(kind: &Container) -> &'static str {
 /// anywhere in the trybuild suite, so this merge is free to standardize on the pinned text plus one
 /// inserted word.
 fn abort_marker_not_visited(ty: &Type, kind: &Container, single: bool) -> ! {
-    let marker = marker_word(kind);
+    let marker = kind.word();
     let extra = if single { "single " } else { "" };
     abort!(
         ty,
         "a `#[{}]` field's element type is not a visited type — mark only a field whose element is \
-         a {}container of a type listed in `visitor!(..)` (or reached via `#[subast]`)",
+         a {}container of a type listed in `visitor!(..)`",
         marker,
         extra
     );
+}
+
+/// The node being destructured: its definition, the `#[subast]` allowlist that came with it, and the
+/// path to name it by. Carried as one value because the three only ever travel together — down every
+/// field, through every tuple element, and into every drilled intermediate.
+#[derive(Clone, Copy)]
+pub(crate) struct Node<'a> {
+    pub(crate) def: &'a Item,
+    pub(crate) subast: &'a [SubEntry],
+    pub(crate) path: &'a Path,
+}
+
+impl<'a> Node<'a> {
+    /// The node's own ident. A field whose head is it is followed by implicit self-recursion.
+    fn ident(&self) -> Option<&'a Ident> {
+        item_ident(self.def)
+    }
+}
+
+/// One field as the lowering sees it: its type, the binding the destructuring pattern gave it, its
+/// `#[seq]`/`#[opt]` view and `#[skip]` marker, and its position — which names the tuple temporaries.
+#[derive(Clone, Copy)]
+struct FieldIn<'a> {
+    ty: &'a Type,
+    binding: &'a TokenStream,
+    view: Option<Container>,
+    skip: bool,
+    idx: usize,
 }
 
 /// Lowers a visited type's `visit_*` body: a field followed via a *visited/inherited* head becomes a
@@ -116,22 +142,40 @@ pub(crate) struct Lower<'a> {
     pub(crate) method_set: &'a HashSet<String>,
     /// Fetched types keyed by `norm_path`, for resolving an intermediate's def when drilling.
     pub(crate) done_by_path: &'a HashMap<String, &'a DoneType>,
-    pub(crate) mutable: bool,
+    /// Which visitor this lowering is for — decides every name and borrow it emits.
+    pub(crate) side: Side,
     /// (mut walk) heads reached in a `#[seq]`/`#[opt]` field — drive which `visit_<t>_seq`/`_opt`
     /// methods `gen_side` emits.
     pub(crate) seq_used: &'a RefCell<HashSet<String>>,
     pub(crate) opt_used: &'a RefCell<HashSet<String>>,
+    /// This module's `Walk` tag with its args (`__SyanWalkTag<S>`), for spelling the bound at a call
+    /// site — the tag carries the union params so a node's impl can name params its own type omits.
+    pub(crate) walk_tag_args: &'a TokenStream,
+    /// Heads this module generates `Walk` impls for directly (its `visitor!(..)` targets). An
+    /// *inherited* head is in `method_set` but not here — its impl is emitted separately, against the
+    /// path the base sent through `__syan_visited` (see `inherited_heads`).
+    pub(crate) target_set: &'a HashSet<String>,
+    /// Head types reached that are *inherited* — visited by a base module, so this module has no
+    /// `Walk` impl for them. Recorded as `(dedup key, type tokens)` and emitted alongside the node
+    /// impls, using the `#[subast]` path plus the arguments the field wrote.
+    pub(crate) inherited_heads: &'a RefCell<Vec<(String, TokenStream, Ident)>>,
+    /// Every head this visitor can name — its own targets plus what it inherits — with the path to
+    /// name it by. Folded into each node's peel set so a field is followed because its type is
+    /// visited, not because the node repeated that in `#[subast]`, and consulted when a head has no
+    /// `#[subast]` entry to resolve it.
+    pub(crate) reachable: &'a HashMap<String, Path>,
+    pub(crate) reachable_keys: &'a HashSet<String>,
+}
+
+/// Whether `ty` is a `PhantomData<..>` — a field that mentions a type parameter while holding no
+/// value of it, so handing it a visited type loses nothing. Diagnostic-only; see
+/// [`Lower::check_generic_element`].
+fn is_phantom_data(ty: &Type) -> bool {
+    matches!(ty, Type::Path(tp)
+        if tp.path.segments.last().is_some_and(|s| s.ident == "PhantomData"))
 }
 
 impl<'a> Lower<'a> {
-    fn amp(&self) -> TokenStream {
-        if self.mutable {
-            quote!(&mut)
-        } else {
-            quote!(&)
-        }
-    }
-
     /// Emit `this.visit_<head>_seq(binding)` / `_opt(binding)` for a `#[seq]`/`#[opt]` field, recording
     /// the `(head, kind)` usage so `gen_side` emits the method. `binding` is the `&mut <field>`, whose
     /// type `impl`s `SeqView<head>`/`OptView<head>` (box-transparently), so it is passed as-is.
@@ -141,10 +185,9 @@ impl<'a> Lower<'a> {
             Container::Opt => (self.opt_used, "opt"),
         };
         used.borrow_mut().insert(head.to_string());
-        let m = Ident::new(
-            &format!("visit_{}_{suffix}", to_snake(head)),
-            Span::call_site(),
-        );
+        let m = self
+            .side
+            .func(&format!("visit_{}_{suffix}", to_snake(head)));
         quote!( this.#m(#binding); )
     }
 
@@ -161,7 +204,7 @@ impl<'a> Lower<'a> {
         stack: &mut Vec<String>,
     ) -> TokenStream {
         if self.method_set.contains(&head.to_string()) {
-            let m = method_ident_m(head, self.mutable);
+            let m = self.side.method(head);
             return quote!( this.#m(#access); );
         }
         let key = norm_path(drill_path);
@@ -183,32 +226,34 @@ impl<'a> Lower<'a> {
             ),
         };
         stack.push(key);
-        let amp = self.amp();
+        let amp = self.side.amp();
         let scrut = quote!( #amp * #access );
-        let block = self.destructure(&dt.def, &dt.subast, &dt.path, &scrut, depth + 1, stack);
+        let node = Node {
+            def: &dt.def,
+            subast: &dt.subast,
+            path: &dt.path,
+        };
+        let block = self.destructure(node, &scrut, depth + 1, stack);
         stack.pop();
         block
     }
 
-    /// Destructure `scrutinee` (a `&T`/`&mut T` expr) per `def`/`subast` and visit followed fields.
+    /// Destructure `scrutinee` (a `&T`/`&mut T` expr) per the node and visit its followed fields.
     /// Empty when no followed field anywhere reaches a visited type.
     pub(crate) fn destructure(
         &self,
-        def: &Item,
-        subast: &[SubEntry],
-        path: &Path,
+        node: Node,
         scrutinee: &TokenStream,
         depth: usize,
         stack: &mut Vec<String>,
     ) -> TokenStream {
-        let self_ident = item_ident(def);
-        match def {
+        let path = node.path;
+        match node.def {
             Item::Enum(e) => {
                 let mut arms = Vec::new();
                 let mut any = false;
                 for v in &e.variants {
-                    let (pat, stmts, has) =
-                        self.fields(&v.fields, subast, self_ident, path, depth, stack);
+                    let (pat, stmts, has) = self.fields(&v.fields, node, depth, stack);
                     any |= has;
                     let vident = &v.ident;
                     arms.push(quote!( #path::#vident #pat => { #stmts } ));
@@ -219,8 +264,7 @@ impl<'a> Lower<'a> {
                 quote!( match #scrutinee { #(#arms)* } )
             }
             Item::Struct(s) => {
-                let (pat, stmts, has) =
-                    self.fields(&s.fields, subast, self_ident, path, depth, stack);
+                let (pat, stmts, has) = self.fields(&s.fields, node, depth, stack);
                 if !has {
                     return quote!();
                 }
@@ -233,14 +277,11 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Build `(pattern, statements, has_any_visit)` for a field set. `self_ident` is the type being
-    /// destructured (a field whose head is it is followed by implicit self-recursion).
+    /// Build `(pattern, statements, has_any_visit)` for a field set.
     fn fields(
         &self,
         fields: &Fields,
-        subast: &[SubEntry],
-        self_ident: Option<&Ident>,
-        path: &Path,
+        node: Node,
         depth: usize,
         stack: &mut Vec<String>,
     ) -> (TokenStream, TokenStream, bool) {
@@ -251,10 +292,14 @@ impl<'a> Lower<'a> {
                 for (idx, f) in named.named.iter().enumerate() {
                     let name = f.ident.clone().unwrap();
                     let bind = quote!(#name);
-                    let view = field_view(&f.attrs);
-                    if let Some(stmt) = self.lower_field(
-                        &f.ty, &bind, view, idx, subast, self_ident, path, depth, stack,
-                    ) {
+                    let fi = FieldIn {
+                        ty: &f.ty,
+                        binding: &bind,
+                        view: field_view(&f.attrs),
+                        skip: field_skips(&f.attrs),
+                        idx,
+                    };
+                    if let Some(stmt) = self.lower_field(fi, node, depth, stack) {
                         binds.push(quote!(#name));
                         stmts.push(stmt);
                     }
@@ -268,10 +313,14 @@ impl<'a> Lower<'a> {
                 for (idx, f) in unnamed.unnamed.iter().enumerate() {
                     let bind_id = Ident::new(&format!("__f{depth}_{idx}"), Span::call_site());
                     let bind = quote!(#bind_id);
-                    let view = field_view(&f.attrs);
-                    if let Some(stmt) = self.lower_field(
-                        &f.ty, &bind, view, idx, subast, self_ident, path, depth, stack,
-                    ) {
+                    let fi = FieldIn {
+                        ty: &f.ty,
+                        binding: &bind,
+                        view: field_view(&f.attrs),
+                        skip: field_skips(&f.attrs),
+                        idx,
+                    };
+                    if let Some(stmt) = self.lower_field(fi, node, depth, stack) {
                         pats.push(quote!(#bind_id));
                         stmts.push(stmt);
                     } else {
@@ -285,23 +334,120 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Lower one field. `binding` is the destructured field (a `&Field`/`&mut Field`). `view` is the
-    /// field's `#[seq]`/`#[opt]` marker (the visitor dispatches such a field through its container-edit
-    /// view). Returns the visit statement(s), or `None` for a leaf / finite dead-end (binds `_`).
-    #[allow(clippy::too_many_arguments)]
+    /// Abort when a field hands a visited type to a node through a generic parameter that the node
+    /// does not follow — `Brackets<Qubit<S>, S>` where `Brackets<T, S>` holds `items: Vec<T>`.
+    ///
+    /// `peel` never treats a bare type parameter as a head, so `Vec<T>` is a leaf in `Brackets`'
+    /// own definition, and the `Qubit`s put there are unreachable however the visitor is written —
+    /// a hand-implemented `Visit` would not be called for them either. Nothing about the shape says
+    /// so, and the walk simply returns nothing, so say it here.
+    ///
+    /// Only fires where something is demonstrably lost: the argument must itself reach a visited
+    /// type, and the parameter it fills must be held by the node in a position the walk would have
+    /// descended. `PhantomData` is excluded by name — it is the one std type whose whole purpose is
+    /// to mention a parameter while holding no value of it, so a `PhantomData<T>` field loses
+    /// nothing. That is a diagnostic-only name match; the walk itself still names no container.
+    fn check_generic_element(
+        &self,
+        field_ty: &Type,
+        args: &PathArguments,
+        head_path: &Path,
+        owner_types: &HashSet<String>,
+    ) {
+        let PathArguments::AngleBracketed(ab) = args else {
+            return;
+        };
+        // `done_by_path` is keyed by the `visitor!(..)` paths (`crate::…`), but `head_path` came from
+        // a `#[subast]` entry, which the metadata macro re-roots to `$crate::…`. Fold the root so the
+        // two meet; a miss here only costs the diagnostic, never correctness.
+        let key = norm_path(head_path).replace("$crate", "crate");
+        let Some(def) = self.done_by_path.get(&key) else {
+            return;
+        };
+        let head_params = match item_generics(&def.def) {
+            Some(g) => gparams(g),
+            None => return,
+        };
+        let head_types =
+            self_and_subast_keys(item_ident(&def.def), &def.subast, self.reachable_keys);
+
+        // Walk argument and parameter lists together, both filtered to types: a lifetime argument
+        // never fills a type parameter.
+        let mut params = head_params.iter().filter_map(|p| match p {
+            GenericParam::Type(t) => Some(&t.ident),
+            _ => None,
+        });
+        for arg in &ab.args {
+            let GenericArgument::Type(arg_ty) = arg else {
+                continue;
+            };
+            let Some(param) = params.next() else { return };
+            // Does this argument carry anything the owner visits?
+            if peel(arg_ty, owner_types).is_none() {
+                continue;
+            }
+            // Does the head hold that parameter somewhere the walk would have gone?
+            let mut probe = head_types.clone();
+            probe.insert(param.to_string());
+            let mut lost = false;
+            for_each_field_type(&def.def, &mut |ft| {
+                if is_phantom_data(ft) {
+                    return;
+                }
+                if let Some(pp) = peel(ft, &probe) {
+                    if matches!(&pp.head, Head::Path { head, .. } if head == param) {
+                        lost = true;
+                    }
+                }
+            });
+            if lost {
+                let head = last_ident(head_path);
+                abort!(
+                    field_ty,
+                    "`{}` is handed to `{}`'s type parameter `{}`, which `{}` holds but the walk \
+                     cannot descend through — a bare type parameter is never a visited head, so \
+                     those nodes are unreachable however the visitor is written. Give `{}` a field \
+                     of the concrete type instead of `{}`, or list the instantiated node and reach \
+                     it from there",
+                    quote!(#arg_ty).to_string().replace(' ', ""),
+                    head,
+                    param,
+                    head,
+                    head,
+                    param,
+                );
+            }
+        }
+    }
+
+    /// Lower one field of `node`. Returns the visit statement(s), or `None` for a leaf / finite
+    /// dead-end (which binds `_`).
     fn lower_field(
         &self,
-        ty: &Type,
-        binding: &TokenStream,
-        view: Option<Container>,
-        idx: usize,
-        subast: &[SubEntry],
-        self_ident: Option<&Ident>,
-        path: &Path,
+        f: FieldIn,
+        node: Node,
         depth: usize,
         stack: &mut Vec<String>,
     ) -> Option<TokenStream> {
-        let user_types = self_and_subast_keys(self_ident, subast);
+        let FieldIn {
+            ty,
+            binding,
+            view,
+            skip,
+            idx,
+        } = f;
+        let (subast, path, self_ident) = (node.subast, node.path, node.ident());
+        if skip {
+            if let Some(kind) = view {
+                abort!(
+                    ty,
+                    "a field cannot be both `#[skip]` and `#[{}]`",
+                    kind.word()
+                );
+            }
+            return None;
+        }
+        let user_types = self_and_subast_keys(self_ident, subast, self.reachable_keys);
         let p = match peel(ty, &user_types) {
             Some(p) => p,
             // No followed head reachable ⇒ the field is a leaf. A `#[seq]`/`#[opt]` marker on such a
@@ -315,13 +461,17 @@ impl<'a> Lower<'a> {
         };
         // A field behind a shared reference (`&T`/`&[T]`) is visitable on the shared side but a leaf
         // for `visit_mut` — there is no `&mut head` reachable through a `&`.
-        if self.mutable && p.shared_ref {
+        if self.side.mutable && p.shared_ref {
             return None;
         }
         // An empty body (a leaf head, or a finite drill reaching nothing) ⇒ the whole field is a leaf.
         let acc = innermost_acc(&p.conts, binding);
         // The effective head type (real ident + path) when this is a followed `Head::Path`: self
         // (implicit) or a `#[subast]` entry (an aliased `Real as Aliased` dispatches to `visit_real`).
+        let p_head_wrote: Option<Path> = match &p.head {
+            Head::Path { wrote, .. } => Some(wrote.clone()),
+            Head::Tuple(_) => None,
+        };
         let resolved: Option<(Ident, Path)> = match &p.head {
             Head::Path { head: phead, .. } if Some(phead) == self_ident => {
                 Some((phead.clone(), path.clone()))
@@ -329,18 +479,45 @@ impl<'a> Lower<'a> {
             Head::Path { head: phead, .. } => subast
                 .iter()
                 .find(|e| &e.key == phead)
-                .map(|e| (last_ident(&e.path).clone(), e.path.clone())),
+                .map(|e| {
+                    let real = last_ident(&e.path).clone();
+                    // Prefer the path this visitor knows the type by. A `#[subast]` path may be
+                    // written however the declaring module liked — only its last segment is compared
+                    // — so it is not necessarily nameable *here*. `reachable` holds the spelling
+                    // `visitor!(..)` used, which is.
+                    match self.reachable.get(&real.to_string()) {
+                        Some(p) => (real, p.clone()),
+                        None => (real, e.path.clone()),
+                    }
+                })
+                // No `#[subast]` entry, so the head is one this visitor already names: a type it
+                // lists, or one it inherits (whose path arrived through the base's `__syan_visited`).
+                // An entry would only have repeated what the visitor already said.
+                .or_else(|| {
+                    self.reachable.get(&phead.to_string()).and_then(|p| {
+                        // Only when the written path can actually denote it — see `path_may_denote`.
+                        let w = match &p_head_wrote {
+                            Some(w) => w,
+                            None => return None,
+                        };
+                        path_may_denote(w, p, path).then(|| (last_ident(p).clone(), p.clone()))
+                    })
+                }),
             Head::Tuple(_) => None,
         };
+
+        if let (Head::Path { args, .. }, Some((_, hpath))) = (&p.head, &resolved) {
+            self.check_generic_element(ty, args, hpath, &user_types);
+        }
 
         // A `#[seq]`/`#[opt]`-marked field is edited in place through the whole field's `SeqView`/`OptView`
         // (`visit_mut` only). The field must be a **single** container of the visited head
         // (`Vec<Head>`/`Option<Head>`/…): the marker picks the view method, and the `SeqView<Head>` /
         // `OptView<Head>` bound on the generated method self-validates Seq-vs-Opt (a `#[seq]` on an
         // `Option` fails the bound). No container name is matched.
-        if self.mutable {
+        {
             if let Some(kind) = view {
-                let marker = marker_word(&kind);
+                let marker = kind.word();
                 let head = match &resolved {
                     Some((h, _)) if self.method_set.contains(&h.to_string()) => h,
                     _ => abort_marker_not_visited(ty, &kind, true),
@@ -382,29 +559,51 @@ impl<'a> Lower<'a> {
         let body = match &p.head {
             // A tuple at the innermost position: destructure and lower each element (an element may
             // itself be a followed type, a container of one, or a nested tuple).
-            Head::Tuple(elems) => {
-                self.lower_tuple(elems, &acc, idx, subast, self_ident, path, depth, stack)
-            }
+            Head::Tuple(elems) => self.lower_tuple(elems, &acc, idx, node, depth, stack),
             Head::Path { .. } => match &resolved {
                 Some((head, drill_path)) => self.visit_value(&acc, head, drill_path, depth, stack),
                 None => quote!(),
             },
         };
-        (!body.is_empty()).then(|| fold_containers(&p.conts, binding, body, self.mutable))
+        // Two fields keep the older container-loop lowering, because no `Walk` impl covers them here:
+        // one behind a shared reference (`&T` is not a `Walk`), and one whose head is *inherited* —
+        // that type lives in the base module and this module has no path with which to impl for it.
+        // An inherited head's type lives in a base module, which wrote its `Walk` impl against *its*
+        // tag. Record the head so this module emits one against its own tag too; the path comes from
+        // `#[subast]` and the arguments from the field.
+        if let (Head::Path { args, .. }, Some((h, hpath))) = (&p.head, &resolved) {
+            if !self.target_set.contains(&h.to_string()) {
+                let ty = quote!( #hpath #args );
+                let key = ty.to_string();
+                let mut v = self.inherited_heads.borrow_mut();
+                if !v.iter().any(|(k, _, _)| k == &key) {
+                    v.push((key, ty, h.clone()));
+                }
+            }
+        }
+        // Otherwise `body` served only to decide whether the field is followed at all (a leaf head, or
+        // a finite drill reaching no visited type, yields nothing). The descent itself is one `Walk`
+        // call: the container impls in `syan::visit` peel the layers, and the generated per-node impl
+        // bottoms out in that node's `visit_*` method.
+        (!body.is_empty()).then(|| {
+            let (tr, f) = (self.side.walk_trait(), self.side.walk_fn());
+            let tag = walk_tag();
+            let targs = self.walk_tag_args;
+            let h = indicator(ty, &user_types)
+                .unwrap_or_else(|| quote!(::syan::visit::indicator::Skip));
+            quote!( ::syan::visit::#tr::<#tag #targs, #h, _>::#f(#binding, this); )
+        })
     }
 
     /// Lower a tuple at the (container-peeled, box-dereffed) accessor `acc`: destructure it and lower
     /// each element. Leaf elements bind `_`; an empty result (no followed element) makes the tuple a
     /// leaf. Mirrors the `#[recurse]` path's `recurse_lower_tuple`.
-    #[allow(clippy::too_many_arguments)]
     fn lower_tuple(
         &self,
         elems: &[Type],
         acc: &TokenStream,
         idx: usize,
-        subast: &[SubEntry],
-        self_ident: Option<&Ident>,
-        path: &Path,
+        node: Node,
         depth: usize,
         stack: &mut Vec<String>,
     ) -> TokenStream {
@@ -412,18 +611,16 @@ impl<'a> Lower<'a> {
         let mut stmts = Vec::new();
         for (i, elem) in elems.iter().enumerate() {
             let ebind = Ident::new(&format!("__t{depth}_{idx}_{i}"), Span::call_site());
+            let binding = quote!(#ebind);
             // A tuple element is a bare type with no field attrs, so it can carry no `#[seq]`/`#[opt]`.
-            if let Some(stmt) = self.lower_field(
-                elem,
-                &quote!(#ebind),
-                None,
+            let fi = FieldIn {
+                ty: elem,
+                binding: &binding,
+                view: None,
+                skip: false,
                 idx,
-                subast,
-                self_ident,
-                path,
-                depth + 1,
-                stack,
-            ) {
+            };
+            if let Some(stmt) = self.lower_field(fi, node, depth + 1, stack) {
                 pats.push(quote!(#ebind));
                 stmts.push(stmt);
             } else {
@@ -433,7 +630,7 @@ impl<'a> Lower<'a> {
         if stmts.is_empty() {
             return quote!();
         }
-        let amp = self.amp();
+        let amp = self.side.amp();
         quote!( { let ( #(#pats,)* ) = #amp * #acc; #(#stmts)* } )
     }
 }

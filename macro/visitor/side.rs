@@ -1,45 +1,43 @@
 use super::*;
 
 /// Generate every item for one mutability "side" (`Visit`/`VisitMut`, etc.).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn gen_side(
-    mutable: bool,
+    side: Side,
+    m: &Model,
     vtypes: &[VType],
-    g_params: &[GenericParam],
-    g_args: &[TokenStream],
-    g_def: &TokenStream,
-    g_use: &TokenStream,
-    base_g_use: &TokenStream,
-    ancestors: &[Ancestor],
-    base: &Option<Path>,
     union_where: &[WherePredicate],
+    // Which visited types some AST holds Vec-like / Option-like, and so get a `visit_<t>_seq` /
+    // `visit_<t>_opt` container-edit view.
+    seq_used: &HashSet<String>,
+    opt_used: &HashSet<String>,
+) -> TokenStream {
+    let Model {
+        g_params,
+        g_args,
+        g_def,
+        g_use,
+        base,
+        base_g_use,
+        ancestors,
+        ..
+    } = m;
     // Heterogeneous (method-generic) mode: a non-shared param is concrete-filled in a cross-edge, so
     // each `visit_*` carries its type's non-shared params as method generics. A closure can't be
     // `for<T>` generic, so the closure machinery (`&mut V` blanket / `Driver`/`Hook`/`Chain`/
     // `IntoVisitor`) is omitted and the inherent `.visit()` takes `&mut impl Visit` directly.
-    struct_only: bool,
-    // (mut side) which visited types are held Vec-like / Option-like by some AST → get a
-    // `visit_<t>_seq` / `visit_<t>_opt` container-edit method. Ignored on the immutable side.
-    seq_used: &HashSet<String>,
-    opt_used: &HashSet<String>,
-) -> TokenStream {
-    let suffix = if mutable { "Mut" } else { "" };
+    let struct_only = m.method_mode;
     let id = |s: &str| Ident::new(s, Span::call_site());
-    let visit_tr = id(&format!("Visit{suffix}"));
-    let into_vis_tr = id(&format!("IntoVisitor{suffix}"));
-    let into_hook_tr = id(&format!("IntoHook{suffix}"));
-    let hook_tr = id(&format!("Hook{suffix}"));
-    let driver = id(&format!("Driver{suffix}"));
-    let into_vis_fn = id(&format!("into_visitor{}", mt(mutable)));
-    let into_hook_fn = id(&format!("into_hook{}", mt(mutable)));
-    let visit_method = id(&format!("visit{}", mt(mutable)));
-    let amp = if mutable { quote!(&mut) } else { quote!(&) };
-    let recv = if mutable {
-        quote!(&mut self)
-    } else {
-        quote!(&self)
-    };
-    let self_ret = if mutable {
+    let visit_tr = side.visit_trait();
+    let into_vis_tr = side.ty("IntoVisitor");
+    let into_hook_tr = side.ty("IntoHook");
+    let hook_tr = side.ty("Hook");
+    let driver = side.ty("Driver");
+    let into_vis_fn = side.func("into_visitor");
+    let into_hook_fn = side.func("into_hook");
+    let visit_method = side.func("visit");
+    let amp = side.amp();
+    let recv = side.recv();
+    let self_ret = if side.mutable {
         quote!(&mut Self)
     } else {
         quote!(&Self)
@@ -74,10 +72,69 @@ pub(crate) fn gen_side(
         /// The per-method generic naming the view type: `p_vw` for seq, `p_ow` for opt (the *same*
         /// idents `gen_side` already mints once via `fresh_ident` — not reminted per type/kind).
         view_param: Ident,
-        /// Trait-method default body. NOT further folded: the seq body is a `for .. in
-        /// view_iter_mut(v)` loop, the opt body an `if let Some(..) = get_mut(v)` — genuinely
-        /// different shapes, only the *emission site* (trait_def/blanket_ref_impl) is shared.
+        /// Trait-method default body: a `for .. in view_iter(v)` loop for a seq, an
+        /// `if let Some(..) = get(v)` for an opt.
         default_body: TokenStream,
+    }
+
+    impl ViewSpec {
+        /// The view a visited type gets for one container shape. Seq and opt differ in the view
+        /// trait, the accessor and the wording; everything downstream of here treats them alike.
+        fn new(
+            kind: Container,
+            side: Side,
+            ident: &Ident,
+            method: &Ident,
+            view_param: Ident,
+        ) -> Self {
+            let (name, mname) = (ident.to_string(), method.to_string());
+            let accessor = side.func(match kind {
+                Container::Seq => "view_iter",
+                Container::Opt => "get",
+            });
+            let view_trait = kind.view_trait();
+            let doc = match (kind, side.mutable) {
+                (Container::Seq, true) => format!(
+                    "Structurally edit the `{name}` nodes in a `Vec`-like parent slot via a \
+                     [`SeqView`](::syan::visit::SeqView) (`push`/`insert`/`remove`/`retain_mut`/\
+                     `view_iter_mut`); default descends each via `{mname}`."
+                ),
+                (Container::Seq, false) => format!(
+                    "Observe the `{name}` nodes in a `Vec`-like parent slot via a \
+                     [`SeqView`](::syan::visit::SeqView) (`len`/`get`/`view_iter`) — the slot \
+                     itself, not just each element; default descends each via `{mname}`."
+                ),
+                (Container::Opt, true) => format!(
+                    "Structurally edit the `{name}` node in an `Option`-like parent slot via an \
+                     [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`); default \
+                     descends it via `{mname}`."
+                ),
+                (Container::Opt, false) => format!(
+                    "Observe the `{name}` node in an `Option`-like parent slot via an \
+                     [`OptView`](::syan::visit::OptView) (`is_some`/`get`) — the slot itself, \
+                     not just the element; default descends it via `{mname}`."
+                ),
+            };
+            let default_body = match kind {
+                Container::Seq => quote! {
+                    for __syan_e in #view_trait::#accessor(v) {
+                        self.#method(__syan_e);
+                    }
+                },
+                Container::Opt => quote! {
+                    if let ::core::option::Option::Some(__syan_e) = #view_trait::#accessor(v) {
+                        self.#method(__syan_e);
+                    }
+                },
+            };
+            ViewSpec {
+                method: side.func(&format!("visit_{}_{}", to_snake(ident), kind.word())),
+                doc,
+                view_trait,
+                view_param,
+                default_body,
+            }
+        }
     }
 
     struct S {
@@ -142,7 +199,7 @@ pub(crate) fn gen_side(
                 preds.extend(method_where.iter().cloned());
                 where_clause(&preds)
             };
-            let method = method_ident_m(&ident, mutable);
+            let method = side.method(&ident);
             let name = ident.to_string();
             let mname = method.to_string();
             let tdoc = format!(
@@ -152,43 +209,19 @@ pub(crate) fn gen_side(
             let fdoc = format!(
                 "Recurse into an `{name}`'s children, dispatching each to `visit_*{mut_sfx}` \
                  ([`{visit_tr}::{mname}`]'s default delegates here).",
-                mut_sfx = mt(mutable),
+                mut_sfx = side.fn_suffix(),
             );
             let mut views = Vec::new();
-            if mutable && seq_used.contains(&name) {
-                let seq_doc = format!(
-                    "Structurally edit the `{name}` nodes in a `Vec`-like parent slot via a \
-                     [`SeqView`](::syan::visit::SeqView) (`push`/`insert`/`remove`/`retain_mut`/`view_iter_mut`); \
-                     default descends each via `{mname}`."
-                );
-                views.push(ViewSpec {
-                    method: Ident::new(&format!("visit_{}_seq", to_snake(&ident)), Span::call_site()),
-                    doc: seq_doc,
-                    view_trait: quote!(::syan::visit::SeqView),
-                    view_param: p_vw.clone(),
-                    default_body: quote! {
-                        for __syan_e in ::syan::visit::SeqView::view_iter_mut(v) {
-                            self.#method(__syan_e);
-                        }
-                    },
-                });
-            }
-            if mutable && opt_used.contains(&name) {
-                let opt_doc = format!(
-                    "Structurally edit the `{name}` node in an `Option`-like parent slot via an \
-                     [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`); default descends it via `{mname}`."
-                );
-                views.push(ViewSpec {
-                    method: Ident::new(&format!("visit_{}_opt", to_snake(&ident)), Span::call_site()),
-                    doc: opt_doc,
-                    view_trait: quote!(::syan::visit::OptView),
-                    view_param: p_ow.clone(),
-                    default_body: quote! {
-                        if let ::core::option::Option::Some(__syan_e) = ::syan::visit::OptView::get_mut(v) {
-                            self.#method(__syan_e);
-                        }
-                    },
-                });
+            // Both sides get the views. The shared one observes the parent slot — its length, its
+            // neighbours, an element's index — which `visit_<t>` alone cannot show; the `&mut` one
+            // edits it. Named `_seq`/`_opt` on `Visit` and `_seq_mut`/`_opt_mut` on `VisitMut`.
+            for (kind, used, view_param) in [
+                (Container::Seq, seq_used, &p_vw),
+                (Container::Opt, opt_used, &p_ow),
+            ] {
+                if used.contains(&name) {
+                    views.push(ViewSpec::new(kind, side, &ident, &method, view_param.clone()));
+                }
             }
             S {
                 ty,
@@ -201,17 +234,14 @@ pub(crate) fn gen_side(
                 free_params,
                 trait_where,
                 free_where,
-                hook: Ident::new(
-                    &format!("hook_{}{}", to_snake(&ident), mt(mutable)),
-                    Span::call_site(),
-                ),
-                hook_struct: Ident::new(&format!("{ident}Hook{suffix}"), Span::call_site()),
-                body: if mutable { t.body_mut.clone() } else { t.body.clone() },
+                hook: side.func(&format!("hook_{}", to_snake(&ident))),
+                hook_struct: side.ty(&format!("{ident}Hook")),
+                body: if side.mutable { t.body_mut.clone() } else { t.body.clone() },
             }
         })
         .collect();
 
-    let tup = tuple_impls(8, g_params, g_args, g_use, mutable, union_where);
+    let tup = tuple_impls(8, g_params, g_args, g_use, side, union_where);
     // The union of every visited type's `where`-predicates, repeated on each generated item that is
     // quantified over the full param union (the trait, free fns, the `&mut V` / Driver / closure /
     // Chain impls) so a visited type like `enum Expr<S> where S: Bound { .. }` stays well-formed.
@@ -227,10 +257,23 @@ pub(crate) fn gen_side(
         "Visitor over {visited_list} (generated by `visitor!`). Override the `visit_*{mut_sfx}` methods \
          you care about — each default recurses into that node's children; start with \
          `node.{entry}(&mut visitor)`.{base_note}",
-        mut_sfx = mt(mutable),
-        base_note = if mutable { " The by-`&mut` variant of `Visit`." } else { "" },
+        mut_sfx = side.fn_suffix(),
+        base_note = if side.mutable { " The by-`&mut` variant of `Visit`." } else { "" },
     );
-    let inherent_doc = format!("Visit `self` with any `{visit_tr}`, returning `self` to chain.");
+    // In method-mode the visited set is heterogeneous, so the trait's methods carry their own
+    // generics and a closure cannot implement it (a closure is not `for<T>` generic). Say so here:
+    // passing one otherwise fails as a bare `expected &mut _, found closure` type mismatch, which
+    // names neither the closure machinery nor the reason it is absent.
+    let inherent_doc = if struct_only {
+        format!(
+            "Visit `self` with any `{visit_tr}`, returning `self` to chain. This visitor is \
+             heterogeneous — some visited type fills another's parameter concretely, or bounds it — \
+             so `{visit_tr}`'s methods are themselves generic and a **closure cannot be used** \
+             here; pass `&mut` a type implementing `{visit_tr}`."
+        )
+    } else {
+        format!("Visit `self` with any `{visit_tr}`, returning `self` to chain.")
+    };
 
     // Inherent `visit` / `visit_mut` per type (replaces the Visitable trait). Each type's own
     // params go on the impl; any extra union params go on the method (so a type that doesn't use
@@ -252,7 +295,7 @@ pub(crate) fn gen_side(
             let own_w = where_clause(&vt.own_where);
             let path = &vt.path;
             let own_use = &vt.own_use;
-            let method = method_ident_m(&vt.ident, mutable);
+            let method = side.method(&vt.ident);
             if struct_only {
                 // Direct `&mut impl Visit` (the closure/`IntoVisitor` machinery is off in method-mode).
                 quote! {
@@ -301,7 +344,7 @@ pub(crate) fn gen_side(
                     #[doc = #{&spec.doc}]
                     fn #{&spec.method}< #(for mp in &s.method_params) { #mp, } #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(
                         &mut self,
-                        v: &mut #{&spec.view_param},
+                        v: #amp #{&spec.view_param},
                     ) #{&s.trait_where} {
                         #{&spec.default_body}
                     }
@@ -310,22 +353,91 @@ pub(crate) fn gen_side(
         }
     };
 
-    let blanket_ref_impl = quote! {
-        #(if !struct_only) {
-            impl< #(#g_params,)* #p_v: #visit_tr #g_use > #visit_tr #g_use for &mut #p_v #uw {
-                #(for s in &sides) {
-                    fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
-                        <#p_v as #visit_tr #g_use>::#{&s.method}(self, i)
-                    }
-                    #(for spec in &s.views) {
-                        fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
-                            <#p_v as #visit_tr #g_use>::#{&spec.method}(self, v)
+    // A visitor can be reached through a wrapper, or several can ride along together; either way every
+    // method forwards to the same place. One shape, three headers: `&mut V` and `Box<V>` forward to
+    // their single delegate, a tuple to each element in turn, and the container-edit views ride along
+    // with the per-node methods.
+    let forwarding_impl = |header: TokenStream, delegates: Vec<(TokenStream, TokenStream)>| {
+        quote! {
+            #(if !struct_only) {
+                #header #uw {
+                    #(for s in &sides) {
+                        fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
+                            #(for (v, recv) in &delegates) {
+                                <#v as #visit_tr #g_use>::#{&s.method}(#recv, i);
+                            }
+                        }
+                        #(for spec in &s.views) {
+                            fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: #amp #{&spec.view_param}) {
+                                #(for (d, recv) in &delegates) {
+                                    <#d as #visit_tr #g_use>::#{&spec.method}(#recv, v);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     };
+
+    // The receiver a caller passes to `node.visit(&mut pass)`.
+    let blanket_ref_impl = forwarding_impl(
+        quote!( impl< #(#g_params,)* #p_v: #visit_tr #g_use > #visit_tr #g_use for &mut #p_v ),
+        vec![(quote!(#p_v), quote!(self))],
+    );
+
+    // A boxed visitor is a visitor, so `node.visit(Box::new(pass))` works. Written for `Box`
+    // specifically rather than blanketed over a wrapper trait: such a blanket would overlap the tuple
+    // impls below, since this crate is upstream of the generated module and could later implement that
+    // trait for a tuple.
+    let boxed_visitor_impl = forwarding_impl(
+        quote!( impl< #(#g_params,)* #p_v: #visit_tr #g_use + ?Sized > #visit_tr #g_use for ::std::boxed::Box<#p_v> ),
+        vec![(quote!(#p_v), quote!(&mut **self))],
+    );
+
+    // A tuple of visitors is a visitor: every element sees every node, in one traversal. Arity 2..=8,
+    // mirroring the closure-tuple `IntoVisitor` impls.
+    let tuple_visit_impls: Vec<TokenStream> = (2..=8usize)
+        .map(|n| {
+            let ps: Vec<Ident> = (0..n).map(|k| id(&format!("__SyanV{k}"))).collect();
+            let delegates = ps
+                .iter()
+                .enumerate()
+                .map(|(k, p)| {
+                    let k = syn::Index::from(k);
+                    (quote!(#p), quote!(&mut self.#k))
+                })
+                .collect();
+            forwarding_impl(
+                quote!( impl< #(#g_params,)* #(for p in &ps) { #p: #visit_tr #g_use, } > #visit_tr #g_use for ( #(#ps,)* ) ),
+                delegates,
+            )
+        })
+        .collect();
+
+    // Each visited node implements `Walk`/`WalkMut` by handing itself to the visitor. Unconditional
+    // (no `FieldTy: Walk` predicates): those belong on the free fns, and putting them here makes a
+    // mutually recursive AST overflow the trait solver instead of terminating.
+    let walk_tr = side.walk_trait();
+    let walk_fn = side.walk_fn();
+    let walk_recv = side.recv();
+    let tag = walk_tag();
+    let tag_args = walk_tag_use(g_params);
+    let walk_impls: Vec<TokenStream> = sides
+        .iter()
+        .map(|s| {
+            quote! {
+                impl< #(for gp in &s.free_params) { #gp, } #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >
+                    ::syan::visit::#walk_tr< #tag #tag_args, ::syan::visit::indicator::Here, #p_v >
+                    for #{&s.ty} #{&s.free_where}
+                {
+                    fn #walk_fn(#walk_recv, v: &mut #p_v) {
+                        <#p_v as #visit_tr #g_use>::#{&s.method}(v, self)
+                    }
+                }
+            }
+        })
+        .collect();
 
     let free_fns = quote! {
         #(for s in &sides) {
@@ -353,17 +465,23 @@ pub(crate) fn gen_side(
             fn #into_vis_fn(self) -> impl #visit_tr #g_use { self }
         }
 
-        // Closures: shallow Hook + single-pass Driver.
-        pub trait #hook_tr #g_def #uw {
+        // Closures: shallow Hook + single-pass Driver. These are the closure adapters' own
+        // machinery — a user names `IntoVisitor` (via `node.visit(..)`), never these. Kept private
+        // to the generated module so a `use path::to::visit::*;` cannot reach them: `#[doc(hidden)]`
+        // only hides an item from rustdoc, it still imports.
+        #[doc(hidden)]
+        trait #hook_tr #g_def #uw {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { let _ = i; }
             }
         }
-        pub trait #into_hook_tr< #(#g_params,)* #p_t > #uw {
+        #[doc(hidden)]
+        trait #into_hook_tr< #(#g_params,)* #p_t > #uw {
             fn #into_hook_fn(self) -> impl #hook_tr #g_use;
         }
 
-        pub struct #driver<#p_h>(pub #p_h);
+        #[doc(hidden)]
+        struct #driver<#p_h>(#p_h);
         impl< #(#g_params,)* #p_h: #hook_tr #g_use > #visit_tr #g_use for #driver<#p_h> #uw {
             #(for s in &sides) {
                 fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
@@ -381,7 +499,8 @@ pub(crate) fn gen_side(
         }
 
         #(for s in &sides) {
-            pub struct #{&s.hook_struct}<#p_f>(pub #p_f);
+            #[doc(hidden)]
+            struct #{&s.hook_struct}<#p_f>(#p_f);
             impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
                 #hook_tr #g_use for #{&s.hook_struct}<#p_f> #uw
             {
@@ -417,7 +536,10 @@ pub(crate) fn gen_side(
 
     quote! {
         #trait_def
+        #(for imp in &walk_impls) { #imp }
         #blanket_ref_impl
+        #boxed_visitor_impl
+        #(for imp in &tuple_visit_impls) { #imp }
         #free_fns
         #closure_machinery
         // Inherent entry points (no trait import needed at the call site).
