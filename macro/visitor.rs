@@ -1,6 +1,7 @@
 use crate::util::{
-    angle, gargs, gparams, indicator, innermost_acc, item_generics, item_ident, method_ident_m, mt,
-    param_name, param_use, path_may_denote, peel, to_snake, Container, Head, LayerKind,
+    angle, for_each_field_type, gargs, gparams, indicator, innermost_acc, item_generics,
+    item_ident, param_name, param_use, path_may_denote, peel, to_snake, Container, Head, LayerKind,
+    Side,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -15,12 +16,14 @@ mod build_input;
 mod discover;
 mod entry;
 mod lower;
+mod model;
 mod params;
 mod side;
 use build_input::*;
 use discover::*;
 use entry::*;
 use lower::*;
+use model::*;
 use params::*;
 use side::*;
 
@@ -101,23 +104,10 @@ fn has_concrete_fill(targets: &[&DoneType], shared: &HashSet<String>) -> bool {
         }
     }
 
-    let fields_of = |def: &Item| -> Vec<Type> {
-        let mut out = Vec::new();
-        match def {
-            Item::Enum(e) => {
-                for v in &e.variants {
-                    out.extend(v.fields.iter().map(|f| f.ty.clone()));
-                }
-            }
-            Item::Struct(s) => out.extend(s.fields.iter().map(|f| f.ty.clone())),
-            _ => {}
-        }
-        out
-    };
     targets.iter().any(|d| {
-        fields_of(&d.def)
-            .iter()
-            .any(|t| ty_fills(t, &params_of, shared))
+        let mut found = false;
+        for_each_field_type(&d.def, &mut |t| found |= ty_fills(t, &params_of, shared));
+        found
     })
 }
 
@@ -140,23 +130,7 @@ pub(crate) fn walk_tag_params(g_params: &[GenericParam]) -> Vec<GenericParam> {
 
 /// `<'a, S>` for the tag, matching [`walk_tag_params`].
 pub(crate) fn walk_tag_use(g_params: &[GenericParam]) -> TokenStream {
-    let args: Vec<TokenStream> = walk_tag_params(g_params)
-        .iter()
-        .map(|p| match p {
-            GenericParam::Lifetime(l) => {
-                let lt = &l.lifetime;
-                quote!(#lt)
-            }
-            GenericParam::Type(t) => {
-                let id = &t.ident;
-                quote!(#id)
-            }
-            GenericParam::Const(c) => {
-                let id = &c.ident;
-                quote!(#id)
-            }
-        })
-        .collect();
+    let args: Vec<TokenStream> = walk_tag_params(g_params).iter().map(param_use).collect();
     angle(&args)
 }
 
@@ -179,248 +153,162 @@ pub(crate) fn walk_tag_phantom(g_params: &[GenericParam]) -> TokenStream {
     quote!( ::core::marker::PhantomData<( #(#parts,)* )> )
 }
 
-fn generate_module(st: &BuildInput) -> TokenStream {
-    // Every generated name (`visit_*`, `*Hook`, inherent methods) derives from a visited type's
-    // last-segment ident, so two visited types sharing a last segment would collide. Catch it here
-    // with a clear message instead of a downstream cascade of duplicate-definition errors.
-    let mut seg_seen: HashMap<String, String> = HashMap::new();
-    for p in &st.visited {
-        let seg = last_ident(p).to_string();
-        let np = norm_path(p);
-        if let Some(prev) = seg_seen.insert(seg.clone(), np.clone()) {
-            if prev != np {
-                abort!(
-                    p,
-                    "two visited types share the last segment `{}` (`{}` vs `{}`); their generated \
-                     `visit_*`/`*Hook` names would collide — give them distinct final idents",
-                    seg,
-                    prev,
-                    np
-                );
-            }
-        }
-    }
-
-    // Map each visited type's last-segment ident -> the full path the user wrote, so the generated
-    // module names the visited types by that path (portable: no import needed for absolute paths).
-    let path_of: HashMap<String, &Path> = st
-        .visited
+/// A drilled intermediate — reached through `#[subast]` but not listed in `visitor!(..)`, so it has
+/// no visit method — gets a `Walk` impl of its own instead of being destructured inline at every use
+/// site. Unconditional, like a node's, so a `#[subast]` cycle through one terminates.
+fn intermediate_impls(
+    st: &BuildInput,
+    m: &Model,
+    lowers: &[Lower; 2],
+    union_where: &[WherePredicate],
+) -> Vec<TokenStream> {
+    st.done
         .iter()
-        .map(|p| (last_ident(p).to_string(), p))
-        .collect();
-    let visited: HashSet<String> = path_of.keys().cloned().collect();
-    // Inherited types, rewritten where the base recorded a path that does not mean the same thing here
-    // (see `needs_requalify`) — so a base and an extender at different nesting depths, or in different
-    // crates, still name the same type.
-    let inherited_paths: Vec<(String, Path)> = st
-        .inherited
-        .iter()
-        .map(|e| {
-            let p = match &st.base {
-                Some(b) if needs_requalify(&e.path, b) => requalify_ancestor(&e.path, b),
-                _ => e.path.clone(),
-            };
-            (e.key.to_string(), p)
-        })
-        .collect();
-    // Every head this visitor can name: its own targets plus what it inherits. Under this rule a field
-    // is followed because its type is *visited*, not because the owning node repeated that fact in
-    // `#[subast]`; `#[subast]` is left for the unlisted intermediates only it can name.
-    let reachable: HashMap<String, Path> = path_of
-        .iter()
-        .map(|(k, p)| (k.clone(), (*p).clone()))
-        .chain(inherited_paths.iter().cloned())
-        .collect();
-    let reachable_keys: HashSet<String> = reachable.keys().cloned().collect();
-    // Heads that recurse via a `visit_*` method (visited here + inherited from a base); every other
-    // followed head is an unlisted intermediate that gets drilled through inline.
-    let method_set = st.method_set();
-    let done_by_path: HashMap<String, &DoneType> =
-        st.done.iter().map(|d| (norm_path(&d.path), d)).collect();
-
-    // Types that get visitor methods (named in `visitor!(..)`); inherited/intermediate types don't.
-    let targets: Vec<&DoneType> = st
-        .done
-        .iter()
-        .filter(|d| item_ident(&d.def).is_some_and(|id| visited.contains(&id.to_string())))
-        .collect();
-    if targets.is_empty() {
-        let at = st
-            .visited
-            .first()
-            .map_or_else(Span::call_site, |p| last_ident(p).span());
-        abort!(at, "no AST definitions resolved for the visitor");
-    }
-
-    // The visitor trait is parameterized by the *union* of every visited type's generic params (+ the
-    // base's, when inheriting), so one visitor can span e.g. `Expr<S, Tokens>` and `BinOp<S>`; each
-    // type is referenced with its own subset, and `base_g_use` (below) names the base's args by the
-    // union's idents for every `base::Visit<..>` reference.
-    let mut union_params = param_union(&targets, &st.base_generics);
-    sort_lifetimes_first(&mut union_params);
-
-    // Params shared by EVERY visited type (∪ the base's, which must stay trait-level to name
-    // `base::Visit<base params>`). A non-shared param appears in only some types.
-    let mut shared_names: Option<HashSet<String>> = None;
-    for d in &targets {
-        let own: HashSet<String> = gparams(item_generics(&d.def).unwrap())
-            .iter()
-            .map(param_name)
-            .collect();
-        shared_names = Some(match shared_names {
-            None => own,
-            Some(acc) => acc.intersection(&own).cloned().collect(),
-        });
-    }
-    let mut shared_names = shared_names.unwrap_or_default();
-    for bp in &st.base_generics {
-        shared_names.insert(param_name(bp));
-    }
-
-    // A union param that some visited type does NOT declare. Such a param can stay a trait param (the
-    // union) only while it's *unbounded* — a type lacking it is then harmlessly quantified over it. But a
-    // `where`-bounded one (`S: Bound`) can't: applied to items over the union, a type lacking `S` carries
-    // an undischargeable `S: Bound`. So a bounded unshared param, like a concrete-filled one, must become
-    // a per-method generic with the trait keyed on the shared subset (method-mode, below).
-    let unshared_names: HashSet<String> = union_params
-        .iter()
-        .map(param_name)
-        .filter(|n| !shared_names.contains(n))
-        .collect();
-    let has_bounded_unshared = targets.iter().any(|d| {
-        item_where_preds(&d.def)
-            .iter()
-            .any(|p| where_pred_param(p).is_some_and(|id| unshared_names.contains(&id.to_string())))
-    });
-
-    // Heterogeneous mode: a non-shared param is either *concrete-filled* in a cross-edge (e.g.
-    // `Stmt<S, u8>`) — which the union-of-params trait can't express — or carries a `where`-bound (above).
-    // Make non-shared params per-method generics and go struct-only (no closures — a closure can't be
-    // `for<T>` generic). Gated to the no-inheritance case (a recurse/heterogeneous base is out of scope)
-    // so the common union+closure path is untouched.
-    let method_mode =
-        st.base.is_none() && (has_concrete_fill(&targets, &shared_names) || has_bounded_unshared);
-
-    // Trait params: the full union normally; only the shared subset in method-mode (non-shared params
-    // become method generics instead).
-    let mut g_params: Vec<GenericParam> = if method_mode {
-        union_params
-            .iter()
-            .filter(|p| shared_names.contains(&param_name(p)))
-            .cloned()
-            .collect()
-    } else {
-        union_params.clone()
-    };
-    sort_lifetimes_first(&mut g_params);
-    let struct_only = method_mode;
-    let by_name: HashMap<String, TokenStream> = union_params
-        .iter()
-        .map(|p| (param_name(p), param_use(p)))
-        .collect();
-    let by_name_param: HashMap<String, GenericParam> = g_params
-        .iter()
-        .map(|p| (param_name(p), p.clone()))
-        .collect();
-    let base_args: Vec<TokenStream> = st
-        .base_generics
-        .iter()
-        .map(|bp| by_name[&param_name(bp)].clone())
-        .collect();
-    let base_g_use = angle(&base_args);
-
-    // The full transitive ancestor chain (direct base first), so the new visitor's `Driver` can
-    // satisfy *every* supertrait obligation — `mid::Visit: base::Visit` means a `mid => new` visitor
-    // must impl both `mid::Visit` and `base::Visit` for its `Driver`. Each ancestor's params are a
-    // subset of the union (the base's `@bg` transitively carries its own ancestors' params), looked
-    // up by name; each impl is quantified over exactly those params (+ the hook) to avoid E0207.
-    let mut chain: Vec<AncIn> = Vec::new();
-    if let Some(b) = &st.base {
-        chain.push(AncIn {
-            path: b.clone(),
-            names: st
-                .base_generics
-                .iter()
-                .map(|p| Ident::new(&param_name(p), Span::call_site()))
-                .collect(),
-        });
-        // Requalify transitive ancestors that a `crate::`/`super::`/`self::`-relative *upstream*
-        // intermediate recorded, resolving them against the direct base's full path (no-op for
-        // same-crate / already-concrete chains). This also re-exports them concrete (the chain feeds
-        // `anc_export`), so a further extender inherits resolvable ancestor paths too.
-        let cross_crate = base_host_crate(b).is_some();
-        for a in &st.base_ancestors {
-            let path = if cross_crate {
-                requalify_ancestor(&a.path, b)
-            } else {
-                a.path.clone()
-            };
-            chain.push(AncIn {
+        .filter(|d| item_ident(&d.def).is_some_and(|id| !m.method_set.contains(&id.to_string())))
+        .flat_map(|d| {
+            let own_use = angle(&gargs(item_generics(&d.def).unwrap()));
+            let mut preds = union_where.to_vec();
+            preds.extend(item_where_preds(&d.def));
+            let where_cl = where_clause(&preds);
+            // The trait's params, plus any this type declares that they do not already cover.
+            let known: HashSet<String> = m.g_params.iter().map(param_name).collect();
+            let mut params = m.g_params.clone();
+            params.extend(
+                gparams(item_generics(&d.def).unwrap())
+                    .into_iter()
+                    .filter(|p| !known.contains(&param_name(p))),
+            );
+            sort_lifetimes_first(&mut params);
+            let (path, tag, targs) = (&d.path, walk_tag(), walk_tag_use(&m.g_params));
+            let g_use = &m.g_use;
+            let node = Node {
+                def: &d.def,
+                subast: &d.subast,
                 path,
-                names: a.names.clone(),
-            });
-        }
-    }
-    let ancestors: Vec<Ancestor> = chain
-        .iter()
-        .map(|a| {
-            let g_params: Vec<GenericParam> = a
-                .names
-                .iter()
-                .filter_map(|n| by_name_param.get(&n.to_string()).cloned())
-                .collect();
-            let args: Vec<TokenStream> = a
-                .names
-                .iter()
-                .filter_map(|n| by_name.get(&n.to_string()).cloned())
-                .collect();
-            let g_use = angle(&args);
-            let path = &a.path;
-            Ancestor {
-                path: quote!(#path),
-                g_params,
-                g_use,
-            }
+            };
+            Side::both().map(|side| {
+                let mut stack = Vec::new();
+                let body = lowers[side.index()].destructure(node, &quote!(self), 0, &mut stack);
+                let (tr, f, recv) = (side.walk_trait(), side.walk_fn(), side.recv());
+                quote! {
+                    impl< #(#params,)* __SyanW: #{side.visit_trait()} #g_use + ?Sized >
+                        ::syan::visit::#tr< #tag #targs, ::syan::visit::indicator::Here, __SyanW >
+                        for #path #own_use #where_cl
+                    {
+                        fn #f(#recv, this: &mut __SyanW) {
+                            let _ = &this;
+                            #body
+                        }
+                    }
+                }
+            })
         })
-        .collect();
+        .collect()
+}
 
-    let g_args: Vec<TokenStream> = g_params.iter().map(param_use).collect();
-    let g_def = angle(&g_params);
-    let g_use = angle(&g_args);
+/// A `Walk` impl for each *inherited* head a field reached. That type lives in a base module, which
+/// wrote its impl against the *base's* tag; this module needs one against its own, forwarding to the
+/// inherited method through the supertrait.
+fn inherited_impls(
+    m: &Model,
+    heads: &[(String, TokenStream, Ident)],
+    union_where: &[WherePredicate],
+) -> Vec<TokenStream> {
+    let (tag, targs, uw) = (
+        walk_tag(),
+        walk_tag_use(&m.g_params),
+        where_clause(union_where),
+    );
+    let (g_params, g_use) = (&m.g_params, &m.g_use);
+    heads
+        .iter()
+        .flat_map(|(_, ty, id)| {
+            Side::both().map(|side| {
+                let (tr, f, recv, vt) = (
+                    side.walk_trait(),
+                    side.walk_fn(),
+                    side.recv(),
+                    side.visit_trait(),
+                );
+                let m_name = side.method(id);
+                quote! {
+                    impl< #(#g_params,)* __SyanW: #vt #g_use + ?Sized >
+                        ::syan::visit::#tr< #tag #targs, ::syan::visit::indicator::Here, __SyanW > for #ty #uw
+                    {
+                        fn #f(#recv, v: &mut __SyanW) {
+                            // Plain method syntax: an inherited `visit_*` is reached through the
+                            // supertrait, so it is not a member of this module's own trait.
+                            v.#m_name(self)
+                        }
+                    }
+                }
+            })
+        })
+        .collect()
+}
 
-    // Container-edit usage, populated by the mut walk below; consumed by `gen_side(true, ..)` to decide
-    // which `visit_<t>_seq` / `visit_<t>_opt` to emit. Shared by both `Lower`s (only the mut one records).
+/// A `#[seq]`/`#[opt]` field can only view a type this visitor *targets* — its `visit_*_seq`/`_opt`
+/// is emitted only for the listed types. A marker pointing at an **inherited** base type would make
+/// the descent call a `visit_<t>_seq` that lives nowhere, a cryptic E0599 in generated code.
+fn check_edit_markers(
+    seq_used: &HashSet<String>,
+    opt_used: &HashSet<String>,
+    visited: &HashSet<String>,
+) {
+    if let Some(t) = seq_used
+        .iter()
+        .chain(opt_used.iter())
+        .find(|t| !visited.contains(*t))
+    {
+        abort!(
+            Span::call_site(),
+            "a `#[seq]`/`#[opt]` field views the inherited type `{}`; container-edit views are not \
+             generated for inherited types (the `visit_{}` method would have nowhere to live). Drop the \
+             marker — the field is still traversed, calling the inherited per-node visit for each element.",
+            t,
+            to_snake(&Ident::new(t, Span::call_site()))
+        );
+    }
+}
+
+fn generate_module(st: &BuildInput) -> TokenStream {
+    check_last_segment_collisions(&st.visited);
+    let m = Model::build(st);
+
+    // Container-edit usage, recorded by the mut walk below and consumed by `gen_side` to decide which
+    // `visit_<t>_seq` / `visit_<t>_opt` to emit. Shared by both `Lower`s (only the mut one records).
     let seq_used: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     let opt_used: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     // The heads this module emits `Walk` impls for. An inherited head is in `method_set` but not here.
-    let target_set: HashSet<String> = targets
+    let target_set: HashSet<String> = m
+        .targets
         .iter()
         .filter_map(|d| item_ident(&d.def).map(|i| i.to_string()))
         .chain(
             st.done
                 .iter()
                 .filter_map(|d| item_ident(&d.def).map(|i| i.to_string()))
-                .filter(|n| !method_set.contains(n)),
+                .filter(|n| !m.method_set.contains(n)),
         )
         .collect();
     let inherited_heads: RefCell<Vec<(String, TokenStream, Ident)>> = RefCell::new(Vec::new());
-    let walk_tag_args = walk_tag_use(&g_params);
-    let mk_lower = |mutable: bool| Lower {
-        method_set: &method_set,
-        done_by_path: &done_by_path,
-        mutable,
+    let walk_tag_args = walk_tag_use(&m.g_params);
+    let lowers = Side::both().map(|side| Lower {
+        method_set: &m.method_set,
+        done_by_path: &m.done_by_path,
+        side,
         seq_used: &seq_used,
         opt_used: &opt_used,
         walk_tag_args: &walk_tag_args,
         target_set: &target_set,
         inherited_heads: &inherited_heads,
-        reachable: &reachable,
-        reachable_keys: &reachable_keys,
-    };
-    let lower = mk_lower(false);
-    let lower_mut = mk_lower(true);
+        reachable: &m.reachable,
+        reachable_keys: &m.reachable_keys,
+    });
+    let [lower, lower_mut] = &lowers;
 
-    let vtypes: Vec<VType> = targets
+    let vtypes: Vec<VType> = m
+        .targets
         .iter()
         .map(|d| {
             let def = &d.def;
@@ -430,22 +318,30 @@ fn generate_module(st: &BuildInput) -> TokenStream {
             let own_where = item_where_preds(def);
             // In method-mode, this type's non-shared params become method generics; in union mode the
             // trait already carries every param, so none.
-            let method_params: Vec<GenericParam> = if method_mode {
+            let method_params: Vec<GenericParam> = if m.method_mode {
                 own_params
                     .iter()
-                    .filter(|p| !shared_names.contains(&param_name(p)))
+                    .filter(|p| !m.shared_names.contains(&param_name(p)))
                     .cloned()
                     .collect()
             } else {
                 Vec::new()
             };
-            let scrut_path: &Path = path_of.get(&ident.to_string()).copied().unwrap_or(&d.path);
+            let scrut_path: &Path = m
+                .path_of
+                .get(&ident.to_string())
+                .copied()
+                .unwrap_or(&d.path);
             let path_tokens = quote!(#scrut_path);
+            let node = Node {
+                def,
+                subast: &d.subast,
+                path: scrut_path,
+            };
             let mut stack = Vec::new();
-            let body = lower.destructure(def, &d.subast, scrut_path, &quote!(i), 0, &mut stack);
+            let body = lower.destructure(node, &quote!(i), 0, &mut stack);
             let mut stack = Vec::new();
-            let body_mut =
-                lower_mut.destructure(def, &d.subast, scrut_path, &quote!(i), 0, &mut stack);
+            let body_mut = lower_mut.destructure(node, &quote!(i), 0, &mut stack);
             VType {
                 ident,
                 path: path_tokens,
@@ -471,133 +367,26 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .iter()
         .flat_map(|vt| vt.own_where.iter().cloned())
         .filter(|p| {
-            !method_mode
-                || where_pred_param(p).is_none_or(|id| !unshared_names.contains(&id.to_string()))
+            !m.method_mode
+                || where_pred_param(p).is_none_or(|id| !m.unshared_names.contains(&id.to_string()))
         })
         .filter(|p| seen_pred.insert(quote!(#p).to_string()))
         .collect();
 
-    // A drilled intermediate — reached through `#[subast]` but not listed in `visitor!(..)`, so it has
-    // no visit method — gets a `Walk` impl of its own instead of being destructured inline at every use
-    // site. Unconditional, like a node's, so a `#[subast]` cycle through one terminates.
-    let intermediates: Vec<TokenStream> = st
-        .done
-        .iter()
-        .filter(|d| item_ident(&d.def).is_some_and(|id| !method_set.contains(&id.to_string())))
-        .flat_map(|d| {
-            let own_params = gparams(item_generics(&d.def).unwrap());
-            let own_use = angle(&gargs(item_generics(&d.def).unwrap()));
-            let own_where = item_where_preds(&d.def);
-            let mut preds = union_where.clone();
-            preds.extend(own_where);
-            let where_cl = where_clause(&preds);
-            let mut params = g_params.clone();
-            let known: HashSet<String> = g_params.iter().map(param_name).collect();
-            params.extend(own_params.iter().filter(|p| !known.contains(&param_name(p))).cloned());
-            sort_lifetimes_first(&mut params);
-            let path = &d.path;
-            let tag = walk_tag();
-            [false, true].map(|m| {
-                let lw = if m { &lower_mut } else { &lower };
-                let mut stack = Vec::new();
-                let body = lw.destructure(&d.def, &d.subast, path, &quote!(self), 0, &mut stack);
-                let (tr, f, recv) = if m {
-                    (quote!(WalkMut), quote!(walk_mut), quote!(&mut self))
-                } else {
-                    (quote!(Walk), quote!(walk), quote!(&self))
-                };
-                quote! {
-                    impl< #(#params,)* __SyanW: #{if m { quote!(VisitMut) } else { quote!(Visit) }} #g_use + ?Sized >
-                        ::syan::visit::#tr< #tag #{walk_tag_use(&g_params)}, ::syan::visit::indicator::Here, __SyanW >
-                        for #path #own_use #where_cl
-                    {
-                        fn #f(#recv, this: &mut __SyanW) {
-                            let _ = &this;
-                            #body
-                        }
-                    }
-                }
-            })
-        })
-        .collect();
-
-    let inherited_impls: Vec<TokenStream> = inherited_heads
-        .borrow()
-        .iter()
-        .flat_map(|(_, ty, id)| {
-            let tag = walk_tag();
-            let targs = walk_tag_use(&g_params);
-            let uw = where_clause(&union_where);
-            [false, true].map(|m| {
-                let (tr, f, recv, vt) = if m {
-                    (
-                        quote!(WalkMut),
-                        quote!(walk_mut),
-                        quote!(&mut self),
-                        quote!(VisitMut),
-                    )
-                } else {
-                    (quote!(Walk), quote!(walk), quote!(&self), quote!(Visit))
-                };
-                let m_name = method_ident_m(id, m);
-                quote! {
-                    impl< #(#g_params,)* __SyanW: #vt #g_use + ?Sized >
-                        ::syan::visit::#tr< #tag #targs, ::syan::visit::indicator::Here, __SyanW > for #ty #uw
-                    {
-                        fn #f(#recv, v: &mut __SyanW) {
-                            // Plain method syntax: an inherited `visit_*` is reached through the
-                            // supertrait, so it is not a member of this module's own trait.
-                            v.#m_name(self)
-                        }
-                    }
-                }
-            })
-        })
-        .collect();
+    let intermediates = intermediate_impls(st, &m, &lowers, &union_where);
+    let inherited = inherited_impls(&m, &inherited_heads.borrow(), &union_where);
 
     let seq_used = seq_used.into_inner();
     let opt_used = opt_used.into_inner();
+    check_edit_markers(&seq_used, &opt_used, &m.visited);
 
-    // A `#[seq]`/`#[opt]` field can only view a type this visitor *targets* (its own `visit_*_seq`/`_opt`
-    // is emitted only for `visited` types). A marker pointing at an **inherited** base type would make the
-    // descent call a `visit_<t>_seq` that lives nowhere — a cryptic E0599 in generated code. Fail clean.
-    if let Some(t) = seq_used
-        .iter()
-        .chain(opt_used.iter())
-        .find(|t| !visited.contains(*t))
-    {
-        abort!(
-            Span::call_site(),
-            "a `#[seq]`/`#[opt]` field views the inherited type `{}`; container-edit views are not \
-             generated for inherited types (the `visit_{}` method would have nowhere to live). Drop the \
-             marker — the field is still traversed, calling the inherited per-node visit for each element.",
-            t,
-            to_snake(&Ident::new(t, Span::call_site()))
-        );
-    }
-
-    let [shared, mutable] = [false, true].map(|m| {
-        gen_side(
-            m,
-            &vtypes,
-            &g_params,
-            &g_args,
-            &g_def,
-            &g_use,
-            &base_g_use,
-            &ancestors,
-            &st.base,
-            &union_where,
-            struct_only,
-            &seq_used,
-            &opt_used,
-        )
-    });
+    let [shared, mutable] =
+        Side::both().map(|side| gen_side(side, &m, &vtypes, &union_where, &seq_used, &opt_used));
 
     // Every visitor module exports its full visited-type set (idents), its generic-param union
     // (`@bg`), and its full ancestor chain (`@an`) so another visitor can inherit it (transitively).
-    let anc_export = emit_ancestors(&chain);
-    let visited_macro = emit_visited_macro(st, &g_params, anc_export);
+    let anc_export = emit_ancestors(&m.chain);
+    let visited_macro = emit_visited_macro(st, &m.g_params, anc_export);
 
     // Items are emitted directly into the enclosing module (where `visitor!(...)` was invoked).
     quote! {
@@ -605,7 +394,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
 
         // Bring every ancestor's traits in scope so the generated `Driver` impls / method calls
         // resolve (transitive supertraits included).
-        #(for a in &ancestors) {
+        #(for a in &m.ancestors) {
             #[allow(unused_imports)]
             use #{&a.path}::{Visit as _, VisitMut as _};
         }
@@ -613,10 +402,10 @@ fn generate_module(st: &BuildInput) -> TokenStream {
 
 
         #[doc = "Tag identifying this visitor module in `syan::visit::Walk` impls."]
-        pub struct #{walk_tag()} #{angle(&walk_tag_params(&g_params))} ( #{walk_tag_phantom(&g_params)} );
+        pub struct #{walk_tag()} #{angle(&walk_tag_params(&m.g_params))} ( #{walk_tag_phantom(&m.g_params)} );
 
         #(for imp in &intermediates) { #imp }
-        #(for imp in &inherited_impls) { #imp }
+        #(for imp in &inherited) { #imp }
 
         #shared
         #mutable

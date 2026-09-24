@@ -1,7 +1,7 @@
-use crate::util::{angle, gargs, gparams, to_snake};
+use crate::util::{angle, data_field_iter, for_each_type_path, gargs, gparams, to_snake};
 use proc_macro2::{Literal, Span, TokenStream};
 use proc_macro_error::{emit_error, emit_warning};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::*;
@@ -244,52 +244,22 @@ fn build_referrer(input: &DeriveInput) -> Option<type_leak::Referrer> {
     Some(leaker.finish())
 }
 
-/// Collect every ident that appears as a path-segment head anywhere inside a field type (so
-/// `Vec<Box<Stmt<S>>>` contributes `Vec`, `Box`, `Stmt`, `S`). Used only to warn about `#[subast]`
-/// entries that match no field — an over-approximation, so it never false-warns.
-fn collect_type_idents(ty: &Type, out: &mut std::collections::HashSet<String>) {
-    match ty {
-        Type::Path(tp) => {
-            for seg in &tp.path.segments {
-                out.insert(seg.ident.to_string());
-                if let PathArguments::AngleBracketed(ab) = &seg.arguments {
-                    for arg in &ab.args {
-                        if let GenericArgument::Type(t) = arg {
-                            collect_type_idents(t, out);
-                        }
-                    }
-                }
-            }
-        }
-        Type::Reference(r) => collect_type_idents(&r.elem, out),
-        Type::Slice(s) => collect_type_idents(&s.elem, out),
-        Type::Array(a) => collect_type_idents(&a.elem, out),
-        Type::Paren(p) => collect_type_idents(&p.elem, out),
-        Type::Group(g) => collect_type_idents(&g.elem, out),
-        Type::Tuple(t) => {
-            for e in &t.elems {
-                collect_type_idents(e, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn field_head_idents(input: &DeriveInput) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    for_each_field(&input.data, |ty| collect_type_idents(ty, &mut out));
+/// Every ident that appears as a path segment anywhere inside a field type (so `Vec<Box<Stmt<S>>>`
+/// contributes `Vec`, `Box`, `Stmt`, `S`). Used only to warn about `#[subast]` entries that match no
+/// field — an over-approximation, so it never false-warns.
+fn field_head_idents(input: &DeriveInput) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for_each_field_type_of(&input.data, &mut |ty| {
+        for_each_type_path(ty, &mut |tp| {
+            out.extend(tp.path.segments.iter().map(|s| s.ident.to_string()));
+        })
+    });
     out
 }
 
-fn for_each_field(data: &Data, mut f: impl FnMut(&Type)) {
-    match data {
-        Data::Struct(s) => s.fields.iter().for_each(|fld| f(&fld.ty)),
-        Data::Enum(e) => e
-            .variants
-            .iter()
-            .for_each(|v| v.fields.iter().for_each(|fld| f(&fld.ty))),
-        Data::Union(u) => u.fields.named.iter().for_each(|fld| f(&fld.ty)),
-    }
+/// Call `f` for every field type of a derive input's body.
+fn for_each_field_type_of(data: &Data, f: &mut dyn FnMut(&Type)) {
+    data_field_iter(data).for_each(|fld| f(&fld.ty));
 }
 
 /// `#[derive(Ast)]` expansion.
@@ -392,38 +362,6 @@ fn bare_path(p: &Path) -> String {
     format!("{lead}{}", segs.join("::"))
 }
 
-/// Collect every path a field type mentions, keyed by its last segment, remembering one occurrence of
-/// each distinct spelling so a diagnostic can point at it.
-fn collect_type_paths(ty: &Type, out: &mut std::collections::HashMap<String, Vec<(String, Path)>>) {
-    match ty {
-        Type::Path(tp) => {
-            if let Some(last) = tp.path.segments.last() {
-                let bare = bare_path(&tp.path);
-                let slot = out.entry(last.ident.to_string()).or_default();
-                if !slot.iter().any(|(s, _)| s == &bare) {
-                    slot.push((bare, tp.path.clone()));
-                }
-            }
-            for seg in &tp.path.segments {
-                if let PathArguments::AngleBracketed(ab) = &seg.arguments {
-                    for arg in &ab.args {
-                        if let GenericArgument::Type(t) = arg {
-                            collect_type_paths(t, out);
-                        }
-                    }
-                }
-            }
-        }
-        Type::Reference(r) => collect_type_paths(&r.elem, out),
-        Type::Slice(s) => collect_type_paths(&s.elem, out),
-        Type::Array(a) => collect_type_paths(&a.elem, out),
-        Type::Paren(p) => collect_type_paths(&p.elem, out),
-        Type::Group(g) => collect_type_paths(&g.elem, out),
-        Type::Tuple(t) => t.elems.iter().for_each(|e| collect_type_paths(e, out)),
-        _ => {}
-    }
-}
-
 /// Reject a definition whose fields spell two *different* paths ending in the same identifier.
 ///
 /// A visitor recognises a field's head by its **last path segment**, so within one definition those
@@ -431,9 +369,20 @@ fn collect_type_paths(ty: &Type, out: &mut std::collections::HashMap<String, Vec
 /// here points at the definition that carries the ambiguity, rather than leaving it to surface as a
 /// mis-resolved field — or, worse, as a field that silently stops being followed.
 fn check_ambiguous_last_idents(input: &DeriveInput) {
-    let mut by_last: std::collections::HashMap<String, Vec<(String, Path)>> =
-        std::collections::HashMap::new();
-    for_each_field(&input.data, |ty| collect_type_paths(ty, &mut by_last));
+    // Every path a field mentions, keyed by its last segment, keeping one occurrence of each distinct
+    // spelling so a diagnostic can point at it.
+    let mut by_last: HashMap<String, Vec<(String, Path)>> = HashMap::new();
+    for_each_field_type_of(&input.data, &mut |ty| {
+        for_each_type_path(ty, &mut |tp| {
+            let bare = bare_path(&tp.path);
+            let slot = by_last
+                .entry(tp.path.segments.last().unwrap().ident.to_string())
+                .or_default();
+            if !slot.iter().any(|(s, _)| s == &bare) {
+                slot.push((bare, tp.path.clone()));
+            }
+        })
+    });
     for (last, spellings) in &by_last {
         if spellings.len() < 2 {
             continue;

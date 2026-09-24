@@ -53,24 +53,6 @@ fn discover_followed(
     }
 }
 
-pub(crate) fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
-    match def {
-        Item::Enum(e) => {
-            for v in &e.variants {
-                for field in &v.fields {
-                    f(&field.ty);
-                }
-            }
-        }
-        Item::Struct(s) => {
-            for field in &s.fields {
-                f(&field.ty);
-            }
-        }
-        _ => {}
-    }
-}
-
 // Module generation.
 
 /// Mint a generated helper param ident whose name avoids every name in `reserved` (the visited

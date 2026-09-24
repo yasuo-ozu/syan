@@ -121,12 +121,85 @@ pub(crate) fn item_generics(item: &Item) -> Option<&Generics> {
     }
 }
 
+/// Every field of an enum/struct item, in declaration order (each variant's fields in turn, for an
+/// enum); empty for any other item kind.
+pub(crate) fn item_field_iter(def: &Item) -> Box<dyn Iterator<Item = &Field> + '_> {
+    match def {
+        Item::Enum(e) => Box::new(e.variants.iter().flat_map(|v| v.fields.iter())),
+        Item::Struct(s) => Box::new(s.fields.iter()),
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+/// Every field of a derive input's body, as [`item_field_iter`].
+pub(crate) fn data_field_iter(data: &Data) -> Box<dyn Iterator<Item = &Field> + '_> {
+    match data {
+        Data::Enum(e) => Box::new(e.variants.iter().flat_map(|v| v.fields.iter())),
+        Data::Struct(s) => Box::new(s.fields.iter()),
+        Data::Union(u) => Box::new(u.fields.named.iter()),
+    }
+}
+
+/// Call `f` for every field type of an enum/struct item.
+pub(crate) fn for_each_field_type(def: &Item, f: &mut dyn FnMut(&Type)) {
+    item_field_iter(def).for_each(|field| f(&field.ty));
+}
+
+/// Call `f` for every `Type::Path` reachable inside `ty`, outermost first: the type itself, then the
+/// arguments of each of its segments, descending through references, slices, arrays, parens, groups
+/// and tuples. So `Vec<Box<Stmt<S>>>` yields `Vec<..>`, `Box<..>`, `Stmt<S>` and `S`.
+///
+/// This is the "everything mentioned" traversal, unlike [`peel`], which stops at the first followed
+/// head. Callers that need to know what a field *names* — rather than what a walk descends into —
+/// use this.
+pub(crate) fn for_each_type_path(ty: &Type, f: &mut impl FnMut(&TypePath)) {
+    match ty {
+        Type::Path(tp) => {
+            f(tp);
+            for seg in &tp.path.segments {
+                if let PathArguments::AngleBracketed(ab) = &seg.arguments {
+                    for arg in &ab.args {
+                        if let GenericArgument::Type(t) = arg {
+                            for_each_type_path(t, f);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Reference(r) => for_each_type_path(&r.elem, f),
+        Type::Slice(s) => for_each_type_path(&s.elem, f),
+        Type::Array(a) => for_each_type_path(&a.elem, f),
+        Type::Paren(p) => for_each_type_path(&p.elem, f),
+        Type::Group(g) => for_each_type_path(&g.elem, f),
+        Type::Tuple(t) => t.elems.iter().for_each(|e| for_each_type_path(e, f)),
+        _ => {}
+    }
+}
+
 /// A `#[seq]` / `#[opt]` field marker: the owning collection is edited through a `SeqView` (`Seq`) or an
 /// `OptView` (`Opt`). Used only for the edit-view path; ordinary descent does not distinguish the two.
 #[derive(Clone, Copy)]
 pub(crate) enum Container {
     Seq,
     Opt,
+}
+
+impl Container {
+    /// The bare marker word, as the user writes it: `#[seq]` / `#[opt]`.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Container::Seq => "seq",
+            Container::Opt => "opt",
+        }
+    }
+
+    /// The view trait a field of this shape is dispatched through.
+    pub(crate) fn view_trait(self) -> TokenStream {
+        match self {
+            Container::Seq => quote!(::syan::visit::SeqView),
+            Container::Opt => quote!(::syan::visit::OptView),
+        }
+    }
 }
 
 /// How one wrapper level of a field descends. Both become a `Thru<_>` in the field's
@@ -268,22 +341,94 @@ pub(crate) fn indicator(ty: &Type, user_types: &HashSet<String>) -> Option<Token
     )
 }
 
-/// `"_mut"` for the mutable visitor side, `""` for the shared side — the `visit_*` / `visit_*_mut`
-/// method-name suffix.
-pub(crate) fn mt(mutable: bool) -> &'static str {
-    if mutable {
-        "_mut"
-    } else {
-        ""
-    }
+/// Which of the two visitors an item belongs to: the shared one (`Visit`, `&T`) or the `&mut` one
+/// (`VisitMut`, `&mut T`). Every generated item exists on both sides in the same shape, differing
+/// only in the names and the borrow — so a generator writes the shape once and takes each piece
+/// from here, rather than carrying a `mutable: bool` and re-deriving them at each use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Side {
+    pub(crate) mutable: bool,
 }
 
-/// The `visit_<snake(head)>` / `visit_<snake(head)>_mut` method ident for a visited head.
-pub(crate) fn method_ident_m(head: &Ident, mutable: bool) -> Ident {
-    Ident::new(
-        &format!("visit_{}{}", to_snake(head), mt(mutable)),
-        Span::call_site(),
-    )
+impl Side {
+    pub(crate) const SHARED: Side = Side { mutable: false };
+    pub(crate) const MUT: Side = Side { mutable: true };
+
+    /// Both sides, shared first — the order every generator emits them in.
+    pub(crate) fn both() -> [Side; 2] {
+        [Side::SHARED, Side::MUT]
+    }
+
+    /// Index into a two-element array laid out as [`Side::both`].
+    pub(crate) fn index(self) -> usize {
+        self.mutable as usize
+    }
+
+    /// Type-name suffix: `Visit` / `VisitMut`, `Hook` / `HookMut`.
+    pub(crate) fn type_suffix(self) -> &'static str {
+        if self.mutable {
+            "Mut"
+        } else {
+            ""
+        }
+    }
+
+    /// Method-name suffix: `visit_expr` / `visit_expr_mut`.
+    pub(crate) fn fn_suffix(self) -> &'static str {
+        if self.mutable {
+            "_mut"
+        } else {
+            ""
+        }
+    }
+
+    /// How this side borrows a visited node: `&` / `&mut`.
+    pub(crate) fn amp(self) -> TokenStream {
+        if self.mutable {
+            quote!(&mut)
+        } else {
+            quote!(&)
+        }
+    }
+
+    /// The receiver of a method that walks `self`: `&self` / `&mut self`.
+    pub(crate) fn recv(self) -> TokenStream {
+        if self.mutable {
+            quote!(&mut self)
+        } else {
+            quote!(&self)
+        }
+    }
+
+    /// A generated type name on this side: `name` + [`type_suffix`](Self::type_suffix).
+    pub(crate) fn ty(self, name: &str) -> Ident {
+        Ident::new(&format!("{name}{}", self.type_suffix()), Span::call_site())
+    }
+
+    /// A generated fn name on this side: `name` + [`fn_suffix`](Self::fn_suffix).
+    pub(crate) fn func(self, name: &str) -> Ident {
+        Ident::new(&format!("{name}{}", self.fn_suffix()), Span::call_site())
+    }
+
+    /// `syan::visit::Walk` / `WalkMut` — the descent trait.
+    pub(crate) fn walk_trait(self) -> Ident {
+        self.ty("Walk")
+    }
+
+    /// `Walk::walk` / `WalkMut::walk_mut`.
+    pub(crate) fn walk_fn(self) -> Ident {
+        self.func("walk")
+    }
+
+    /// The generated `Visit` / `VisitMut` trait.
+    pub(crate) fn visit_trait(self) -> Ident {
+        self.ty("Visit")
+    }
+
+    /// The `visit_<snake(head)>` / `visit_<snake(head)>_mut` method ident for a visited head.
+    pub(crate) fn method(self, head: &Ident) -> Ident {
+        self.func(&format!("visit_{}", to_snake(head)))
+    }
 }
 
 /// Whether the path a field *wrote* can denote the type at `visited` — i.e. it is a bare ident, or
