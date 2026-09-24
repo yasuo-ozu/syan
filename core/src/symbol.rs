@@ -372,8 +372,45 @@ pub use crate::_Symbol as Symbol;
 /// names it in a field — rustc rejects `#[derive(Debug)]` on an item containing a type macro.
 /// `#[derive(Parse)]` and other proc-macro derives are unaffected.
 ///
+/// Two ways round it. Route the built-in derives through an attribute macro, which expands the type
+/// macro first — [`type-macro-derive-tricks`](https://docs.rs/type-macro-derive-tricks) spells this
+/// `#[macro_derive(..)]`:
+///
+/// ```
+/// # use syan::parse::Parse;
+/// # use syan::symbol::Token;
+/// # use type_macro_derive_tricks::macro_derive;
+/// # type Span = syan::source::string::Span;
+/// #[macro_derive(Parse, Debug, Clone, PartialEq)]
+/// struct Assign<S> {
+///     eq: Token![S => =],
+///     n: syan::literal::Integer,
+/// }
+///
+/// let a: Assign<Span> = Parse::parse("= 1").unwrap();
+/// assert_eq!(a, a.clone());
+/// ```
+///
+/// Or write the type out — `WithSpan<chars::Eq, S>` is a plain type and derives normally, at the
+/// cost of the readable form:
+///
+/// ```
+/// # use syan::parse::Parse;
+/// # use syan::span::WithSpan;
+/// # use syan::symbol::chars;
+/// # type Span = syan::source::string::Span;
+/// #[derive(Parse, Debug, Clone, PartialEq)]
+/// struct Assign<S> {
+///     eq: WithSpan<chars::Eq, S>,
+///     n: syan::literal::Integer,
+/// }
+/// ```
+///
 /// With the `serde` feature, serde's derive works but cannot infer bounds through the macro, so the
-/// span parameter needs one spelled out:
+/// bound must be spelled out. An explicit `#[serde(bound(..))]` *replaces* serde's inference rather
+/// than adding to it, so name **every** type parameter the node has — a second parameter left out
+/// fails with `the trait bound `P: Serialize` is not satisfied`, whose note about a missing feature
+/// flag sends you looking in the wrong crate:
 ///
 /// ```
 /// # #[cfg(feature = "serde")] {
