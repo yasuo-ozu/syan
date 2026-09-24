@@ -12,6 +12,7 @@ use crate::span::{SpanOf, Spanned};
 ///
 /// It works over any atom family: `char`, `u8` and `TokenTree` alike. [`Unparse`] writes nothing.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Eof;
 
 impl<Atom: Spanned> Parse<Atom> for Eof {
