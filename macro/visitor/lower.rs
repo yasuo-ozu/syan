@@ -101,7 +101,7 @@ fn abort_marker_not_visited(ty: &Type, kind: &Container, single: bool) -> ! {
     abort!(
         ty,
         "a `#[{}]` field's element type is not a visited type — mark only a field whose element is \
-         a {}container of a type listed in `visitor!(..)` (or reached via `#[subast]`)",
+         a {}container of a type both listed in `visitor!(..)` and reached via `#[subast]`",
         marker,
         extra
     );
@@ -121,6 +121,17 @@ pub(crate) struct Lower<'a> {
     /// methods `gen_side` emits.
     pub(crate) seq_used: &'a RefCell<HashSet<String>>,
     pub(crate) opt_used: &'a RefCell<HashSet<String>>,
+    /// This module's `Walk` tag with its args (`__SyanWalkTag<S>`), for spelling the bound at a call
+    /// site — the tag carries the union params so a node's impl can name params its own type omits.
+    pub(crate) walk_tag_args: &'a TokenStream,
+    /// Heads this module generates `Walk` impls for (its `visitor!(..)` targets). An *inherited* head
+    /// is in `method_set` but not here: its type lives in the base module and this module has no path
+    /// to it, so such a field keeps the older container-loop lowering.
+    pub(crate) target_set: &'a HashSet<String>,
+    /// Head types reached that are *inherited* — visited by a base module, so this module has no
+    /// `Walk` impl for them. Recorded as `(dedup key, type tokens)` and emitted alongside the node
+    /// impls, using the `#[subast]` path plus the arguments the field wrote.
+    pub(crate) inherited_heads: &'a RefCell<Vec<(String, TokenStream, Ident)>>,
 }
 
 impl<'a> Lower<'a> {
@@ -390,7 +401,38 @@ impl<'a> Lower<'a> {
                 None => quote!(),
             },
         };
-        (!body.is_empty()).then(|| fold_containers(&p.conts, binding, body, self.mutable))
+        // Two fields keep the older container-loop lowering, because no `Walk` impl covers them here:
+        // one behind a shared reference (`&T` is not a `Walk`), and one whose head is *inherited* —
+        // that type lives in the base module and this module has no path with which to impl for it.
+        // An inherited head's type lives in a base module, which wrote its `Walk` impl against *its*
+        // tag. Record the head so this module emits one against its own tag too; the path comes from
+        // `#[subast]` and the arguments from the field.
+        if let (Head::Path { args, .. }, Some((h, hpath))) = (&p.head, &resolved) {
+            if !self.target_set.contains(&h.to_string()) {
+                let ty = quote!( #hpath #args );
+                let key = ty.to_string();
+                let mut v = self.inherited_heads.borrow_mut();
+                if !v.iter().any(|(k, _, _)| k == &key) {
+                    v.push((key, ty, h.clone()));
+                }
+            }
+        }
+        // Otherwise `body` served only to decide whether the field is followed at all (a leaf head, or
+        // a finite drill reaching no visited type, yields nothing). The descent itself is one `Walk`
+        // call: the container impls in `syan::visit` peel the layers, and the generated per-node impl
+        // bottoms out in that node's `visit_*` method.
+        (!body.is_empty()).then(|| {
+            let (tr, f) = if self.mutable {
+                (quote!(WalkMut), quote!(walk_mut))
+            } else {
+                (quote!(Walk), quote!(walk))
+            };
+            let tag = walk_tag();
+            let targs = self.walk_tag_args;
+            let h = indicator(ty, &user_types)
+                .unwrap_or_else(|| quote!(::syan::visit::indicator::Skip));
+            quote!( ::syan::visit::#tr::<#tag #targs, #h, _>::#f(#binding, this); )
+        })
     }
 
     /// Lower a tuple at the (container-peeled, box-dereffed) accessor `acc`: destructure it and lower

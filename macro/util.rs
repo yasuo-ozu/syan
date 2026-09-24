@@ -142,7 +142,12 @@ pub(crate) enum LayerKind {
 /// What sits at the innermost peeled position: a path head (a visited type) or a tuple (destructured, each
 /// element lowered recursively).
 pub(crate) enum Head {
-    Path { head: Ident },
+    Path {
+        head: Ident,
+        /// The head segment's generic arguments as written in the field (`<S>` in `Expr<S>`), so a
+        /// caller can rebuild the head type against its `#[subast]` path.
+        args: syn::PathArguments,
+    },
     Tuple(Vec<Type>),
 }
 
@@ -188,6 +193,7 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
                     conts: Vec::new(),
                     head: Head::Path {
                         head: seg.ident.clone(),
+                        args: seg.arguments.clone(),
                     },
                     shared_ref: false,
                 });
@@ -217,33 +223,44 @@ pub(crate) fn innermost_acc(conts: &[LayerKind], binding: &TokenStream) -> Token
     }
 }
 
-/// Wrap an already-lowered `body` (dispatching at `innermost_acc(conts, binding)`) in the wrapper levels
-/// `conts` (outer→inner): a `View` level is a `for` over `view_iter[_mut]()` (resolved to `SeqView`/
-/// `OptView`/`MapView` by the compiler), a `Raw` level a `for` over the slice `iter[_mut]()`. Level `i`
-/// binds `__nc{i+1}`, iterating `__nc{i}` (or `binding` at `i == 0`) — so nested wrappers nest the loops.
-pub(crate) fn fold_containers(
-    conts: &[LayerKind],
-    binding: &TokenStream,
-    mut body: TokenStream,
-    mutable: bool,
-) -> TokenStream {
-    for (i, layer) in conts.iter().enumerate().rev() {
-        let bind = if i == 0 {
-            binding.clone()
-        } else {
-            let e = Ident::new(&format!("__nc{i}"), Span::call_site());
-            quote!(#e)
-        };
-        let elem = Ident::new(&format!("__nc{}", i + 1), Span::call_site());
-        let iter = match (*layer, mutable) {
-            (LayerKind::View, true) => quote!(view_iter_mut),
-            (LayerKind::View, false) => quote!(view_iter),
-            (LayerKind::Raw, true) => quote!(iter_mut),
-            (LayerKind::Raw, false) => quote!(iter),
-        };
-        body = quote!( for #elem in #bind.#iter() { #body } );
+/// The [`Walk`] indicator for `ty`: which parts of it a descent should enter. `None` when nothing in
+/// it is followed — the caller then emits `Skip`, or treats the whole field as a leaf.
+///
+/// Mirrors `peel` exactly: one `Thru<_>` per wrapper level, `Here` at a followed head, and a tuple of
+/// the elements' own indicators at a tuple. Because the indicator carries the shape, the container
+/// impls in `syan::visit` stay generic in what they hold — no leaf type is ever named.
+pub(crate) fn indicator(ty: &Type, user_types: &HashSet<String>) -> Option<TokenStream> {
+    // `peel` treats a reference as transparent and records no level for it, but `syan::visit` gives
+    // `&T` a `Thru` impl like any other wrapper — so account for it here.
+    match ty {
+        Type::Reference(r) => {
+            return indicator(&r.elem, user_types)
+                .map(|h| quote!(::syan::visit::indicator::Thru<#h>))
+        }
+        Type::Paren(p) => return indicator(&p.elem, user_types),
+        Type::Group(g) => return indicator(&g.elem, user_types),
+        _ => {}
     }
-    body
+    let p = peel(ty, user_types)?;
+    let inner = match &p.head {
+        Head::Path { .. } => quote!(::syan::visit::indicator::Here),
+        Head::Tuple(elems) => {
+            let parts: Vec<TokenStream> = elems
+                .iter()
+                .map(|e| {
+                    indicator(e, user_types)
+                        .unwrap_or_else(|| quote!(::syan::visit::indicator::Skip))
+                })
+                .collect();
+            quote!( ( #(#parts,)* ) )
+        }
+    };
+    Some(
+        p.conts
+            .iter()
+            .rev()
+            .fold(inner, |acc, _| quote!(::syan::visit::indicator::Thru<#acc>)),
+    )
 }
 
 /// `"_mut"` for the mutable visitor side, `""` for the shared side — the `visit_*` / `visit_*_mut`

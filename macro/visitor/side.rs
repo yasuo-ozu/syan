@@ -310,6 +310,7 @@ pub(crate) fn gen_side(
         }
     };
 
+    // `impl Visit for &mut V`: the receiver a caller passes to `node.visit(&mut pass)`.
     let blanket_ref_impl = quote! {
         #(if !struct_only) {
             impl< #(#g_params,)* #p_v: #visit_tr #g_use > #visit_tr #g_use for &mut #p_v #uw {
@@ -326,6 +327,92 @@ pub(crate) fn gen_side(
             }
         }
     };
+
+    // A boxed visitor is a visitor, so `node.visit(Box::new(pass))` works. Written for `Box`
+    // specifically rather than blanketed over a wrapper trait: such a blanket would overlap the tuple
+    // impls below, since this crate is upstream of the generated module and could later implement that
+    // trait for a tuple.
+    let boxed_visitor_impl = quote! {
+        #(if !struct_only) {
+            impl< #(#g_params,)* #p_v: #visit_tr #g_use + ?Sized > #visit_tr #g_use for ::std::boxed::Box<#p_v> #uw {
+                #(for s in &sides) {
+                    fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
+                        <#p_v as #visit_tr #g_use>::#{&s.method}(&mut **self, i)
+                    }
+                    #(for spec in &s.views) {
+                        fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
+                            <#p_v as #visit_tr #g_use>::#{&spec.method}(&mut **self, v)
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    // A tuple of visitors is a visitor: every element sees every node, in one traversal. Arity 2..=8,
+    // mirroring the closure-tuple `IntoVisitor` impls.
+    let tuple_visit_impls: Vec<TokenStream> = (2..=8usize)
+        .map(|n| {
+            let ps: Vec<Ident> = (0..n).map(|k| id(&format!("__SyanV{k}"))).collect();
+            let ix: Vec<syn::Index> = (0..n).map(syn::Index::from).collect();
+            quote! {
+                #(if !struct_only) {
+                    impl< #(#g_params,)* #(for p in &ps) { #p: #visit_tr #g_use, } > #visit_tr #g_use for ( #(#ps,)* ) #uw {
+                        #(for s in &sides) {
+                            fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
+                                #(for (p, k) in ps.iter().zip(&ix)) {
+                                    <#p as #visit_tr #g_use>::#{&s.method}(&mut self.#k, i);
+                                }
+                            }
+                            #(for spec in &s.views) {
+                                fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
+                                    #(for (p, k) in ps.iter().zip(&ix)) {
+                                        <#p as #visit_tr #g_use>::#{&spec.method}(&mut self.#k, v);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Each visited node implements `Walk`/`WalkMut` by handing itself to the visitor. Unconditional
+    // (no `FieldTy: Walk` predicates): those belong on the free fns, and putting them here makes a
+    // mutually recursive AST overflow the trait solver instead of terminating.
+    let walk_tr = if mutable {
+        quote!(WalkMut)
+    } else {
+        quote!(Walk)
+    };
+    let walk_fn = if mutable {
+        quote!(walk_mut)
+    } else {
+        quote!(walk)
+    };
+    let walk_recv = if mutable {
+        quote!(&mut self)
+    } else {
+        quote!(&self)
+    };
+    let tag = walk_tag();
+    let tag_args = walk_tag_use(g_params);
+    let walk_impls: Vec<TokenStream> = sides
+        .iter()
+        .map(|s| {
+            quote! {
+                impl< #(for gp in &s.free_params) { #gp, } #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >
+                    ::syan::visit::#walk_tr< #tag #tag_args, ::syan::visit::indicator::Here, #p_v >
+                    for #{&s.ty} #{&s.free_where}
+                {
+                    fn #walk_fn(#walk_recv, v: &mut #p_v) {
+                        <#p_v as #visit_tr #g_use>::#{&s.method}(v, self)
+                    }
+                }
+            }
+        })
+        .collect();
 
     let free_fns = quote! {
         #(for s in &sides) {
@@ -417,7 +504,10 @@ pub(crate) fn gen_side(
 
     quote! {
         #trait_def
+        #(for imp in &walk_impls) { #imp }
         #blanket_ref_impl
+        #boxed_visitor_impl
+        #(for imp in &tuple_visit_impls) { #imp }
         #free_fns
         #closure_machinery
         // Inherent entry points (no trait import needed at the call site).

@@ -1,6 +1,7 @@
 //! `SeqView`/`OptView` are **bare-element**: `Vec<T>: SeqView<T>`, `Option<T>: OptView<T>`. A transparent
-//! single-slot wrapper (`Box<T>`/`Attempt<T>`) is `OptView<T>` (always one node), so a `Vec<Box<T>>` is
-//! `SeqView<Box<T>>` (element `Box<T>`) — the visitor descends the box as a further `OptView<T>` level.
+//! single-slot wrapper (`Box<T>`/`Attempt<T>`) is a `Walk` (always one node), so a `Vec<Box<T>>`
+//! is `SeqView<Box<T>>` (element `Box<T>`) — the visitor descends the box as a further `Walk`
+//! level.
 //! In-place iteration via `view_iter[_mut]`; structural changes via `retain_mut`/`push`/`insert`/`remove`.
 
 use syan::visit::{OptView, SeqView};
@@ -43,14 +44,6 @@ fn optview_iter_and_iter_mut() {
         *x += 100;
     }
     assert_eq!(o, Some(101));
-
-    // single-slot wrapper: `Box<T>: OptView<T>` is a 1-element view (always present).
-    let mut b: Box<i32> = Box::new(7);
-    for x in <Box<i32> as OptView<i32>>::view_iter_mut(&mut b) {
-        *x += 1;
-    }
-    assert_eq!(*b, 8);
-    assert!(<Box<i32> as OptView<i32>>::is_some(&b));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use crate::util::{
-    angle, fold_containers, gargs, gparams, innermost_acc, item_generics, item_ident,
-    method_ident_m, mt, param_name, param_use, peel, to_snake, Container, Head, LayerKind,
+    angle, gargs, gparams, indicator, innermost_acc, item_generics, item_ident, method_ident_m, mt,
+    param_name, param_use, peel, to_snake, Container, Head, LayerKind,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -119,6 +119,64 @@ fn has_concrete_fill(targets: &[&DoneType], shared: &HashSet<String>) -> bool {
             .iter()
             .any(|t| ty_fills(t, &params_of, shared))
     })
+}
+
+/// The per-module tag type threaded through [`syan::visit::Walk`] as its first parameter, so two
+/// `visitor!` modules over the same node type do not write conflicting impls.
+pub(crate) fn walk_tag() -> Ident {
+    Ident::new("__SyanWalkTag", Span::call_site())
+}
+
+/// The tag's generic params: the union's lifetimes and type params, but **not** its const params — a
+/// const of arbitrary type cannot be mentioned in a struct field, and a node that uses one has it
+/// constrained by its own self type anyway.
+pub(crate) fn walk_tag_params(g_params: &[GenericParam]) -> Vec<GenericParam> {
+    g_params
+        .iter()
+        .filter(|p| !matches!(p, GenericParam::Const(_)))
+        .cloned()
+        .collect()
+}
+
+/// `<'a, S>` for the tag, matching [`walk_tag_params`].
+pub(crate) fn walk_tag_use(g_params: &[GenericParam]) -> TokenStream {
+    let args: Vec<TokenStream> = walk_tag_params(g_params)
+        .iter()
+        .map(|p| match p {
+            GenericParam::Lifetime(l) => {
+                let lt = &l.lifetime;
+                quote!(#lt)
+            }
+            GenericParam::Type(t) => {
+                let id = &t.ident;
+                quote!(#id)
+            }
+            GenericParam::Const(c) => {
+                let id = &c.ident;
+                quote!(#id)
+            }
+        })
+        .collect();
+    angle(&args)
+}
+
+/// The tag's `PhantomData` payload, so none of its params is left unused.
+pub(crate) fn walk_tag_phantom(g_params: &[GenericParam]) -> TokenStream {
+    let parts: Vec<TokenStream> = walk_tag_params(g_params)
+        .iter()
+        .map(|p| match p {
+            GenericParam::Lifetime(l) => {
+                let lt = &l.lifetime;
+                quote!(& #lt ())
+            }
+            GenericParam::Type(t) => {
+                let id = &t.ident;
+                quote!(#id)
+            }
+            GenericParam::Const(_) => unreachable!("const params are filtered out"),
+        })
+        .collect();
+    quote!( ::core::marker::PhantomData<( #(#parts,)* )> )
 }
 
 fn generate_module(st: &BuildInput) -> TokenStream {
@@ -311,12 +369,28 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     // which `visit_<t>_seq` / `visit_<t>_opt` to emit. Shared by both `Lower`s (only the mut one records).
     let seq_used: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     let opt_used: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    // The heads this module emits `Walk` impls for. An inherited head is in `method_set` but not here.
+    let target_set: HashSet<String> = targets
+        .iter()
+        .filter_map(|d| item_ident(&d.def).map(|i| i.to_string()))
+        .chain(
+            st.done
+                .iter()
+                .filter_map(|d| item_ident(&d.def).map(|i| i.to_string()))
+                .filter(|n| !method_set.contains(n)),
+        )
+        .collect();
+    let inherited_heads: RefCell<Vec<(String, TokenStream, Ident)>> = RefCell::new(Vec::new());
+    let walk_tag_args = walk_tag_use(&g_params);
     let mk_lower = |mutable: bool| Lower {
         method_set: &method_set,
         done_by_path: &done_by_path,
         mutable,
         seq_used: &seq_used,
         opt_used: &opt_used,
+        walk_tag_args: &walk_tag_args,
+        target_set: &target_set,
+        inherited_heads: &inherited_heads,
     };
     let lower = mk_lower(false);
     let lower_mut = mk_lower(true);
@@ -376,6 +450,84 @@ fn generate_module(st: &BuildInput) -> TokenStream {
                 || where_pred_param(p).is_none_or(|id| !unshared_names.contains(&id.to_string()))
         })
         .filter(|p| seen_pred.insert(quote!(#p).to_string()))
+        .collect();
+
+    // A drilled intermediate — reached through `#[subast]` but not listed in `visitor!(..)`, so it has
+    // no visit method — gets a `Walk` impl of its own instead of being destructured inline at every use
+    // site. Unconditional, like a node's, so a `#[subast]` cycle through one terminates.
+    let intermediates: Vec<TokenStream> = st
+        .done
+        .iter()
+        .filter(|d| item_ident(&d.def).is_some_and(|id| !method_set.contains(&id.to_string())))
+        .flat_map(|d| {
+            let own_params = gparams(item_generics(&d.def).unwrap());
+            let own_use = angle(&gargs(item_generics(&d.def).unwrap()));
+            let own_where = item_where_preds(&d.def);
+            let mut preds = union_where.clone();
+            preds.extend(own_where);
+            let where_cl = where_clause(&preds);
+            let mut params = g_params.clone();
+            let known: HashSet<String> = g_params.iter().map(param_name).collect();
+            params.extend(own_params.iter().filter(|p| !known.contains(&param_name(p))).cloned());
+            sort_lifetimes_first(&mut params);
+            let path = &d.path;
+            let tag = walk_tag();
+            [false, true].map(|m| {
+                let lw = if m { &lower_mut } else { &lower };
+                let mut stack = Vec::new();
+                let body = lw.destructure(&d.def, &d.subast, path, &quote!(self), 0, &mut stack);
+                let (tr, f, recv) = if m {
+                    (quote!(WalkMut), quote!(walk_mut), quote!(&mut self))
+                } else {
+                    (quote!(Walk), quote!(walk), quote!(&self))
+                };
+                quote! {
+                    impl< #(#params,)* __SyanW: #{if m { quote!(VisitMut) } else { quote!(Visit) }} #g_use + ?Sized >
+                        ::syan::visit::#tr< #tag #{walk_tag_use(&g_params)}, ::syan::visit::indicator::Here, __SyanW >
+                        for #path #own_use #where_cl
+                    {
+                        fn #f(#recv, this: &mut __SyanW) {
+                            let _ = &this;
+                            #body
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let inherited_impls: Vec<TokenStream> = inherited_heads
+        .borrow()
+        .iter()
+        .flat_map(|(_, ty, id)| {
+            let tag = walk_tag();
+            let targs = walk_tag_use(&g_params);
+            let uw = where_clause(&union_where);
+            [false, true].map(|m| {
+                let (tr, f, recv, vt) = if m {
+                    (
+                        quote!(WalkMut),
+                        quote!(walk_mut),
+                        quote!(&mut self),
+                        quote!(VisitMut),
+                    )
+                } else {
+                    (quote!(Walk), quote!(walk), quote!(&self), quote!(Visit))
+                };
+                let m_name = method_ident_m(id, m);
+                quote! {
+                    impl< #(#g_params,)* __SyanW: #vt #g_use + ?Sized >
+                        ::syan::visit::#tr< #tag #targs, ::syan::visit::indicator::Here, __SyanW > for #ty #uw
+                    {
+                        fn #f(#recv, v: &mut __SyanW) {
+                            // Plain method syntax: an inherited `visit_*` is reached through the
+                            // supertrait, so it is not a member of this module's own trait.
+                            v.#m_name(self)
+                        }
+                    }
+                }
+            })
+        })
         .collect();
 
     let seq_used = seq_used.into_inner();
@@ -439,6 +591,12 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         // instead of one per visited type.
         #[allow(unused_imports)]
         use ::syan::visit::{MapView as _, OptView as _, SeqView as _};
+
+        #[doc = "Tag identifying this visitor module in `syan::visit::Walk` impls."]
+        pub struct #{walk_tag()} #{angle(&walk_tag_params(&g_params))} ( #{walk_tag_phantom(&g_params)} );
+
+        #(for imp in &intermediates) { #imp }
+        #(for imp in &inherited_impls) { #imp }
 
         #shared
         #mutable
