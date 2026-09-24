@@ -155,39 +155,83 @@ pub(crate) fn gen_side(
                 mut_sfx = mt(mutable),
             );
             let mut views = Vec::new();
-            if mutable && seq_used.contains(&name) {
-                let seq_doc = format!(
-                    "Structurally edit the `{name}` nodes in a `Vec`-like parent slot via a \
-                     [`SeqView`](::syan::visit::SeqView) (`push`/`insert`/`remove`/`retain_mut`/`view_iter_mut`); \
-                     default descends each via `{mname}`."
-                );
-                views.push(ViewSpec {
-                    method: Ident::new(&format!("visit_{}_seq", to_snake(&ident)), Span::call_site()),
-                    doc: seq_doc,
-                    view_trait: quote!(::syan::visit::SeqView),
-                    view_param: p_vw.clone(),
-                    default_body: quote! {
+            // Both sides get the views. The shared one observes the parent slot — its length, its
+            // neighbours, an element's index — which `visit_<t>` alone cannot show; the `&mut` one
+            // edits it. Named `_seq`/`_opt` on `Visit` and `_seq_mut`/`_opt_mut` on `VisitMut`.
+            if seq_used.contains(&name) {
+                let seq_doc = if mutable {
+                    format!(
+                        "Structurally edit the `{name}` nodes in a `Vec`-like parent slot via a \
+                         [`SeqView`](::syan::visit::SeqView) (`push`/`insert`/`remove`/`retain_mut`/\
+                         `view_iter_mut`); default descends each via `{mname}`."
+                    )
+                } else {
+                    format!(
+                        "Observe the `{name}` nodes in a `Vec`-like parent slot via a \
+                         [`SeqView`](::syan::visit::SeqView) (`len`/`get`/`view_iter`) — the slot \
+                         itself, not just each element; default descends each via `{mname}`."
+                    )
+                };
+                let body = if mutable {
+                    quote! {
                         for __syan_e in ::syan::visit::SeqView::view_iter_mut(v) {
                             self.#method(__syan_e);
                         }
-                    },
+                    }
+                } else {
+                    quote! {
+                        for __syan_e in ::syan::visit::SeqView::view_iter(v) {
+                            self.#method(__syan_e);
+                        }
+                    }
+                };
+                views.push(ViewSpec {
+                    method: Ident::new(
+                        &format!("visit_{}_seq{}", to_snake(&ident), mt(mutable)),
+                        Span::call_site(),
+                    ),
+                    doc: seq_doc,
+                    view_trait: quote!(::syan::visit::SeqView),
+                    view_param: p_vw.clone(),
+                    default_body: body,
                 });
             }
-            if mutable && opt_used.contains(&name) {
-                let opt_doc = format!(
-                    "Structurally edit the `{name}` node in an `Option`-like parent slot via an \
-                     [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`); default descends it via `{mname}`."
-                );
-                views.push(ViewSpec {
-                    method: Ident::new(&format!("visit_{}_opt", to_snake(&ident)), Span::call_site()),
-                    doc: opt_doc,
-                    view_trait: quote!(::syan::visit::OptView),
-                    view_param: p_ow.clone(),
-                    default_body: quote! {
+            if opt_used.contains(&name) {
+                let opt_doc = if mutable {
+                    format!(
+                        "Structurally edit the `{name}` node in an `Option`-like parent slot via an \
+                         [`OptView`](::syan::visit::OptView) (`get_mut`/`set`/`take`); default \
+                         descends it via `{mname}`."
+                    )
+                } else {
+                    format!(
+                        "Observe the `{name}` node in an `Option`-like parent slot via an \
+                         [`OptView`](::syan::visit::OptView) (`is_some`/`get`) — the slot itself, \
+                         not just the element; default descends it via `{mname}`."
+                    )
+                };
+                let body = if mutable {
+                    quote! {
                         if let ::core::option::Option::Some(__syan_e) = ::syan::visit::OptView::get_mut(v) {
                             self.#method(__syan_e);
                         }
-                    },
+                    }
+                } else {
+                    quote! {
+                        if let ::core::option::Option::Some(__syan_e) = ::syan::visit::OptView::get(v) {
+                            self.#method(__syan_e);
+                        }
+                    }
+                };
+                views.push(ViewSpec {
+                    method: Ident::new(
+                        &format!("visit_{}_opt{}", to_snake(&ident), mt(mutable)),
+                        Span::call_site(),
+                    ),
+                    doc: opt_doc,
+                    view_trait: quote!(::syan::visit::OptView),
+                    view_param: p_ow.clone(),
+                    default_body: body,
                 });
             }
             S {
@@ -314,7 +358,7 @@ pub(crate) fn gen_side(
                     #[doc = #{&spec.doc}]
                     fn #{&spec.method}< #(for mp in &s.method_params) { #mp, } #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(
                         &mut self,
-                        v: &mut #{&spec.view_param},
+                        v: #amp #{&spec.view_param},
                     ) #{&s.trait_where} {
                         #{&spec.default_body}
                     }
@@ -332,7 +376,7 @@ pub(crate) fn gen_side(
                         <#p_v as #visit_tr #g_use>::#{&s.method}(self, i)
                     }
                     #(for spec in &s.views) {
-                        fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
+                        fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: #amp #{&spec.view_param}) {
                             <#p_v as #visit_tr #g_use>::#{&spec.method}(self, v)
                         }
                     }
@@ -353,7 +397,7 @@ pub(crate) fn gen_side(
                         <#p_v as #visit_tr #g_use>::#{&s.method}(&mut **self, i)
                     }
                     #(for spec in &s.views) {
-                        fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
+                        fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: #amp #{&spec.view_param}) {
                             <#p_v as #visit_tr #g_use>::#{&spec.method}(&mut **self, v)
                         }
                     }
@@ -378,7 +422,7 @@ pub(crate) fn gen_side(
                                 }
                             }
                             #(for spec in &s.views) {
-                                fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: &mut #{&spec.view_param}) {
+                                fn #{&spec.method}< #{&spec.view_param}: #{&spec.view_trait}< #{&s.ty} > >(&mut self, v: #amp #{&spec.view_param}) {
                                     #(for (p, k) in ps.iter().zip(&ix)) {
                                         <#p as #visit_tr #g_use>::#{&spec.method}(&mut self.#k, v);
                                     }
@@ -453,16 +497,20 @@ pub(crate) fn gen_side(
             fn #into_vis_fn(self) -> impl #visit_tr #g_use { self }
         }
 
-        // Closures: shallow Hook + single-pass Driver.
+        // Closures: shallow Hook + single-pass Driver. Implementation detail of the closure
+        // adapters — a user names `IntoVisitor` (via `node.visit(..)`), never these.
+        #[doc(hidden)]
         pub trait #hook_tr #g_def #uw {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { let _ = i; }
             }
         }
+        #[doc(hidden)]
         pub trait #into_hook_tr< #(#g_params,)* #p_t > #uw {
             fn #into_hook_fn(self) -> impl #hook_tr #g_use;
         }
 
+        #[doc(hidden)]
         pub struct #driver<#p_h>(pub #p_h);
         impl< #(#g_params,)* #p_h: #hook_tr #g_use > #visit_tr #g_use for #driver<#p_h> #uw {
             #(for s in &sides) {
@@ -481,6 +529,7 @@ pub(crate) fn gen_side(
         }
 
         #(for s in &sides) {
+            #[doc(hidden)]
             pub struct #{&s.hook_struct}<#p_f>(pub #p_f);
             impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
                 #hook_tr #g_use for #{&s.hook_struct}<#p_f> #uw

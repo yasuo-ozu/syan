@@ -17,7 +17,7 @@
 /// | attribute | on | meaning |
 /// |---|---|---|
 /// | `#[subast(path, ..)]` | the type | types this node reaches that `visitor!(..)` does **not** list, so the walk can drill through them; a listed type needs no entry |
-/// | `#[seq]` / `#[opt]` | a field | edit the parent slot through a [`SeqView`]/[`OptView`] — `VisitMut` only, bare `Vec<T>`/`Option<T>` only |
+/// | `#[seq]` / `#[opt]` | a field | reach the parent slot through a [`SeqView`]/[`OptView`] — bare `Vec<T>`/`Option<T>` only |
 /// | `#[skip]` | a field | never follow this field, whatever its type; an error together with `#[seq]`/`#[opt]` |
 pub use syan_macro::Ast;
 
@@ -41,10 +41,14 @@ pub use syan_macro::Ast;
 ///   override only the nodes you care about.
 /// * **`visit_<type>`** — a free function that walks one node's children. The trait method is the
 ///   hook; this is the descent. Call it from an override to keep going.
-/// * **`Hook`, `Driver`, `<Type>Hook`, `IntoVisitor`** — adapters that let a closure act as a
-///   visitor. The closure's argument type picks the node it sees. A tuple of closures runs them all
-///   in one traversal.
+/// * **`IntoVisitor`** — what `visit` accepts, so a closure can act as a visitor: its argument type
+///   picks the node it sees, and a tuple of closures runs them all in one traversal. The adapters
+///   behind it are `#[doc(hidden)]`; you never name them.
 /// * **`visit`** — an inherent method on each listed type, so a walk starts with `node.visit(..)`.
+/// * **`__SyanWalkTag`** — this module's tag, the first parameter of every [`Walk`] impl it emits.
+///   It is what keeps two visitor modules over the same node type from colliding. You never name it.
+/// * **a [`Walk`] impl per node** — the descent side. `Visit` says what to *do* at a node; `Walk`
+///   says how to *get* there. See [What it expands to](#what-it-expands-to).
 ///
 /// # Generated names
 ///
@@ -53,14 +57,15 @@ pub use syan_macro::Ast;
 /// | | shared (`Visit`) | by `&mut` (`VisitMut`) |
 /// |---|---|---|
 /// | the node | `visit_t` | `visit_t_mut` |
-/// | a `#[seq]` field | — | `visit_t_seq` |
-/// | a `#[opt]` field | — | `visit_t_opt` |
+/// | a `#[seq]` field | `visit_t_seq` | `visit_t_seq_mut` |
+/// | a `#[opt]` field | `visit_t_opt` | `visit_t_opt_mut` |
 /// | closure hook | `hook_t` | `hook_t_mut` |
 /// | entry point | `T::visit` | `T::visit_mut` |
 ///
-/// The `_seq` and `_opt` methods are on `VisitMut` only. A view exists to *edit* the parent slot;
-/// reading needs nothing beyond the element, which `visit_t` already gives. They take no extra
-/// `_mut` suffix, because the trait they sit on is already the `&mut` one.
+/// A `_seq`/`_opt` method hands you the *parent slot* rather than one element. On `Visit` it is a
+/// `&impl SeqView<T>`, so you can read what `visit_t` cannot show — the slot's length, an element's
+/// neighbours, its index. On `VisitMut` it is a `&mut`, so you can `push`, `remove` or `retain_mut`.
+/// Either default just descends.
 ///
 /// ```
 /// mod ast {
@@ -82,10 +87,10 @@ pub use syan_macro::Ast;
 ///     Expr::Neg(Box::new(Expr::Lit(1))).visit(|_: &Expr| n += 1);
 ///     assert_eq!(n, 2);
 ///
-///     // `#[seq]` adds `visit_expr_seq`, which hands you the parent slot, not just the element.
+///     // `#[seq]` adds `visit_expr_seq_mut`, which hands you the parent slot, not just the element.
 ///     struct DropLits;
 ///     impl visit::VisitMut for DropLits {
-///         fn visit_expr_seq<V: SeqView<Expr>>(&mut self, v: &mut V) {
+///         fn visit_expr_seq_mut<V: SeqView<Expr>>(&mut self, v: &mut V) {
 ///             v.retain_mut(|e| !matches!(e, Expr::Lit(_)));
 ///         }
 ///     }
@@ -111,7 +116,7 @@ pub use syan_macro::Ast;
 ///
 /// # What it expands to
 ///
-/// For the `Expr` above, the module gets about 390 lines. The parts that matter:
+/// For the `Expr` above, the module gets about a thousand lines. The parts that matter:
 ///
 /// ```ignore
 /// pub trait Visit {
@@ -122,17 +127,18 @@ pub use syan_macro::Ast;
 ///     match i {
 ///         super::Expr::Lit(_) => {}
 ///         super::Expr::Neg(__f0_0) => {
-///             for __nc1 in __f0_0.view_iter() { this.visit_expr(__nc1); }
+///             syan::visit::Walk::<__SyanWalkTag, Thru<Here>, _>::walk(__f0_0, this);
+///         }
+///         super::Expr::Many(__f0_0) => {
+///             syan::visit::Walk::<__SyanWalkTag, Thru<Here>, _>::walk(__f0_0, this);
 ///         }
 ///     }
 /// }
 ///
-/// pub trait Hook { fn hook_expr(&mut self, i: &super::Expr) { let _ = i; } }
-/// pub struct Driver<__H>(pub __H);            // Hook   -> Visit
-/// pub struct ExprHook<__F>(pub __F);          // FnMut  -> Hook
-///
+/// // A closure becomes a visitor through hidden adapters — shown only so the shape is not a
+/// // mystery; none of these names is part of the API.
 /// impl<__F: FnMut(&super::Expr)> IntoVisitor<super::Expr> for __F {
-///     fn into_visitor(self) -> impl Visit { Driver(ExprHook(self)) }
+///     fn into_visitor(self) -> impl Visit { /* .. */ }
 /// }
 ///
 /// impl<__V: Visit> Visit for &mut __V { .. }                       // pass `&mut pass`
@@ -153,26 +159,29 @@ pub use syan_macro::Ast;
 /// pub trait VisitMut {
 ///     fn visit_expr_mut(&mut self, i: &mut super::Expr) { visit_expr_mut(self, i) }
 ///
-///     fn visit_expr_seq<__VW: SeqView<super::Expr>>(&mut self, v: &mut __VW) {
+///     fn visit_expr_seq_mut<__VW: SeqView<super::Expr>>(&mut self, v: &mut __VW) {
 ///         for __syan_e in SeqView::view_iter_mut(v) { self.visit_expr_mut(__syan_e); }
 ///     }
 /// }
 /// ```
 ///
-/// `Lit(u32)` produces an empty arm because `u32` is not a visited type. `Neg(Box<Expr>)` produces
-/// one loop per wrapper layer. There are 8 traits and 20 `into_visitor` impls in all — the tuple
-/// arities, and a `_mut` twin for each.
+/// `Lit(u32)` produces an empty arm because `u32` is not a visited type. `Neg(Box<Expr>)` and
+/// `Many(Vec<Expr>)` produce the *same* call — one [`Walk`] per followed field, differing only in
+/// the [`indicator`], which is why a `Box` and a `Vec` generate identical code. Four traits are
+/// public — `Visit`, `VisitMut`, `IntoVisitor`, `IntoVisitorMut` — with an `into_visitor` impl per
+/// tuple arity; the closure adapters beside them are hidden.
 ///
 /// Visitors compose two ways. A **tuple of visitors** (arity 2..=8) implements `Visit` itself, so
 /// every element sees every node in one traversal and the tuple can go anywhere one visitor can. A
 /// `Box` around a visitor is also a visitor, so `node.visit(Box::new(pass))` works — taken by value.
 /// A wrapper of your own forwards in one line, the same way `Box` does.
 ///
-/// A `#[seq]` field adds `visit_<type>_seq`, and `#[opt]` adds `visit_<type>_opt`. Both are on
-/// `VisitMut` only, and both hand you a view of the *parent slot* — a [`SeqView`] or [`OptView`] —
-/// so an override can `push`, `remove` or `retain_mut` rather than only read each element. The
-/// default just descends. The marked field must be a bare `Vec<T>` or `Option<T>`: a wrapped one
-/// such as `Option<Box<T>>` cannot be edited in place, and the macro says so.
+/// A `#[seq]` field adds `visit_<type>_seq` on `Visit` and `visit_<type>_seq_mut` on `VisitMut`;
+/// `#[opt]` adds the `_opt` pair. Each hands you a view of the *parent slot* — a [`SeqView`] or
+/// [`OptView`] — rather than one element: by `&` to observe it, by `&mut` to `push`, `remove` or
+/// `retain_mut`. Both defaults just descend. The marked field must be a bare `Vec<T>` or
+/// `Option<T>`: a wrapped one such as `Option<Box<T>>` cannot be edited in place, and the macro
+/// says so.
 ///
 /// The walk never names a container type, or a leaf type. Each followed field is one [`Walk`] call
 /// carrying an [`indicator`] computed from the field's shape — `Vec<(Length, Line)>` is walked at
@@ -254,7 +263,7 @@ pub trait Repeater<const INDEX: usize> {
 
 /// A mutable, **sequence-like** view of an AST collection field (`Vec`/`VecDeque`/`Punctuated`),
 /// bare-element — the element type is `T` itself, never a wrapped `Box<T>`. A generated
-/// `visit_<t>_seq(&mut self, &mut impl SeqView<T>)` receives one; override it to edit the collection in
+/// `visit_<t>_seq_mut(&mut self, &mut impl SeqView<T>)` receives one (and `visit_<t>_seq` a `&`); override it to edit the collection in
 /// place. The required core (`len`/`get`/`get_mut`/`insert`/`remove`) is object-safe; the ergonomic
 /// helpers are `Self: Sized` provided methods.
 pub trait SeqView<T> {
@@ -380,9 +389,11 @@ impl<'a, T> ExactSizeIterator for SeqIterMut<'a, T> {}
 
 /// A **map-like** view of an AST map field (`HashMap`/`BTreeMap`): the node sits in the VALUE slot, so
 /// the viewed element is the map's value type rather than its first type argument. Descent-only — a map
-/// slot is keyed, so there is no positional structural edit and hence no `#[seq]`/`#[opt]` counterpart;
-/// it exists so a `View` level resolves `view_iter[_mut]()` on a map just as it does on a
-/// [`SeqView`]/[`OptView`] container, still without the macro naming any container type.
+/// slot is keyed, so there is no positional structural edit and hence no `#[seq]`/`#[opt]` counterpart.
+///
+/// **No longer part of the walk.** A map field descends through [`Walk`], whose `Thru<H>` impl for
+/// `HashMap`/`BTreeMap` iterates the values directly. This trait is kept as a way to write that
+/// traversal by hand; nothing `visitor!` generates refers to it.
 pub trait MapView<T> {
     fn view_iter<'a>(&'a self) -> impl Iterator<Item = &'a T>
     where
@@ -425,7 +436,7 @@ impl<K, V> MapView<V> for std::collections::BTreeMap<K, V> {
 
 /// A mutable, **Option-like** view (≤1 element) of an AST `Option` field, bare-element (a nested
 /// `Box`/`Attempt` layer descends separately, through [`Walk`]). A generated
-/// `visit_<t>_opt(&mut self, &mut impl OptView<T>)` receives one.
+/// `visit_<t>_opt_mut(&mut self, &mut impl OptView<T>)` receives one, and `visit_<t>_opt` a `&`.
 pub trait OptView<T> {
     fn is_some(&self) -> bool;
     fn get(&self) -> Option<&T>;
@@ -538,7 +549,7 @@ impl<T> OptView<T> for Option<T> {
 /// | indicator | meaning |
 /// |---|---|
 /// | [`Here`](indicator::Here) | `Self` is a visited node — hand it to the visitor |
-/// | [`Skip`](indicator::Skip) | do not descend |
+/// | [`Skip`] | do not descend |
 /// | [`Thru<H>`](indicator::Thru) | `Self` is a container — delegate `H` to what it holds |
 /// | `(H0, .., Hn)` | `Self` is a tuple — delegate each `Hi` to slot `i` |
 ///

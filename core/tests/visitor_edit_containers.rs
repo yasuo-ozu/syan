@@ -27,7 +27,7 @@ mod vecdeque {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
+        fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
             for s in v.view_iter_mut() {
                 if s.0 == 2 {
                     *s = Stmt(102, PhantomData);
@@ -80,7 +80,7 @@ mod punct {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
+        fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
             v.retain_mut(|s| s.0 != 0); // drop zeros
             v.push(Stmt(9, PhantomData)); // `Comma: Default` synthesizes the separator
         }

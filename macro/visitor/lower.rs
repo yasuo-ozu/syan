@@ -174,7 +174,7 @@ impl<'a> Lower<'a> {
         };
         used.borrow_mut().insert(head.to_string());
         let m = Ident::new(
-            &format!("visit_{}_{suffix}", to_snake(head)),
+            &format!("visit_{}_{suffix}{}", to_snake(head), mt(self.mutable)),
             Span::call_site(),
         );
         quote!( this.#m(#binding); )
@@ -464,7 +464,17 @@ impl<'a> Lower<'a> {
             Head::Path { head: phead, .. } => subast
                 .iter()
                 .find(|e| &e.key == phead)
-                .map(|e| (last_ident(&e.path).clone(), e.path.clone()))
+                .map(|e| {
+                    let real = last_ident(&e.path).clone();
+                    // Prefer the path this visitor knows the type by. A `#[subast]` path may be
+                    // written however the declaring module liked — only its last segment is compared
+                    // — so it is not necessarily nameable *here*. `reachable` holds the spelling
+                    // `visitor!(..)` used, which is.
+                    match self.reachable.get(&real.to_string()) {
+                        Some(p) => (real, p.clone()),
+                        None => (real, e.path.clone()),
+                    }
+                })
                 // No `#[subast]` entry, so the head is one this visitor already names: a type it
                 // lists, or one it inherits (whose path arrived through the base's `__syan_visited`).
                 // An entry would only have repeated what the visitor already said.
@@ -490,7 +500,7 @@ impl<'a> Lower<'a> {
         // (`Vec<Head>`/`Option<Head>`/…): the marker picks the view method, and the `SeqView<Head>` /
         // `OptView<Head>` bound on the generated method self-validates Seq-vs-Opt (a `#[seq]` on an
         // `Option` fails the bound). No container name is matched.
-        if self.mutable {
+        {
             if let Some(kind) = view {
                 let marker = marker_word(&kind);
                 let head = match &resolved {

@@ -77,7 +77,7 @@ pub(crate) fn crate_rooted_tokens(path: &Path) -> TokenStream {
 /// `$crate::…` for downstream), or an external-crate path (`other_crate::…`) — i.e. a multi-segment path
 /// whose first segment is not `self`/`super`. NOT rooted: a bare single-segment ident, or a
 /// `self::`/`super::`-relative path — those resolve in the *consumer's* context, not the definition's.
-fn subast_path_is_rooted(path: &Path) -> bool {
+pub(crate) fn subast_path_is_rooted(path: &Path) -> bool {
     if path.leading_colon.is_some() {
         return true;
     }
@@ -108,8 +108,18 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
             Err(e) => emit_error!(e.span(), "invalid `#[subast(..)]`: {}", e),
         }
     }
-    // Reject a non-fully-qualified path with a clear, actionable message — otherwise it surfaces far
-    // away as a cryptic "cannot find macro/type" (or wrong-type) error when a visitor drills the entry.
+    // Every entry must be rooted, whatever it names. The path has two jobs: as a *match key* only the
+    // last segment is compared, so the root is irrelevant there — but as a *fetch target* for a type
+    // `visitor!(..)` does not list, it is invoked as a macro to pull that type's definition, in the
+    // visitor's scope, where a bare or `self::`/`super::`-relative path means something else.
+    //
+    // The rule is unconditional rather than applied only to fetched entries, because which entries are
+    // fetched depends on the `visitor!(..)` list — so a conditional rule would accept an attribute
+    // today and reject it when someone stops listing that type, and would report at the `visitor!`
+    // invocation rather than at the attribute. A derive-emitted `pub use` could launder a relative path
+    // (a `use` resolves where it is written), but only one level deep: past the first hop the alias
+    // hides the module the next fetch needs, so the restriction would come back a level further from
+    // the code that has to change.
     for e in &entries {
         if !subast_path_is_rooted(&e.path) {
             let p = &e.path;

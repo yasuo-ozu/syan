@@ -129,10 +129,11 @@ pub(crate) enum Container {
     Opt,
 }
 
-/// How one wrapper level of a field descends. `View`: a `SeqView`/`OptView`/`MapView` container
-/// (`Vec`/`Option`/`Box`/`Punctuated`/`HashMap`/user wrapper) — descended by the `view_iter[_mut]`
-/// method, resolved to the right view by the compiler (**no container type name is matched**). `Raw`: a
-/// fixed-size array or slice — descended by the slice `iter[_mut]` (arrays/slices have no `SeqView` impl).
+/// How one wrapper level of a field descends. Both become a `Thru<_>` in the field's
+/// [`indicator`](indicator), which `syan::visit`'s `Walk` impls peel one level at a time — the
+/// distinction survives only because `peel` records it. `View`: a container (`Vec`/`Option`/`Box`/
+/// `Punctuated`/`HashMap`/user wrapper). `Raw`: a fixed-size array or slice. **No container type name
+/// is ever matched.**
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum LayerKind {
     View,
