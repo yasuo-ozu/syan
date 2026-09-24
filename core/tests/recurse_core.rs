@@ -7,6 +7,8 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+mod ui_toolchain;
+
 // Natural recursive types + Parse over mutually-recursive AST cycles.
 mod basic {
     use syan::literal::Integer;
@@ -384,6 +386,9 @@ mod problems {
 
     #[test]
     fn compile_fail_problems() {
+        if !crate::ui_toolchain::should_run("recurse_core") {
+            return;
+        }
         let t = trybuild::TestCases::new();
         // `problem3`/`problem7` pin SCOPING rules of `#[recurse]`'s cycle detection: a `pub(crate)`
         // type and a multi-segment path are both invisible to it, so the cycle is never detected and

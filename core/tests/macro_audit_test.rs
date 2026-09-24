@@ -41,8 +41,13 @@
 //!   `macro_audit_runtime_test.rs`'s `visitor_map_value`: `Node` was declared, was found by the
 //!   coarse `collect_type_idents` check, and was still dropped by `peel`.
 
+mod ui_toolchain;
+
 #[test]
 fn macro_audit_compile_fail() {
+    if !ui_toolchain::should_run("macro_audit_test") {
+        return;
+    }
     let t = trybuild::TestCases::new();
 
     // ── attribute derives (Parse / Unparse / Spanned) ──────────────────────────────────────────
