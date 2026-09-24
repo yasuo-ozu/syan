@@ -12,16 +12,59 @@
 
 /// Marks a type as an AST node and emits the metadata [`visitor!`] reads.
 ///
-/// Attributes it understands:
+/// # Types are matched by their last path segment
+///
+/// **This is the main rule to remember.** A field's type is known by the last part of its path.
+/// Nothing else is read. So `other::Node`, `crate::ast::Node` and plain `Node` all mean the same
+/// `Node` here. This derive sees one type at a time. It cannot look a path up.
+///
+/// If two types share a name, give one an alias and write the alias in the field:
+///
+/// ```ignore
+/// #[derive(Ast)]
+/// #[subast(crate::other::Node as OtherNode)]
+/// pub struct Wrapper {
+///     inner: OtherNode,
+/// }
+/// ```
+///
+/// # Attributes
 ///
 /// | attribute | on | meaning |
 /// |---|---|---|
-/// | `#[subast(path, ..)]` | the type | types this node reaches that `visitor!(..)` does **not** list, so the walk can drill through them; a listed type needs no entry |
-/// | `#[seq]` / `#[opt]` | a field | reach the parent slot through a [`SeqView`]/[`OptView`] — bare `Vec<T>`/`Option<T>` only |
-/// | `#[skip]` | a field | never follow this field, whatever its type; an error together with `#[seq]`/`#[opt]` |
+/// | `#[subast(path, ..)]` | the type | types this node reaches that `visitor!(..)` does **not** list, so the walk can pass through them. A listed type needs no entry. |
+/// | `#[seq]` / `#[opt]` | a field | reach the parent slot through a [`SeqView`] or [`OptView`]. Plain `Vec<T>` / `Option<T>` only. |
+/// | `#[skip]` | a field | never walk into this field, whatever its type. An error together with `#[seq]` or `#[opt]`. |
+///
+/// Take a field's type and remove wrappers like `Box`, `Vec` and `Option`. What is left is the
+/// **head**. The walk goes into a field when the visitor knows its head. It knows a type if you
+/// listed it in `visitor!(..)`, or if it comes from a base visitor. Those need no `#[subast(..)]`
+/// entry. That list is only for types the walk passes *through* on the way to a known one.
+///
+/// A `#[subast(..)]` path must start at a crate: `crate::path::to::Type`, or
+/// `other_crate::path::Type` for a type in another crate. A plain name, or a `self::`/`super::`
+/// path, is an error. Here is why. This derive puts the path inside a macro. That macro runs later,
+/// in the module where the visitor lives. A short path would mean something else there.
+/// `visitor!(..)` has no such rule. Only `#[subast(..)]` does.
+///
+/// A `#[seq]` or `#[opt]` field must be a plain `Vec<T>` or `Option<T>`. A wrapped one, like
+/// `Option<Box<T>>`, cannot be edited in place. The macro tells you so, instead of building a view
+/// that would not work.
+///
+/// `#[skip]` takes a field out of the walk, whatever its type:
+///
+/// ```ignore
+/// #[derive(Ast)]
+/// pub enum Expr<S> {
+///     // `&mut Box<Stmt<'_, S>>` is invariant, so a mut walk can never descend into a concrete
+///     // lifetime fill — say so here rather than leaving it to an error inside the macro.
+///     Stmt(#[skip] Box<Stmt<'static, S>>),
+///     Lit(PhantomData<S>),
+/// }
+/// ```
 pub use syan_macro::Ast;
 
-/// Define a visitor over the given AST types, used *inside* an (otherwise empty) module:
+/// Define a visitor over the given AST types. Put it in its own empty module:
 ///
 /// ```ignore
 /// pub mod my_visitor {
@@ -29,32 +72,26 @@ pub use syan_macro::Ast;
 /// }
 /// ```
 ///
-/// This captures `$crate` (the path to `syan` from the caller) and forwards it to the proc-macro,
-/// so the syan crate is resolved automatically (no `#[syan(..)]` needed).
-///
 /// # What it generates
 ///
-/// Everything below is emitted twice: once by shared reference, and once by `&mut` with a `_mut`
-/// suffix.
+/// You get everything below twice. One half is for reading. The other is for editing: it adds a
+/// `_mut` suffix, and takes `&mut` where the reading half takes `&`.
 ///
-/// * **`Visit`** — one `visit_<type>` method per listed type. Each default recurses, so you
-///   override only the nodes you care about.
-/// * **`visit_<type>`** — a free function that walks one node's children. The trait method is the
-///   hook; this is the descent. Call it from an override to keep going.
-/// * **`IntoVisitor`** — what `visit` accepts, so a closure can act as a visitor: its argument type
-///   picks the node it sees, and a tuple of closures runs them all in one traversal. The adapters
-///   behind it are `#[doc(hidden)]`; you never name them.
-/// * **`visit`** — an inherent method on each listed type, so a walk starts with `node.visit(..)`.
-/// * **`__SyanWalkTag`** — this module's tag, the first parameter of every [`Walk`] impl it emits.
-///   It is what keeps two visitor modules over the same node type from colliding. You never name it.
-/// * **a [`Walk`] impl per node** — the descent side. `Visit` says what to *do* at a node; `Walk`
-///   says how to *get* there. See [What it expands to](#what-it-expands-to).
+/// * **`Visit`** — a trait with one `visit_<type>` method per listed type. Each method already has
+///   a body that walks that node's children. Override only the nodes you care about.
+/// * **`visit_<type>`** — a free function that walks one node's children. The trait method is where
+///   you hook in. This function does the walking. Call it from your override to keep going down.
+/// * **`IntoVisitor`** — what `visit` accepts. See
+///   [What you can pass to `visit()`](#what-you-can-pass-to-visit).
+/// * **`visit`** — a method on each listed type, so a walk starts with `node.visit(..)`.
+///
+/// A few hidden items come along too. You never name them.
 ///
 /// # Generated names
 ///
 /// For a listed type `T`, written `t` in snake_case:
 ///
-/// | | shared (`Visit`) | by `&mut` (`VisitMut`) |
+/// | | reading (`Visit`) | editing (`VisitMut`) |
 /// |---|---|---|
 /// | the node | `visit_t` | `visit_t_mut` |
 /// | a `#[seq]` field | `visit_t_seq` | `visit_t_seq_mut` |
@@ -62,10 +99,10 @@ pub use syan_macro::Ast;
 /// | closure hook | `hook_t` | `hook_t_mut` |
 /// | entry point | `T::visit` | `T::visit_mut` |
 ///
-/// A `_seq`/`_opt` method hands you the *parent slot* rather than one element. On `Visit` it is a
-/// `&impl SeqView<T>`, so you can read what `visit_t` cannot show — the slot's length, an element's
-/// neighbours, its index. On `VisitMut` it is a `&mut`, so you can `push`, `remove` or `retain_mut`.
-/// Either default just descends.
+/// A `_seq` or `_opt` method gives you the whole slot, not one element. When reading, you get a
+/// `&impl SeqView<T>`. It shows you what `visit_t` cannot: how many elements there are, what sits
+/// next to an element, which index it has. When editing, you get a `&mut`, so you can `push`,
+/// `remove` or `retain_mut`. Both already have a body that just walks on.
 ///
 /// ```
 /// mod ast {
@@ -116,7 +153,7 @@ pub use syan_macro::Ast;
 ///
 /// # What it expands to
 ///
-/// Two small nodes, one of each marker — a `#[seq]` list and an `#[opt]` slot:
+/// Here are two small nodes. One has a `#[seq]` list and an `#[opt]` slot:
 ///
 /// ```ignore
 /// #[derive(Ast)]
@@ -131,14 +168,14 @@ pub use syan_macro::Ast;
 /// pub mod visit { syan::visit::visitor!(crate::Doc, crate::Item); }
 /// ```
 ///
-/// That module is about a thousand lines. The parts that matter:
+/// That module is about a thousand lines. Here are the parts that matter:
 ///
 /// ```ignore
 /// pub trait Visit {
 ///     fn visit_doc(&mut self, i: &crate::Doc) { visit_doc(self, i) }
 ///     fn visit_item(&mut self, i: &crate::Item) { visit_item(self, i) }
 ///
-///     // One method per marker, taking the parent slot rather than an element.
+///     // One method per marker. It takes the parent slot, not an element.
 ///     fn visit_item_seq<__VW: SeqView<crate::Item>>(&mut self, v: &__VW) {
 ///         for e in SeqView::view_iter(v) { self.visit_item(e); }
 ///     }
@@ -155,6 +192,17 @@ pub use syan_macro::Ast;
 ///
 /// pub fn visit_item<__V: Visit + ?Sized>(this: &mut __V, i: &crate::Item) {}
 ///
+/// // A visitor behind a wrapper is still a visitor. So is a tuple of them.
+/// impl<__V: Visit> Visit for &mut __V { .. }                       // node.visit(&mut pass)
+/// impl<__V: Visit + ?Sized> Visit for Box<__V> { .. }              // node.visit(Box::new(pass))
+/// impl<__V0: Visit, __V1: Visit> Visit for (__V0, __V1) { .. }     // two passes, one walk
+///
+/// // What makes a closure a visitor. These names are hidden; you never write them.
+/// impl<__F: FnMut(&crate::Item)> IntoVisitor<crate::Item> for __F {
+///     fn into_visitor(self) -> impl Visit { .. }
+/// }
+///
+/// // The entry points, one per listed type.
 /// impl crate::Doc {
 ///     pub fn visit<__T>(&self, visitor: impl IntoVisitor<__T>) -> &Self {
 ///         let mut visitor = visitor.into_visitor();
@@ -170,6 +218,8 @@ pub use syan_macro::Ast;
 ///     }
 /// }
 ///
+/// // `VisitMut` is the same again, with `_mut` names and `&mut` everywhere. That is how the
+/// // views edit the slot instead of only reading it.
 /// pub trait VisitMut {
 ///     fn visit_doc_mut(&mut self, i: &mut crate::Doc) { visit_doc_mut(self, i) }
 ///     fn visit_item_mut(&mut self, i: &mut crate::Item) { visit_item_mut(self, i) }
@@ -204,62 +254,98 @@ pub use syan_macro::Ast;
 ///         self
 ///     }
 /// }
+///
+/// // .. and the `&mut` versions of the wrapper, tuple and closure impls above.
 /// ```
 ///
-/// `visit_item` has an empty body because `u32` is not a visited type. `Doc`'s two fields differ
-/// only in their marker: drop both and each becomes a single [`Walk`] call instead — the *same*
-/// call, since `Vec<Item>` and `Option<Item>` have the same shape and no container type is ever
-/// named. Four traits are public — `Visit`, `VisitMut`, `IntoVisitor`, `IntoVisitorMut` — with an
-/// `into_visitor` impl per tuple arity; the closure adapters beside them are hidden.
+/// `visit_item` has an empty body. `u32` is not a visited type, so there is nothing inside an
+/// `Item` to walk into.
 ///
-/// Visitors compose two ways. A **tuple of visitors** (arity 2..=8) implements `Visit` itself, so
-/// every element sees every node in one traversal and the tuple can go anywhere one visitor can. A
-/// `Box` around a visitor is also a visitor, so `node.visit(Box::new(pass))` works — taken by value.
-/// A wrapper of your own forwards in one line, the same way `Box` does.
+/// `Doc`'s two fields differ only in their marker. Take the markers away and both fields give the
+/// *same* code. A `Vec<Item>` and an `Option<Item>` are walked the same way, and no container type
+/// is ever named.
 ///
-/// A marked field must be a **bare** `Vec<T>` or `Option<T>`: a wrapped one such as
-/// `Option<Box<T>>` cannot be edited in place, and the macro says so rather than generating a view
-/// that cannot work.
+/// Four traits are public: `Visit`, `VisitMut`, `IntoVisitor` and `IntoVisitorMut`. The rest is
+/// hidden.
 ///
-/// The walk never names a container type, or a leaf type. Each followed field is one [`Walk`] call
-/// carrying an [`indicator`] computed from the field's shape — `Vec<(Length, Line)>` is walked at
-/// `Thru<(Skip, Here)>` — and the container impls in this module peel it one level at a time until a
-/// node's generated impl hands the node to its `visit_*` method. So `Box<T>` and `Vec<T>` generate
-/// the same code, and a leaf sharing a tuple with a node is simply `Skip`, needing no impl of its own.
+/// # Extending a visitor
 ///
-/// # Which fields are followed
-///
-/// A field is followed when its type is one the visitor knows — a type listed in `visitor!(..)`, or
-/// inherited from a base. It does **not** also have to be repeated in the owning node's
-/// `#[subast(..)]`; that list is for the *unlisted* intermediates the walk drills through, which
-/// nothing else can name.
-///
-/// To stop a field being followed, mark it `#[skip]`:
+/// You can list a type in only one `visitor!` per crate. So to cover more types, add to the
+/// visitor you have. Write the base module, then `=>`, then the new types:
 ///
 /// ```ignore
-/// #[derive(Ast)]
-/// pub enum Expr<S> {
-///     // `&mut Box<Stmt<'_, S>>` is invariant, so a mut walk can never descend into a concrete
-///     // lifetime fill — say so here rather than leaving it to an error inside the macro.
-///     Stmt(#[skip] Box<Stmt<'static, S>>),
-///     Lit(PhantomData<S>),
-/// }
+/// #[derive(Ast)] pub enum Type<S> { .. }
+/// #[derive(Ast)] pub enum Expr<S> { Typed(Box<Type<S>>), .. }
+/// #[derive(Ast)] pub enum Stmt<S> { E(Box<Expr<S>>), .. }
+///
+/// pub mod base { syan::visit::visitor!(super::Type, super::Expr); }
+/// pub mod ext  { syan::visit::visitor!(super::base => super::Stmt); }
 /// ```
 ///
-/// `#[skip]` takes the field out of the walk whatever its type, and is an error together with
-/// `#[seq]`/`#[opt]`.
+/// `base::Visit` is a supertrait of `ext::Visit`. So your visitor implements both traits, and has
+/// methods for all three types:
 ///
-/// A head is matched by its **last path segment**, so a field written `other::Node` is not taken for
-/// a visited `crate::ast::Node` — but a field written bare, `Node`, is. Where that is ambiguous, give
-/// the owning node a `#[subast(..)]` entry: it names the type outright and wins over the match.
+/// ```ignore
+/// impl<S> base::Visit<S> for Counter {
+///     fn visit_expr(&mut self, i: &Expr<S>) { self.exprs += 1; base::visit_expr(self, i); }
+/// }
+/// impl<S> ext::Visit<S> for Counter {
+///     fn visit_stmt(&mut self, i: &Stmt<S>) { self.stmts += 1; ext::visit_stmt(self, i); }
+/// }
 ///
-/// Every listed type needs `#[derive(Ast)]`: the macro reads its shape from the metadata that
-/// derive emits. Generated names come from a type's last path segment, so two listed types ending
-/// in the same ident are rejected.
+/// stmt.visit(&mut counter);   // walks Stmt, then Expr, then Type
+/// ```
 ///
-/// A type may be listed in only one `visitor!` per crate: each listing gives it an inherent
-/// `visit`/`visit_mut`, so a second is `E0592: duplicate definitions`. To widen a visitor, extend it
-/// with `visitor!(base => More)` rather than writing a second one.
+/// A field holding one of the base's types needs no `#[subast(..)]` entry. `ext` asks the base for
+/// its list. Those nodes go to the base's `visit_*`, through the supertrait.
+///
+/// Chains can be as long as you like. `base => mid => new` works, and a visitor for `new`
+/// implements every trait in the chain. Closures still work at any depth. The new visitor can also
+/// have more generic parameters than its base.
+///
+/// There are two limits. First, you must be able to name the base module from where you add to it.
+/// Second, a type from the base gets no `#[seq]`/`#[opt]` view, because its `visit_*` method lives
+/// in the base, not here. Mark that field in the base's own `visitor!` instead, or drop the marker
+/// and let the walk take the elements one at a time.
+///
+/// # What you can pass to `visit()`
+///
+/// `node.visit(..)` takes anything that implements `IntoVisitor`. The macro implements it for five
+/// things:
+///
+/// * **a visitor** — any type that implements `Visit`, by value or by `&mut`.
+/// * **a closure** that takes `&T`, for one listed type `T`. The argument type picks which node it
+///   sees. It runs for every `T` in the tree.
+/// * **a tuple of 2 to 8 closures**. All of them run in one walk.
+/// * **a tuple of 2 to 8 visitors**. The same: each one sees every node.
+/// * **a `Box` around a visitor**, by value.
+///
+/// ```ignore
+/// node.visit(&mut pass);                          // a visitor
+/// node.visit(Box::new(pass));                     // boxed
+/// node.visit(|e: &Expr| exprs += 1);              // one closure
+/// node.visit((|e: &Expr| .., |t: &Type| ..));     // two closures, one walk
+/// node.visit(&mut (first, second));               // two visitors, one walk
+/// ```
+///
+/// A tuple must be all closures or all visitors. You cannot mix the two in one tuple. If you need
+/// both, call `visit` twice, or wrap the closure in a visitor of your own.
+///
+/// A type of your own becomes a visitor as soon as it forwards `Visit`, which takes one line. It
+/// then goes anywhere `Box` goes.
+///
+/// `visit_mut` takes the same five things through `IntoVisitorMut`. Its closures take `&mut T`.
+///
+/// # Rules
+///
+/// Every listed type needs `#[derive(Ast)]`. That derive writes the metadata this macro reads.
+///
+/// A type is known by the last segment of its path (see [`Ast`]). The generated names come from
+/// that segment too, so two listed types ending in the same name are rejected.
+///
+/// You can list a type in only one `visitor!` per crate. Each listing gives it its own
+/// `visit`/`visit_mut` method, so a second one is `E0592: duplicate definitions`. See
+/// [Extending a visitor](#extending-a-visitor).
 #[macro_export]
 macro_rules! visitor {
     ($($t:tt)*) => {
