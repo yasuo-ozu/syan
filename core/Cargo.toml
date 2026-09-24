@@ -34,3 +34,8 @@ serde_json = "1.0"
 default = ["proc_macro2"]
 proc_macro2 = ["dep:proc-macro2"]
 serde = ["dep:serde"]
+
+# Build the published docs with every feature on. `serde` is off by default, so without this its
+# impls — the whole point of the feature — would be missing from the page a reader lands on.
+[package.metadata.docs.rs]
+all-features = true
