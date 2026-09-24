@@ -144,6 +144,9 @@ pub(crate) enum LayerKind {
 pub(crate) enum Head {
     Path {
         head: Ident,
+        /// The path exactly as the field wrote it, so a caller can tell `super::other::Stmt` from the
+        /// visited `crate::ast::Stmt` — `peel` matches last segments, which alone cannot.
+        wrote: Path,
         /// The head segment's generic arguments as written in the field (`<S>` in `Expr<S>`), so a
         /// caller can rebuild the head type against its `#[subast]` path.
         args: syn::PathArguments,
@@ -194,6 +197,7 @@ pub(crate) fn peel(ty: &Type, user_types: &HashSet<String>) -> Option<Peeled> {
                     head: Head::Path {
                         head: seg.ident.clone(),
                         args: seg.arguments.clone(),
+                        wrote: tp.path.clone(),
                     },
                     shared_ref: false,
                 });
@@ -279,4 +283,86 @@ pub(crate) fn method_ident_m(head: &Ident, mutable: bool) -> Ident {
         &format!("visit_{}{}", to_snake(head), mt(mutable)),
         Span::call_site(),
     )
+}
+
+/// Whether the path a field *wrote* can denote the type at `visited` — i.e. it is a bare ident, or
+/// its segments are a suffix of the visited path's.
+///
+/// `peel` recognises a head by last segment alone, which is enough while `#[subast]` supplies the
+/// authoritative path. Resolving a head against the `visitor!(..)` set instead has no such anchor, so
+/// `super::other::Stmt` would be walked as `crate::ast::Stmt` — a real bug syan already has a
+/// regression test for. Declining here leaves such a field a leaf, which is what it was.
+///
+/// Conservative in one direction only: a path that names the visited type by a route this cannot see
+/// through (`super::ast::Stmt` from a sibling module) is declined too, and needs a `#[subast]` entry
+/// as it does today.
+pub(crate) fn path_may_denote(wrote: &Path, visited: &Path, owner: &Path) -> bool {
+    let w: Vec<String> = wrote.segments.iter().map(|s| s.ident.to_string()).collect();
+    let v: Vec<String> = visited
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect();
+    // A bare ident is the ordinary way to write the visited type, and a `use` could point it
+    // anywhere, so accept it. When it turns out to name something else, the generated `Walk` call
+    // fails at the field with "cannot be walked" — a type the visitor does not know has no impl.
+    if w.len() <= 1 {
+        return true;
+    }
+    // Otherwise resolve the spelling against the owning type's module and compare outright. This is
+    // what separates `super::ast::Node` (the visited type by a relative route — walk it) from
+    // `super::other::Stmt` (a different type whose last segment collides — leave it a leaf).
+    if let Some(abs) = absolutize(wrote, owner) {
+        let a: Vec<String> = abs.segments.iter().map(|s| s.ident.to_string()).collect();
+        return a == v;
+    }
+    // Unresolvable here (external crate, leading `::`): fall back to comparing spellings.
+    v.len() >= w.len() && v[v.len() - w.len()..] == w[..]
+}
+
+/// Resolve a field's written path against the module of the type that owns the field, so a relative
+/// spelling can be compared with an absolute one. `owner` is the owning type's own path, whose module
+/// is everything but its last segment.
+///
+/// `None` when the path cannot be resolved here — a leading `::`, or a root that is an external crate
+/// — in which case the caller falls back to comparing spellings.
+pub(crate) fn absolutize(wrote: &Path, owner: &Path) -> Option<Path> {
+    if wrote.leading_colon.is_some() {
+        return None;
+    }
+    let mut module: Vec<Ident> = owner.segments.iter().map(|s| s.ident.clone()).collect();
+    module.pop()?; // drop the type itself, leaving its module
+    let segs: Vec<Ident> = wrote.segments.iter().map(|s| s.ident.clone()).collect();
+    let first = segs.first()?;
+    let out: Vec<Ident> = if first == "crate" {
+        segs
+    } else if first == "self" {
+        module
+            .into_iter()
+            .chain(segs[1..].iter().cloned())
+            .collect()
+    } else if first == "super" {
+        let ups = segs.iter().take_while(|s| *s == "super").count();
+        if ups > module.len() {
+            return None;
+        }
+        module.truncate(module.len() - ups);
+        module
+            .into_iter()
+            .chain(segs[ups..].iter().cloned())
+            .collect()
+    } else {
+        return None; // an external-crate root — nothing here can resolve it
+    };
+    let mut segments = syn::punctuated::Punctuated::new();
+    for id in out {
+        segments.push(PathSegment {
+            ident: id,
+            arguments: PathArguments::None,
+        });
+    }
+    Some(Path {
+        leading_colon: None,
+        segments,
+    })
 }

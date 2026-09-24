@@ -32,16 +32,24 @@ pub(crate) fn sort_lifetimes_first(params: &mut [GenericParam]) {
     params.sort_by_key(|p| !matches!(p, GenericParam::Lifetime(_)));
 }
 
-/// The set of idents that count as user AST types when peeling a field of a type with the given
-/// `self_ident` and `#[subast]` entries: the type's own ident plus every `#[subast]` matchkey.
+/// The set of idents that count as user AST types when peeling a field: the type's own ident, every
+/// `#[subast]` matchkey, and every head this visitor can name — the types it lists plus the types it
+/// inherits.
+///
+/// `reachable` is what makes a field followed because its type is *visited*, rather than because the
+/// owning node repeated that fact. Without it, omitting a `#[subast]` entry for a visited type made
+/// the walk pass over the field in silence: no error, no warning, just a node that was never seen.
+/// `#[subast]` still earns its place for the unlisted intermediates, which only it can name.
 pub(crate) fn self_and_subast_keys(
     self_ident: Option<&Ident>,
     subast: &[SubEntry],
+    reachable: &HashSet<String>,
 ) -> HashSet<String> {
     let mut s: HashSet<String> = subast.iter().map(|e| e.key.to_string()).collect();
     if let Some(id) = self_ident {
         s.insert(id.to_string());
     }
+    s.extend(reachable.iter().cloned());
     s
 }
 

@@ -80,6 +80,13 @@ fn field_view(attrs: &[Attribute]) -> Option<Container> {
     }
 }
 
+/// Whether a field carries `#[skip]`: never followed, whatever its type. The only way to say "this
+/// reachable type must not be walked here" once a field is followed because its type is visited
+/// rather than because the node repeated that in `#[subast]`.
+fn field_skips(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("skip"))
+}
+
 /// The bare marker word (`"seq"`/`"opt"`) for a view kind, for diagnostics.
 fn marker_word(kind: &Container) -> &'static str {
     match kind {
@@ -101,7 +108,7 @@ fn abort_marker_not_visited(ty: &Type, kind: &Container, single: bool) -> ! {
     abort!(
         ty,
         "a `#[{}]` field's element type is not a visited type — mark only a field whose element is \
-         a {}container of a type both listed in `visitor!(..)` and reached via `#[subast]`",
+         a {}container of a type listed in `visitor!(..)`",
         marker,
         extra
     );
@@ -124,14 +131,20 @@ pub(crate) struct Lower<'a> {
     /// This module's `Walk` tag with its args (`__SyanWalkTag<S>`), for spelling the bound at a call
     /// site — the tag carries the union params so a node's impl can name params its own type omits.
     pub(crate) walk_tag_args: &'a TokenStream,
-    /// Heads this module generates `Walk` impls for (its `visitor!(..)` targets). An *inherited* head
-    /// is in `method_set` but not here: its type lives in the base module and this module has no path
-    /// to it, so such a field keeps the older container-loop lowering.
+    /// Heads this module generates `Walk` impls for directly (its `visitor!(..)` targets). An
+    /// *inherited* head is in `method_set` but not here — its impl is emitted separately, against the
+    /// path the base sent through `__syan_visited` (see `inherited_heads`).
     pub(crate) target_set: &'a HashSet<String>,
     /// Head types reached that are *inherited* — visited by a base module, so this module has no
     /// `Walk` impl for them. Recorded as `(dedup key, type tokens)` and emitted alongside the node
     /// impls, using the `#[subast]` path plus the arguments the field wrote.
     pub(crate) inherited_heads: &'a RefCell<Vec<(String, TokenStream, Ident)>>,
+    /// Every head this visitor can name — its own targets plus what it inherits — with the path to
+    /// name it by. Folded into each node's peel set so a field is followed because its type is
+    /// visited, not because the node repeated that in `#[subast]`, and consulted when a head has no
+    /// `#[subast]` entry to resolve it.
+    pub(crate) reachable: &'a HashMap<String, Path>,
+    pub(crate) reachable_keys: &'a HashSet<String>,
 }
 
 /// Whether `ty` is a `PhantomData<..>` — a field that mentions a type parameter while holding no
@@ -271,8 +284,9 @@ impl<'a> Lower<'a> {
                     let name = f.ident.clone().unwrap();
                     let bind = quote!(#name);
                     let view = field_view(&f.attrs);
+                    let skip = field_skips(&f.attrs);
                     if let Some(stmt) = self.lower_field(
-                        &f.ty, &bind, view, idx, subast, self_ident, path, depth, stack,
+                        &f.ty, &bind, view, skip, idx, subast, self_ident, path, depth, stack,
                     ) {
                         binds.push(quote!(#name));
                         stmts.push(stmt);
@@ -288,8 +302,9 @@ impl<'a> Lower<'a> {
                     let bind_id = Ident::new(&format!("__f{depth}_{idx}"), Span::call_site());
                     let bind = quote!(#bind_id);
                     let view = field_view(&f.attrs);
+                    let skip = field_skips(&f.attrs);
                     if let Some(stmt) = self.lower_field(
-                        &f.ty, &bind, view, idx, subast, self_ident, path, depth, stack,
+                        &f.ty, &bind, view, skip, idx, subast, self_ident, path, depth, stack,
                     ) {
                         pats.push(quote!(#bind_id));
                         stmts.push(stmt);
@@ -338,7 +353,8 @@ impl<'a> Lower<'a> {
             Some(g) => gparams(g),
             None => return,
         };
-        let head_types = self_and_subast_keys(item_ident(&def.def), &def.subast);
+        let head_types =
+            self_and_subast_keys(item_ident(&def.def), &def.subast, self.reachable_keys);
 
         // Walk argument and parameter lists together, both filtered to types: a lifetime argument
         // never fills a type parameter.
@@ -398,6 +414,7 @@ impl<'a> Lower<'a> {
         ty: &Type,
         binding: &TokenStream,
         view: Option<Container>,
+        skip: bool,
         idx: usize,
         subast: &[SubEntry],
         self_ident: Option<&Ident>,
@@ -405,7 +422,17 @@ impl<'a> Lower<'a> {
         depth: usize,
         stack: &mut Vec<String>,
     ) -> Option<TokenStream> {
-        let user_types = self_and_subast_keys(self_ident, subast);
+        if skip {
+            if let Some(kind) = view {
+                abort!(
+                    ty,
+                    "a field cannot be both `#[skip]` and `#[{}]`",
+                    marker_word(&kind)
+                );
+            }
+            return None;
+        }
+        let user_types = self_and_subast_keys(self_ident, subast, self.reachable_keys);
         let p = match peel(ty, &user_types) {
             Some(p) => p,
             // No followed head reachable ⇒ the field is a leaf. A `#[seq]`/`#[opt]` marker on such a
@@ -426,6 +453,10 @@ impl<'a> Lower<'a> {
         let acc = innermost_acc(&p.conts, binding);
         // The effective head type (real ident + path) when this is a followed `Head::Path`: self
         // (implicit) or a `#[subast]` entry (an aliased `Real as Aliased` dispatches to `visit_real`).
+        let p_head_wrote: Option<Path> = match &p.head {
+            Head::Path { wrote, .. } => Some(wrote.clone()),
+            Head::Tuple(_) => None,
+        };
         let resolved: Option<(Ident, Path)> = match &p.head {
             Head::Path { head: phead, .. } if Some(phead) == self_ident => {
                 Some((phead.clone(), path.clone()))
@@ -433,7 +464,20 @@ impl<'a> Lower<'a> {
             Head::Path { head: phead, .. } => subast
                 .iter()
                 .find(|e| &e.key == phead)
-                .map(|e| (last_ident(&e.path).clone(), e.path.clone())),
+                .map(|e| (last_ident(&e.path).clone(), e.path.clone()))
+                // No `#[subast]` entry, so the head is one this visitor already names: a type it
+                // lists, or one it inherits (whose path arrived through the base's `__syan_visited`).
+                // An entry would only have repeated what the visitor already said.
+                .or_else(|| {
+                    self.reachable.get(&phead.to_string()).and_then(|p| {
+                        // Only when the written path can actually denote it — see `path_may_denote`.
+                        let w = match &p_head_wrote {
+                            Some(w) => w,
+                            None => return None,
+                        };
+                        path_may_denote(w, p, path).then(|| (last_ident(p).clone(), p.clone()))
+                    })
+                }),
             Head::Tuple(_) => None,
         };
 
@@ -556,6 +600,7 @@ impl<'a> Lower<'a> {
                 elem,
                 &quote!(#ebind),
                 None,
+                false,
                 idx,
                 subast,
                 self_ident,

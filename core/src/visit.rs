@@ -10,6 +10,15 @@
 //!   `<T as ::syan::visit::Repeater<N>>::Type` regardless of which crate/module it expands in.
 //!
 
+/// Marks a type as an AST node and emits the metadata [`visitor!`] reads.
+///
+/// Attributes it understands:
+///
+/// | attribute | on | meaning |
+/// |---|---|---|
+/// | `#[subast(path, ..)]` | the type | types this node reaches that `visitor!(..)` does **not** list, so the walk can drill through them; a listed type needs no entry |
+/// | `#[seq]` / `#[opt]` | a field | edit the parent slot through a [`SeqView`]/[`OptView`] — `VisitMut` only, bare `Vec<T>`/`Option<T>` only |
+/// | `#[skip]` | a field | never follow this field, whatever its type; an error together with `#[seq]`/`#[opt]` |
 pub use syan_macro::Ast;
 
 /// Define a visitor over the given AST types, used *inside* an (otherwise empty) module:
@@ -170,6 +179,32 @@ pub use syan_macro::Ast;
 /// `Thru<(Skip, Here)>` — and the container impls in this module peel it one level at a time until a
 /// node's generated impl hands the node to its `visit_*` method. So `Box<T>` and `Vec<T>` generate
 /// the same code, and a leaf sharing a tuple with a node is simply `Skip`, needing no impl of its own.
+///
+/// # Which fields are followed
+///
+/// A field is followed when its type is one the visitor knows — a type listed in `visitor!(..)`, or
+/// inherited from a base. It does **not** also have to be repeated in the owning node's
+/// `#[subast(..)]`; that list is for the *unlisted* intermediates the walk drills through, which
+/// nothing else can name.
+///
+/// To stop a field being followed, mark it `#[skip]`:
+///
+/// ```ignore
+/// #[derive(Ast)]
+/// pub enum Expr<S> {
+///     // `&mut Box<Stmt<'_, S>>` is invariant, so a mut walk can never descend into a concrete
+///     // lifetime fill — say so here rather than leaving it to an error inside the macro.
+///     Stmt(#[skip] Box<Stmt<'static, S>>),
+///     Lit(PhantomData<S>),
+/// }
+/// ```
+///
+/// `#[skip]` takes the field out of the walk whatever its type, and is an error together with
+/// `#[seq]`/`#[opt]`.
+///
+/// A head is matched by its **last path segment**, so a field written `other::Node` is not taken for
+/// a visited `crate::ast::Node` — but a field written bare, `Node`, is. Where that is ambiguous, give
+/// the owning node a `#[subast(..)]` entry: it names the type outright and wins over the match.
 ///
 /// Every listed type needs `#[derive(Ast)]`: the macro reads its shape from the metadata that
 /// derive emits. Generated names come from a type's last path segment, so two listed types ending

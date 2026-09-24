@@ -105,7 +105,10 @@ mod recurse_nonroot_lifetime {
         #[derive(Ast)]
         #[subast()]
         pub enum Expr<S> {
-            Stmt(Box<Stmt<'static, S>>),
+            // `Expr<S>` has no `'a`, so this fill must be concrete — and `&mut Box<Stmt<'_, S>>` is
+            // invariant, so the mut walk cannot descend into it at any lifetime. `#[skip]` is the
+            // only way to say so; before Option A the empty `#[subast()]` said it by omission.
+            Stmt(#[skip] Box<Stmt<'static, S>>),
             Lit(PhantomData<S>),
         }
 

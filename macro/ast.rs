@@ -159,14 +159,15 @@ pub(crate) fn parse_subast(attrs: &[Attribute]) -> Vec<SubastEntry> {
 }
 
 /// Produce a cleaned copy of the input definition (attributes stripped, except the field-level
-/// `#[seq]`/`#[opt]` view markers which are preserved so `__visitor_build` sees them) so it can be
+/// `#[seq]`/`#[opt]`/`#[skip]` markers, preserved so `__visitor_build` sees them) so it can be
 /// embedded verbatim inside the metadata `macro_rules!` and re-parsed as a `syn::Item`.
 pub(crate) fn cleaned_definition(input: &DeriveInput) -> DeriveInput {
-    // Keep only the `#[seq]`/`#[opt]` field markers (the visitor reads them to dispatch a field through
-    // its `SeqView`/`OptView` edit method); drop everything else.
+    // Keep only the field markers the visitor reads: `#[seq]`/`#[opt]` dispatch a field through its
+    // `SeqView`/`OptView` edit method, `#[skip]` stops it being followed at all. Drop everything else.
     fn clean_field_attrs(f: &mut Field) {
-        f.attrs
-            .retain(|a| a.path().is_ident("seq") || a.path().is_ident("opt"));
+        f.attrs.retain(|a| {
+            a.path().is_ident("seq") || a.path().is_ident("opt") || a.path().is_ident("skip")
+        });
         f.vis = Visibility::Inherited;
     }
     let mut di = input.clone();

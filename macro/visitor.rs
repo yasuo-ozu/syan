@@ -1,6 +1,6 @@
 use crate::util::{
     angle, gargs, gparams, indicator, innermost_acc, item_generics, item_ident, method_ident_m, mt,
-    param_name, param_use, peel, to_snake, Container, Head, LayerKind,
+    param_name, param_use, path_may_denote, peel, to_snake, Container, Head, LayerKind,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
@@ -209,6 +209,29 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         .map(|p| (last_ident(p).to_string(), p))
         .collect();
     let visited: HashSet<String> = path_of.keys().cloned().collect();
+    // Inherited types, rewritten where the base recorded a path that does not mean the same thing here
+    // (see `needs_requalify`) — so a base and an extender at different nesting depths, or in different
+    // crates, still name the same type.
+    let inherited_paths: Vec<(String, Path)> = st
+        .inherited
+        .iter()
+        .map(|e| {
+            let p = match &st.base {
+                Some(b) if needs_requalify(&e.path, b) => requalify_ancestor(&e.path, b),
+                _ => e.path.clone(),
+            };
+            (e.key.to_string(), p)
+        })
+        .collect();
+    // Every head this visitor can name: its own targets plus what it inherits. Under this rule a field
+    // is followed because its type is *visited*, not because the owning node repeated that fact in
+    // `#[subast]`; `#[subast]` is left for the unlisted intermediates only it can name.
+    let reachable: HashMap<String, Path> = path_of
+        .iter()
+        .map(|(k, p)| (k.clone(), (*p).clone()))
+        .chain(inherited_paths.iter().cloned())
+        .collect();
+    let reachable_keys: HashSet<String> = reachable.keys().cloned().collect();
     // Heads that recurse via a `visit_*` method (visited here + inherited from a base); every other
     // followed head is an unlisted intermediate that gets drilled through inline.
     let method_set = st.method_set();
@@ -391,6 +414,8 @@ fn generate_module(st: &BuildInput) -> TokenStream {
         walk_tag_args: &walk_tag_args,
         target_set: &target_set,
         inherited_heads: &inherited_heads,
+        reachable: &reachable,
+        reachable_keys: &reachable_keys,
     };
     let lower = mk_lower(false);
     let lower_mut = mk_lower(true);
