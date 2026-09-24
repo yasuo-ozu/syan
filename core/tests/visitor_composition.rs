@@ -136,3 +136,48 @@ fn a_tuple_of_visitors_edits_in_place() {
     });
     assert_eq!(got, vec![3, 5, 7], "Double then Bump, per node");
 }
+
+// A `use path::to::visit::*;` must bring in the public API and nothing else. The closure adapters,
+// the driver and the module's walk tag are private to the generated module, so a glob cannot reach
+// them and cannot shadow a name of the caller's own. (`#[doc(hidden)]` alone would not do this — it
+// hides an item from rustdoc while leaving it importable.)
+mod glob_import {
+    use syan::visit::Ast;
+
+    #[derive(Ast)]
+    pub enum Node {
+        Leaf(i64),
+    }
+
+    pub mod v {
+        syan::visit::visitor!(super::Node);
+    }
+
+    use v::*;
+
+    // Same names as the generated machinery. These compile only because the glob does not import it.
+    pub struct Driver;
+    pub struct DriverMut;
+    pub struct NodeHook;
+    pub struct NodeHookMut;
+    pub struct __SyanWalkTag;
+    pub trait Hook {}
+    pub trait HookMut {}
+    pub trait IntoHook {}
+    pub trait IntoHookMut {}
+
+    #[test]
+    fn a_glob_import_brings_in_the_public_api_only() {
+        // `Visit` and the free fns did come through the glob, and still work.
+        struct Count(usize);
+        impl Visit for Count {
+            fn visit_node(&mut self, i: &Node) {
+                self.0 += 1;
+                visit_node(self, i);
+            }
+        }
+        let mut c = Count(0);
+        Node::Leaf(1).visit(&mut c);
+        assert_eq!(c.0, 1);
+    }
+}

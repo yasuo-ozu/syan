@@ -401,8 +401,11 @@ fn generate_module(st: &BuildInput) -> TokenStream {
 
 
 
-        #[doc = "Tag identifying this visitor module in `syan::visit::Walk` impls."]
-        pub struct #{walk_tag()} #{angle(&walk_tag_params(&m.g_params))} ( #{walk_tag_phantom(&m.g_params)} );
+        // This module's tag, the first parameter of every `Walk` impl it writes, so two visitors
+        // over the same node type do not collide. Private: nothing outside the module names it, and
+        // a `use path::to::visit::*;` should not pick it up.
+        #[doc(hidden)]
+        struct #{walk_tag()} #{angle(&walk_tag_params(&m.g_params))} ( #{walk_tag_phantom(&m.g_params)} );
 
         #(for imp in &intermediates) { #imp }
         #(for imp in &inherited) { #imp }

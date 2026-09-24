@@ -465,21 +465,23 @@ pub(crate) fn gen_side(
             fn #into_vis_fn(self) -> impl #visit_tr #g_use { self }
         }
 
-        // Closures: shallow Hook + single-pass Driver. Implementation detail of the closure
-        // adapters — a user names `IntoVisitor` (via `node.visit(..)`), never these.
+        // Closures: shallow Hook + single-pass Driver. These are the closure adapters' own
+        // machinery — a user names `IntoVisitor` (via `node.visit(..)`), never these. Kept private
+        // to the generated module so a `use path::to::visit::*;` cannot reach them: `#[doc(hidden)]`
+        // only hides an item from rustdoc, it still imports.
         #[doc(hidden)]
-        pub trait #hook_tr #g_def #uw {
+        trait #hook_tr #g_def #uw {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { let _ = i; }
             }
         }
         #[doc(hidden)]
-        pub trait #into_hook_tr< #(#g_params,)* #p_t > #uw {
+        trait #into_hook_tr< #(#g_params,)* #p_t > #uw {
             fn #into_hook_fn(self) -> impl #hook_tr #g_use;
         }
 
         #[doc(hidden)]
-        pub struct #driver<#p_h>(pub #p_h);
+        struct #driver<#p_h>(#p_h);
         impl< #(#g_params,)* #p_h: #hook_tr #g_use > #visit_tr #g_use for #driver<#p_h> #uw {
             #(for s in &sides) {
                 fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
@@ -498,7 +500,7 @@ pub(crate) fn gen_side(
 
         #(for s in &sides) {
             #[doc(hidden)]
-            pub struct #{&s.hook_struct}<#p_f>(pub #p_f);
+            struct #{&s.hook_struct}<#p_f>(#p_f);
             impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #{&s.ty} ) >
                 #hook_tr #g_use for #{&s.hook_struct}<#p_f> #uw
             {
