@@ -1,5 +1,44 @@
 use super::*;
 
+/// This visitor's targets and everything it inherits, keyed by last segment — rejecting two
+/// distinct types that answer to the same key.
+///
+/// A visitor names a type by the last segment of its path, so `a::Foo` and `b::Foo` are one name:
+/// one `visit_foo`, one hook, one entry here. [`check_last_segment_collisions`] catches a pair
+/// inside a single `visitor!(..)` list, and the `#[subast]` checks catch a pair meeting in one
+/// node, but neither looks along the *chain* — where one ancestor contributes each. Left alone the
+/// map silently keeps one of them, and the mismatch surfaces later as `multiple applicable items in
+/// scope` naming a method the user never wrote.
+fn merge_reachable(
+    own: impl Iterator<Item = (String, Path)>,
+    inherited: impl Iterator<Item = (String, Path)>,
+) -> HashMap<String, Path> {
+    let mut out: HashMap<String, Path> = HashMap::new();
+    for (key, path) in own {
+        out.insert(key, path);
+    }
+    for (key, path) in inherited {
+        if let Some(prev) = out.get(&key) {
+            if norm_path(prev) != norm_path(&path) {
+                // Reported at the entry in *this* `visitor!(..)`: the inherited one's span points
+                // into the ancestor that declared it, which is not where the fix goes.
+                abort!(
+                    prev,
+                    "two types in this visitor chain share the last segment `{}` (`{}` vs `{}`); \
+                     both would answer to `visit_{}` — give one a distinct final ident",
+                    key,
+                    norm_path(prev),
+                    norm_path(&path),
+                    to_snake(&Ident::new(&key, Span::call_site())),
+                );
+            }
+            continue;
+        }
+        out.insert(key, path);
+    }
+    out
+}
+
 /// Reject two visited types whose paths end in the same identifier.
 ///
 /// Every generated name (`visit_*`, `*Hook`, the inherent methods) derives from a visited type's
@@ -99,11 +138,10 @@ impl<'a> Model<'a> {
             };
             (e.key.to_string(), p)
         });
-        let reachable: HashMap<String, Path> = path_of
-            .iter()
-            .map(|(k, p)| (k.clone(), (*p).clone()))
-            .chain(inherited_paths)
-            .collect();
+        let reachable = merge_reachable(
+            path_of.iter().map(|(k, p)| (k.clone(), (*p).clone())),
+            inherited_paths,
+        );
         let reachable_keys: HashSet<String> = reachable.keys().cloned().collect();
         let method_set = st.method_set();
         let done_by_path: HashMap<String, &DoneType> =
