@@ -26,6 +26,7 @@ pub(crate) fn gen_side(
     // `for<T>` generic, so the closure machinery (`&mut V` blanket / `Driver`/`Hook`/`Chain`/
     // `IntoVisitor`) is omitted and the inherent `.visit()` takes `&mut impl Visit` directly.
     let struct_only = m.method_mode;
+    let sized_self = m.sized_self;
     let id = |s: &str| Ident::new(s, Span::call_site());
     let visit_tr = side.visit_trait();
     let into_vis_tr = side.ty("IntoVisitor");
@@ -185,8 +186,10 @@ pub(crate) fn gen_side(
                 .filter(|p| where_pred_param(p).is_some_and(|id| mp_names.contains(&id.to_string())))
                 .cloned()
                 .collect();
-            // Trait method: `where Self: Sized` (struct-only) + the method-param bounds.
-            let trait_where = if struct_only {
+            // Trait method: `where Self: Sized` (whenever the chain demands it) + the method-param
+            // bounds. An extender of a heterogeneous base needs it too: its own default body calls a
+            // free fn that is now sized, and the supertrait's methods are sized regardless.
+            let trait_where = if sized_self {
                 let mut preds: Vec<WherePredicate> = vec![parse_quote!(Self: ::core::marker::Sized)];
                 preds.extend(method_where.iter().cloned());
                 where_clause(&preds)
@@ -357,12 +360,19 @@ pub(crate) fn gen_side(
     // method forwards to the same place. One shape, three headers: `&mut V` and `Box<V>` forward to
     // their single delegate, a tuple to each element in turn, and the container-edit views ride along
     // with the per-node methods.
+    // Emitted in heterogeneous mode too. Only the *closure* machinery is impossible there (a closure
+    // cannot be `for<T>` generic); forwarding is not — the per-method generics and the method's own
+    // `where` ride along, and every wrapper is `Sized`, which is all `where Self: Sized` asks. Without
+    // these a visitor in that mode cannot be passed by `&mut`, boxed or tupled, and — because the
+    // forwarding impls of an extending visitor need the base's — cannot be extended at all.
     let forwarding_impl = |header: TokenStream, delegates: Vec<(TokenStream, TokenStream)>| {
         quote! {
-            #(if !struct_only) {
-                #header #uw {
+            #header #uw {
                     #(for s in &sides) {
-                        fn #{&s.method}(&mut self, i: #amp #{&s.ty}) {
+                        fn #{&s.method}< #(for gp in &s.method_params) { #gp, } >(
+                            &mut self,
+                            i: #amp #{&s.ty},
+                        ) #{&s.trait_where} {
                             #(for (v, recv) in &delegates) {
                                 <#v as #visit_tr #g_use>::#{&s.method}(#recv, i);
                             }
@@ -374,7 +384,6 @@ pub(crate) fn gen_side(
                                 }
                             }
                         }
-                    }
                 }
             }
         }
@@ -391,7 +400,9 @@ pub(crate) fn gen_side(
     // impls below, since this crate is upstream of the generated module and could later implement that
     // trait for a tuple.
     let boxed_visitor_impl = forwarding_impl(
-        quote!( impl< #(#g_params,)* #p_v: #visit_tr #g_use + ?Sized > #visit_tr #g_use for ::std::boxed::Box<#p_v> ),
+        // `?Sized` only where the methods allow it: in heterogeneous mode each carries
+        // `where Self: Sized`, so forwarding to the inner visitor needs it sized.
+        quote!( impl< #(#g_params,)* #p_v: #visit_tr #g_use #(if !sized_self) { + ?Sized } > #visit_tr #g_use for ::std::boxed::Box<#p_v> ),
         vec![(quote!(#p_v), quote!(&mut **self))],
     );
 
@@ -427,7 +438,7 @@ pub(crate) fn gen_side(
         .iter()
         .map(|s| {
             quote! {
-                impl< #(for gp in &s.free_params) { #gp, } #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >
+                impl< #(for gp in &s.free_params) { #gp, } #p_v: #visit_tr #g_use #(if !sized_self) { + ?Sized } >
                     ::syan::visit::#walk_tr< #tag #tag_args, ::syan::visit::indicator::Here, #p_v >
                     for #{&s.ty} #{&s.free_where}
                 {
@@ -445,7 +456,7 @@ pub(crate) fn gen_side(
             // `visit_*` (which requires `Self: Sized`). `free_params` = trait params ∪ this type's
             // non-shared params, lifetimes-first.
             #[doc = #{&s.fdoc}]
-            pub fn #{&s.method}< #(for gp in &s.free_params) { #gp, } #p_v: #visit_tr #g_use #(if !struct_only) { + ?Sized } >(
+            pub fn #{&s.method}< #(for gp in &s.free_params) { #gp, } #p_v: #visit_tr #g_use #(if !sized_self) { + ?Sized } >(
                 this: &mut #p_v,
                 i: #amp #{&s.ty},
             ) #{&s.free_where} {

@@ -191,7 +191,7 @@ fn intermediate_impls(
                 let body = lowers[side.index()].destructure(node, &quote!(self), 0, &mut stack);
                 let (tr, f, recv) = (side.walk_trait(), side.walk_fn(), side.recv());
                 quote! {
-                    impl< #(#params,)* __SyanW: #{side.visit_trait()} #g_use + ?Sized >
+                    impl< #(#params,)* __SyanW: #{side.visit_trait()} #g_use #(if !m.sized_self) { + ?Sized } >
                         ::syan::visit::#tr< #tag #targs, ::syan::visit::indicator::Here, __SyanW >
                         for #path #own_use #where_cl
                     {
@@ -232,7 +232,7 @@ fn inherited_impls(
                 );
                 let m_name = side.method(id);
                 quote! {
-                    impl< #(#g_params,)* __SyanW: #vt #g_use + ?Sized >
+                    impl< #(#g_params,)* __SyanW: #vt #g_use #(if !m.sized_self) { + ?Sized } >
                         ::syan::visit::#tr< #tag #targs, ::syan::visit::indicator::Here, __SyanW > for #ty #uw
                     {
                         fn #f(#recv, v: &mut __SyanW) {
@@ -386,7 +386,7 @@ fn generate_module(st: &BuildInput) -> TokenStream {
     // Every visitor module exports its full visited-type set (idents), its generic-param union
     // (`@bg`), and its full ancestor chain (`@an`) so another visitor can inherit it (transitively).
     let anc_export = emit_ancestors(&m.chain);
-    let visited_macro = emit_visited_macro(st, &m.g_params, anc_export);
+    let visited_macro = emit_visited_macro(st, &m.g_params, anc_export, m.sized_self);
 
     // Items are emitted directly into the enclosing module (where `visitor!(...)` was invoked).
     quote! {
