@@ -28,6 +28,11 @@ pub(crate) struct BuildInput {
     /// visitor can emit the empty `Driver` impl for every transitive supertrait, not just the direct
     /// base.
     pub(crate) base_ancestors: Vec<AncIn>,
+    /// Whether the base's `visit_*` methods require `Self: Sized` — true in heterogeneous mode,
+    /// where a type's non-shared parameters become method generics. It travels because an extender
+    /// has to match it: its own forwarding impls must satisfy the base's as a supertrait, and a
+    /// `?Sized` visitor cannot.
+    pub(crate) base_sized_self: bool,
     /// Path of the type whose `@ast`/`@subast` trail in this bounce (so the fetched def is recorded
     /// under the path it was fetched by). Empty before any type is fetched.
     pub(crate) fetching: Option<Path>,
@@ -125,6 +130,7 @@ pub(crate) fn emit_visited_macro(
     st: &BuildInput,
     g_params: &[GenericParam],
     anc_export: TokenStream,
+    sized_self: bool,
 ) -> TokenStream {
     let all_visible: Vec<TokenStream> = st
         .visited
@@ -149,6 +155,7 @@ pub(crate) fn emit_visited_macro(
             (@visited $cb:path { $($pre:tt)* }) => {
                 $cb ! {
                     $($pre)* @inh { #(#all_visible),* } @bg { #(#g_params),* } @an { #anc_export }
+                    @sz { #(if sized_self) { yes } }
                 }
             };
         }
@@ -307,6 +314,7 @@ impl Parse for BuildInput {
         let mut inherited = Vec::new();
         let mut base_generics = Vec::new();
         let mut base_ancestors = Vec::new();
+        let mut base_sized_self = false;
         let mut fetching = None;
         let mut done = Vec::new();
         let mut rest = Vec::new();
@@ -342,6 +350,7 @@ impl Parse for BuildInput {
                 }
                 // `@anc` is the carried ancestor chain; `@an` is appended by a base's macro.
                 "anc" | "an" => base_ancestors = parse_ancestors(content)?,
+                "sized" | "sz" => base_sized_self = !content.is_empty(),
                 "fetching" => {
                     if !content.is_empty() {
                         fetching = Some(syn::parse2(content)?);
@@ -366,6 +375,7 @@ impl Parse for BuildInput {
             inherited,
             base_generics,
             base_ancestors,
+            base_sized_self,
             fetching,
             done,
             rest,
@@ -400,6 +410,7 @@ pub(crate) fn state_tokens(
     inherited: &[SubEntry],
     base_generics: &[GenericParam],
     anc: &TokenStream, // emit_ancestors(&base_ancestors) or quote!()
+    sized_self: bool,
     fetching: &TokenStream,
     done: &TokenStream, // emit_done(&done) or quote!()
     rest: &[Path],
@@ -412,6 +423,7 @@ pub(crate) fn state_tokens(
         @inherited { #(for e in inherited), { #{&e.path} as #{&e.key} } }
         @baseg { #(#base_generics),* }
         @anc { #anc }
+        @sized { #(if sized_self) { yes } }
         @fetching { #fetching }
         @done { #done }
         @rest { #(#rest),* }
@@ -463,6 +475,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             inherited,
             base_generics,
             base_ancestors,
+            base_sized_self,
             done,
             rest,
             ..
@@ -478,6 +491,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             inherited,
             base_generics,
             &anc_ts,
+            *base_sized_self,
             &quote!(#next),
             &done_ts,
             rest,

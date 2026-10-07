@@ -65,6 +65,10 @@ pub(crate) struct Model<'a> {
     /// `where`-bound, so it cannot be a trait param. The `visit_*` methods take it as a generic
     /// instead, which also rules out closures (a closure is not `for<T>` generic).
     pub(crate) method_mode: bool,
+    /// Whether this visitor's `visit_*` methods require `Self: Sized` — its own heterogeneous mode,
+    /// or a base that is in one. A `?Sized` visitor cannot satisfy such a method, so the bound has
+    /// to travel down the chain.
+    pub(crate) sized_self: bool,
     /// The trait's generic params, and the four spellings of them every emitter needs.
     pub(crate) g_params: Vec<GenericParam>,
     pub(crate) g_args: Vec<TokenStream>,
@@ -242,7 +246,10 @@ impl<'a> Model<'a> {
         let g_def = angle(&g_params);
         let g_use = angle(&g_args);
 
+        let sized_self = method_mode || st.base_sized_self;
+
         Model {
+            sized_self,
             path_of,
             visited,
             reachable,
