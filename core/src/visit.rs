@@ -303,6 +303,18 @@ pub use syan_macro::Ast;
 /// implements every trait in the chain. Closures still work at any depth. The new visitor can also
 /// have more generic parameters than its base.
 ///
+/// A visitor can extend **several** others at once — list them before the `=>`:
+///
+/// ```ignore
+/// pub mod types { syan::visit::visitor!(super::Ty); }
+/// pub mod lits  { syan::visit::visitor!(super::Lit); }
+/// pub mod both  { syan::visit::visitor!(super::types, super::lits => super::Expr); }
+/// ```
+///
+/// Each one becomes a supertrait, so a visitor implements all of them, and each keeps its own
+/// generic arity. Bases that share an ancestor are fine: the shared trait is named once, so a
+/// diamond writes one impl, not two.
+///
 /// There are two limits. First, you must be able to name the base module from where you add to it.
 /// Second, a type from the base gets no `#[seq]`/`#[opt]` view, because its `visit_*` method lives
 /// in the base, not here. Mark that field in the base's own `visitor!` instead, or drop the marker

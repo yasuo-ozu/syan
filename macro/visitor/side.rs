@@ -16,8 +16,7 @@ pub(crate) fn gen_side(
         g_args,
         g_def,
         g_use,
-        base,
-        base_g_use,
+        bases,
         ancestors,
         ..
     } = m;
@@ -26,6 +25,14 @@ pub(crate) fn gen_side(
     // `for<T>` generic, so the closure machinery (`&mut V` blanket / `Driver`/`Hook`/`Chain`/
     // `IntoVisitor`) is omitted and the inherent `.visit()` takes `&mut impl Visit` directly.
     let struct_only = m.method_mode;
+    // One supertrait per base, each named with its own arity.
+    let base_bounds: Vec<TokenStream> = bases
+        .iter()
+        .map(|b| {
+            let (path, g_use) = (&b.path, &b.g_use);
+            quote!( #path::#{side.visit_trait()} #g_use )
+        })
+        .collect();
     let id = |s: &str| Ident::new(s, Span::call_site());
     let visit_tr = side.visit_trait();
     let into_vis_tr = side.ty("IntoVisitor");
@@ -330,7 +337,10 @@ pub(crate) fn gen_side(
 
     let trait_def = quote! {
         #[doc = #trait_doc]
-        pub trait #visit_tr #g_def #(if let Some(b) = base) { : #b::#visit_tr #base_g_use } #uw {
+        pub trait #visit_tr #g_def
+            #(if !base_bounds.is_empty()) { : #(#base_bounds)+* }
+            #uw
+        {
             #(for s in &sides) {
                 // In heterogeneous (struct-only) mode the method carries this type's non-shared params
                 // as generics, and `where Self: Sized` (the method-generic dispatch needs a sized Self).

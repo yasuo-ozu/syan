@@ -26,6 +26,9 @@ fn visitor_diagnostics() {
     // The same clash, but spread along an inheritance chain — one type per visitor, never meeting in
     // a single node or a single `visitor!(..)` list.
     t.compile_fail("tests/ui/chain_last_ident_collision.rs");
+    // The same clash contributed by two *sibling* bases, which only the visitor extending both can
+    // see — neither base knows the other exists.
+    t.compile_fail("tests/ui/sibling_base_ident_collision.rs");
     // A `#[seq]`/`#[opt]` field can't view an inherited (non-targeted) type — clean error, not E0599.
     t.compile_fail("tests/ui/visitor_edit_seq_inherited.rs");
     // Marker on a non-viewable / container-less / non-visited field → clean abort, not a cryptic trait error.

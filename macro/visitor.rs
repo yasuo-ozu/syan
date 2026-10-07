@@ -1,7 +1,7 @@
 use crate::util::{
     angle, for_each_field_type, gargs, gparams, indicator, innermost_acc, item_generics,
-    item_ident, param_name, param_use, path_may_denote, peel, to_snake, Container, Head, LayerKind,
-    Side,
+    item_ident, param_name, param_name_ident, param_use, path_may_denote, peel, to_snake,
+    Container, Head, LayerKind, Side,
 };
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
