@@ -456,6 +456,47 @@ pub(crate) fn gen_side(
         }
     };
 
+    // One hook trait per ancestor, because the `Driver` impl of an ancestor's `Visit` can only be
+    // quantified over *that* ancestor's parameters: a bound naming the full union there would leave
+    // the extra parameters unconstrained (E0207). Each carries the methods for the types that
+    // ancestor declares, so a closure over an inherited type has somewhere to land.
+    struct AncHook {
+        tr: Ident,
+        path: TokenStream,
+        g_params: Vec<GenericParam>,
+        g_use: TokenStream,
+        methods: Vec<(Ident, Ident, Ident, TokenStream)>,
+    }
+    let anc_hooks: Vec<AncHook> = ancestors
+        .iter()
+        .enumerate()
+        .map(|(i, a)| AncHook {
+            tr: side.ty(&format!("AncHook{i}")),
+            path: a.path.clone(),
+            g_params: a.g_params.clone(),
+            g_use: a.g_use.clone(),
+            methods: a
+                .declares
+                .iter()
+                .map(|d| {
+                    let path = m
+                        .reachable
+                        .get(&d.ident.to_string())
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            syn::parse2(quote!(#{&d.ident})).expect("ident is a path")
+                        });
+                    let args = &d.args;
+                    (
+                        side.func(&format!("hook_{}", to_snake(&d.ident))),
+                        side.ty(&format!("{}InhHook", d.ident)),
+                        side.method(&d.ident),
+                        quote!( #path #args ),
+                    )
+                })
+                .collect(),
+        })
+        .collect();
     let closure_machinery = quote! {
         #(if !struct_only) {
         pub trait #into_vis_tr< #(#g_params,)* #p_t > #uw {
@@ -469,8 +510,22 @@ pub(crate) fn gen_side(
         // machinery — a user names `IntoVisitor` (via `node.visit(..)`), never these. Kept private
         // to the generated module so a `use path::to::visit::*;` cannot reach them: `#[doc(hidden)]`
         // only hides an item from rustdoc, it still imports.
+        // The traits chain the way the visitors do: an ancestor's `Visit` has the next one up as a
+        // supertrait, so proving `Driver<H>` visits at one level needs `H` to answer every level
+        // above it too. Each ancestor's parameters are a subset of the ones below, so the bound is
+        // always nameable.
+        #(for (i, h) in anc_hooks.iter().enumerate()) {
+            #[doc(hidden)]
+            trait #{&h.tr}< #(for p in &h.g_params) { #p, } >
+                #(if let Some(up) = anc_hooks.get(i + 1)) { : #{&up.tr} #{&up.g_use} }
+            {
+                #(for (hook, _, _, ty) in &h.methods) {
+                    fn #hook(&mut self, i: #amp #ty) { let _ = i; }
+                }
+            }
+        }
         #[doc(hidden)]
-        trait #hook_tr #g_def #uw {
+        trait #hook_tr #g_def #(if let Some(h0) = anc_hooks.first()) { : #{&h0.tr} #{&h0.g_use} } #uw {
             #(for s in &sides) {
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) { let _ = i; }
             }
@@ -493,9 +548,66 @@ pub(crate) fn gen_side(
         // The new trait extends the base (transitively), so Driver must satisfy *every* ancestor
         // supertrait (via their defaults). Each empty impl is quantified over only that ancestor's
         // params (+ the wrapped hook) so a wider new-union param is not an unconstrained impl param.
-        #(for a in ancestors) {
-            impl< #(for p in &a.g_params) { #p, } #p_h >
-                #{&a.path}::#visit_tr #{&a.g_use} for #driver<#p_h> {}
+        #(for h in &anc_hooks) {
+            impl< #(for p in &h.g_params) { #p, } #p_h: #{&h.tr} #{&h.g_use} >
+                #{&h.path}::#visit_tr #{&h.g_use} for #driver<#p_h>
+            {
+                #(for (hook, _, method, ty) in &h.methods) {
+                    fn #method(&mut self, i: #amp #ty) {
+                        self.0.#hook(i);
+                        #{&h.path}::#method(self, i);
+                    }
+                }
+            }
+        }
+
+        // A hook carries one closure, so it answers one trait in the family and takes the defaults
+        // for the rest. Every one of them has to be answered all the same: `Driver<H>` is a visitor
+        // only once `H` satisfies this module's `Hook` *and* each ancestor's.
+        #(for s in &sides) {
+            #(for h in &anc_hooks) {
+                impl< #(for p in &h.g_params) { #p, } #p_f >
+                    #{&h.tr} #{&h.g_use} for #{&s.hook_struct}<#p_f> {}
+            }
+        }
+        #(for (hi, h) in anc_hooks.iter().enumerate()) {
+            #(for (hook, hook_struct, _, ty) in &h.methods) {
+                #[doc(hidden)]
+                struct #hook_struct<#p_f>(#p_f);
+                impl< #(for p in &h.g_params) { #p, } #p_f: ::core::ops::FnMut( #amp #ty ) >
+                    #{&h.tr} #{&h.g_use} for #hook_struct<#p_f>
+                {
+                    fn #hook(&mut self, i: #amp #ty) { (self.0)(i); }
+                }
+                // The bound is repeated here: `Hook` has the ancestor traits as supertraits, so
+                // this impl has to let the one that carries the closure be proven.
+                impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #ty ) >
+                    #hook_tr #g_use for #hook_struct<#p_f> #uw {}
+                // A trait below this one reaches it through the supertrait chain, so its impl
+                // has to carry the bound as well; its parameters are a superset, so naming the
+                // closure's argument there is fine. One above never reaches back down, and its
+                // parameters may not even cover the argument, so it stays bare.
+                #(for (oi, other) in anc_hooks.iter().enumerate()) {
+                    #(if oi < hi) {
+                        impl< #(for p in &other.g_params) { #p, } #p_f: ::core::ops::FnMut( #amp #ty ) >
+                            #{&other.tr} #{&other.g_use} for #hook_struct<#p_f> {}
+                    }
+                    #(if oi > hi) {
+                        impl< #(for p in &other.g_params) { #p, } #p_f >
+                            #{&other.tr} #{&other.g_use} for #hook_struct<#p_f> {}
+                    }
+                }
+                impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #ty ) >
+                    #into_hook_tr< #(#g_args,)* #ty > for #p_f #uw
+                {
+                    fn #into_hook_fn(self) -> impl #hook_tr #g_use { #hook_struct(self) }
+                }
+                impl< #(#g_params,)* #p_f: ::core::ops::FnMut( #amp #ty ) >
+                    #into_vis_tr< #(#g_args,)* #ty > for #p_f #uw
+                {
+                    fn #into_vis_fn(self) -> impl #visit_tr #g_use { #driver(#hook_struct(self)) }
+                }
+            }
         }
 
         #(for s in &sides) {
@@ -527,6 +639,18 @@ pub(crate) fn gen_side(
                 fn #{&s.hook}(&mut self, i: #amp #{&s.ty}) {
                     self.0.#{&s.hook}(i);
                     self.1.#{&s.hook}(i);
+                }
+            }
+        }
+        #(for h in &anc_hooks) {
+            impl< #(for p in &h.g_params) { #p, } #p_a: #{&h.tr} #{&h.g_use}, #p_b: #{&h.tr} #{&h.g_use} >
+                #{&h.tr} #{&h.g_use} for ( #p_a, #p_b )
+            {
+                #(for (hook, _, _, ty) in &h.methods) {
+                    fn #hook(&mut self, i: #amp #ty) {
+                        self.0.#hook(i);
+                        self.1.#hook(i);
+                    }
                 }
             }
         }

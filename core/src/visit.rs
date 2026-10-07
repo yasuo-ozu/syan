@@ -300,13 +300,75 @@ pub use syan_macro::Ast;
 /// its list. Those nodes go to the base's `visit_*`, through the supertrait.
 ///
 /// Chains can be as long as you like. `base => mid => new` works, and a visitor for `new`
-/// implements every trait in the chain. Closures still work at any depth. The new visitor can also
-/// have more generic parameters than its base.
+/// implements every trait in the chain. The new visitor can also have more generic parameters than
+/// its base.
 ///
-/// There are two limits. First, you must be able to name the base module from where you add to it.
-/// Second, a type from the base gets no `#[seq]`/`#[opt]` view, because its `visit_*` method lives
-/// in the base, not here. Mark that field in the base's own `visitor!` instead, or drop the marker
-/// and let the walk take the elements one at a time.
+/// A closure reaches an inherited type as readily as one of your own, so the short spelling keeps
+/// working however deep the chain is:
+///
+/// ```ignore
+/// item.visit(|t: &Type<()>| ..);   // `Type` belongs to `base`, three levels up
+/// ```
+///
+/// ## Writing the chain for free
+///
+/// Implementing every trait in the chain is the cost of inheriting, and most of those impls are
+/// empty: a pass that overrides only its own types still has to say so for each ancestor. The
+/// generated module writes them for you:
+///
+/// ```ignore
+/// top::impl_chain!(top; MyPass);          // every ancestor, empty
+/// impl<S> top::Visit<S> for MyPass {
+///     fn visit_item(&mut self, i: &Item<S>) { .. }
+/// }
+/// ```
+///
+/// Pass the module's own path as the first argument — the expansion names the ancestors relative to
+/// it.
+///
+/// To act on an inherited node, give the method to the macro. Writing an `impl` of your own
+/// alongside would be a second impl of the same trait (E0119), so it goes here instead, and lands
+/// in the impl of whichever ancestor declares it. Leave the argument's type off and the macro
+/// supplies it:
+///
+/// ```ignore
+/// top::impl_chain! { top; MyPass;
+///     fn visit_type(&mut self, i) { self.types += 1; base::visit_type(self, i); }
+/// }
+/// ```
+///
+/// You do not say which ancestor that is, or what parameters its trait takes. Spelling the
+/// signature out works too, if you would rather read it than infer it.
+///
+/// If you want an ancestor for yourself — a long body, or just ordinary tooling, since rustfmt does
+/// not reach inside a macro call — name the method with no body and write the impls as usual:
+///
+/// ```ignore
+/// top::impl_chain! { top; MyPass; fn visit_type; }
+/// impl<S> base::Visit<S> for MyPass { fn visit_type(&mut self, i: &Type<S>) { .. } }
+/// impl<S> base::VisitMut<S> for MyPass {}
+/// ```
+///
+/// A name no ancestor declares is rejected rather than ignored — a method of this visitor's *own*
+/// trait belongs in your `impl Visit`, not here.
+///
+/// On a visitor with no ancestors it expands to nothing, so code that generates visitors can call
+/// it without asking first.
+///
+/// ## Naming an ancestor you cannot reach
+///
+/// Each module re-exports its base as `__syan_base`, so the ancestor `n` links up is
+/// `base_module::__syan_base::..` repeated `n` times. That path goes through the chain rather than
+/// to the module itself, so it still resolves when the ancestor is private, or sits in a crate you
+/// do not depend on:
+///
+/// ```ignore
+/// impl<S> up::visit_mid::__syan_base::Visit<S> for MyPass { .. }   // `up::visit` is private
+/// ```
+///
+/// One limit remains: a type from the base gets no `#[seq]`/`#[opt]` view, because its `visit_*`
+/// method lives in the base, not here. Mark that field in the base's own `visitor!` instead, or
+/// drop the marker and let the walk take the elements one at a time.
 ///
 /// # What you can pass to `visit()`
 ///
@@ -314,8 +376,8 @@ pub use syan_macro::Ast;
 /// things:
 ///
 /// * **a visitor** — any type that implements `Visit`, by value or by `&mut`.
-/// * **a closure** that takes `&T`, for one listed type `T`. The argument type picks which node it
-///   sees. It runs for every `T` in the tree.
+/// * **a closure** that takes `&T`, for any type the visitor reaches — one it lists, or one it
+///   inherits. The argument type picks which node it sees. It runs for every `T` in the tree.
 /// * **a tuple of 2 to 8 closures**. All of them run in one walk.
 /// * **a tuple of 2 to 8 visitors**. The same: each one sees every node.
 /// * **a `Box` around a visitor**, by value.

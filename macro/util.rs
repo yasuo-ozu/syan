@@ -512,3 +512,21 @@ pub(crate) fn absolutize(wrote: &Path, owner: &Path) -> Option<Path> {
         segments,
     })
 }
+
+/// A generic parameter with its bounds and default removed — what a type alias takes, where a bound
+/// is ignored and linted (`type_alias_bounds`) rather than enforced.
+pub(crate) fn strip_bounds(mut p: GenericParam) -> GenericParam {
+    match &mut p {
+        GenericParam::Type(t) => {
+            t.bounds.clear();
+            t.colon_token = None;
+            t.default = None;
+        }
+        GenericParam::Lifetime(l) => {
+            l.bounds.clear();
+            l.colon_token = None;
+        }
+        GenericParam::Const(c) => c.default = None,
+    }
+    p
+}
