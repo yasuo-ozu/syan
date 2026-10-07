@@ -2,7 +2,7 @@ error: two types in this visitor chain share the last segment `Foo` (`crate::m2:
   --> tests/ui/chain_last_ident_collision.rs:11:49
    |
 11 | pub mod v2 { syan::visit::visitor!(crate::v1 => crate::m2::Foo); }
-   |                                                 ^^^^^^^^^^^^^^
+   |                                                 ^^^^^
 
 error[E0433]: failed to resolve: could not find `__syan_visited` in `v2`
   --> tests/ui/chain_last_ident_collision.rs:12:14

@@ -10,8 +10,16 @@ pub(crate) struct DoneType {
 // `__visitor_build`: receives accumulated state + the just-resolved definition, fetches the next type
 // or generates the module.
 
+/// One visitor being extended: its path and the generic params its trait carries. Kept per base
+/// rather than merged, because `base::Visit<..>` has to be spelled with *that* base's arity.
+pub(crate) struct BaseIn {
+    pub(crate) path: Path,
+    pub(crate) generics: Vec<GenericParam>,
+}
+
 pub(crate) struct BuildInput {
-    pub(crate) base: Option<Path>,
+    /// Every visitor this one extends, in the order written. Each becomes a supertrait.
+    pub(crate) bases: Vec<BaseIn>,
     pub(crate) build: Path,
     pub(crate) nonce: TokenStream,
     pub(crate) visited: Vec<Path>,
@@ -20,10 +28,10 @@ pub(crate) struct BuildInput {
     /// already knows. Requalified against the base path on arrival, so the paths stay resolvable
     /// through any number of generations.
     pub(crate) inherited: Vec<SubEntry>,
-    /// The base visitor's generic-param union (when inheriting), supplied by the base's
-    /// `__syan_visited` macro, so the new trait can reference `base::Visit<..>` with the *base's*
-    /// arity instead of the new union's.
-    pub(crate) base_generics: Vec<GenericParam>,
+    /// Bases whose metadata has not been asked for yet. The one being asked *now* travels as
+    /// `@bnow` and is consumed while parsing — a reply carries no name of its own, so it has to be
+    /// told which base it answers for — and so is not kept here.
+    pub(crate) base_fetch: Vec<Path>,
     /// The direct base's own transitive ancestors (for multi-level `base => mid => new`), so the new
     /// visitor can emit the empty `Driver` impl for every transitive supertrait, not just the direct
     /// base.
@@ -63,6 +71,36 @@ pub(crate) fn parse_section(input: ParseStream) -> Result<(Ident, TokenStream)> 
 pub(crate) struct AncIn {
     pub(crate) path: Path,
     pub(crate) names: Vec<Ident>,
+}
+
+/// `@bases { <path> { <params> } … }` — the bases whose metadata has already arrived.
+pub(crate) fn emit_bases(bases: &[BaseIn]) -> TokenStream {
+    let parts: Vec<TokenStream> = bases
+        .iter()
+        .map(|b| {
+            let (p, g) = (&b.path, &b.generics);
+            quote!( #p { #(#g),* } )
+        })
+        .collect();
+    quote!( #(#parts)* )
+}
+
+fn parse_bases(ts: TokenStream) -> Result<Vec<BaseIn>> {
+    let parser = |input: ParseStream| {
+        let mut out = Vec::new();
+        while !input.is_empty() {
+            let path: Path = input.parse()?;
+            let inner;
+            braced!(inner in input);
+            let generics = Punctuated::<GenericParam, Token![,]>::parse_terminated
+                .parse2(inner.parse()?)?
+                .into_iter()
+                .collect();
+            out.push(BaseIn { path, generics });
+        }
+        Ok(out)
+    };
+    parser.parse2(ts)
 }
 
 /// Parse `@anc { @a { @p {PATH} @n {name…} } … }`.
@@ -171,18 +209,16 @@ pub(crate) fn path_is_crate_local(p: &Path) -> bool {
     )
 }
 
-/// The host crate of a direct-base path: `Some(ident)` when it is rooted at an *external* crate
-/// (e.g. `syan_rust::inherit::mid`), `None` for same-crate roots (`crate`/`super`/`self`) or a
-/// leading-`::` absolute path. Gates the ancestor requalification (`requalify_ancestor`): a transitive
+/// The host crate of a direct-base path: `Some(ident)` when it is rooted at an *external* crate —
+/// `syan_rust::inherit::mid`, or `::syan_rust::inherit::mid`, which names the same crate and is
+/// equally external — and `None` for a same-crate root (`crate`/`super`/`self`).
+/// Gates the ancestor requalification (`requalify_ancestor`): a transitive
 /// ancestor an *upstream* intermediate recorded relative to its own crate must be rewritten into a
 /// path the *downstream* extender can resolve. (A `$crate` cannot do this: emitted by a proc-macro
 /// into a generated `macro_rules` body it resolves only for fetch/macro-invocation paths, **not** for
 /// the trait path re-emitted into the new `Driver`'s supertrait impl — so a cross-crate `base => mid
 /// => new` with an *upstream* `mid` needs this concrete requalification instead.)
 pub(crate) fn base_host_crate(base: &Path) -> Option<Ident> {
-    if base.leading_colon.is_some() {
-        return None;
-    }
     let first = base.segments.first()?;
     if !matches!(first.arguments, PathArguments::None) {
         return None;
@@ -300,12 +336,16 @@ fn parse_done_type(input: ParseStream) -> Result<DoneType> {
 
 impl Parse for BuildInput {
     fn parse(input: ParseStream) -> Result<Self> {
-        let mut base = None;
+        let mut fresh_inh: Vec<SubEntry> = Vec::new();
+        let mut fresh_bg: Vec<GenericParam> = Vec::new();
+        let mut fresh_an: Vec<AncIn> = Vec::new();
+        let mut base_fetch: Vec<Path> = Vec::new();
+        let mut base_now: Option<Path> = None;
+        let mut bases: Vec<BaseIn> = Vec::new();
         let mut build = None;
         let mut nonce = TokenStream::new();
         let mut visited = Vec::new();
         let mut inherited = Vec::new();
-        let mut base_generics = Vec::new();
         let mut base_ancestors = Vec::new();
         let mut fetching = None;
         let mut done = Vec::new();
@@ -316,11 +356,21 @@ impl Parse for BuildInput {
         while !input.is_empty() {
             let (name, content) = parse_section(input)?;
             match name.to_string().as_str() {
-                "base" => {
-                    if !content.is_empty() {
-                        base = Some(syn::parse2(content)?);
-                    }
+                "bfetch" => {
+                    base_fetch = Punctuated::<Path, Token![,]>::parse_terminated
+                        .parse2(content)?
+                        .into_iter()
+                        .collect();
                 }
+                "bnow" => {
+                    base_now = Punctuated::<Path, Token![,]>::parse_terminated
+                        .parse2(content)?
+                        .into_iter()
+                        .next();
+                }
+                // Each base's reply, attributed to `@bnow` and requalified on arrival so nothing
+                // downstream has to remember which base an entry came from.
+                "bases" => bases = parse_bases(content)?,
                 "build" => build = Some(syn::parse2(content)?),
                 "nonce" => nonce = content,
                 "visited" => {
@@ -329,19 +379,21 @@ impl Parse for BuildInput {
                         .into_iter()
                         .collect();
                 }
-                // `@inherited` is the carried set; `@inh` is appended by a base's visited-list macro.
-                "inherited" | "inh" => inherited.extend(parse_subentries(content)?),
-                // `@baseg` is the carried base generics; `@bg` is appended by a base's macro.
-                "baseg" | "bg" => {
+                // `@inherited`/`@anc` are the carried, already-requalified state; `@inh`/`@bg`/`@an`
+                // are what the base just asked answers with, and are folded in after the loop once
+                // `@bnow` says which base they belong to.
+                "inherited" => inherited.extend(parse_subentries(content)?),
+                "inh" => fresh_inh = parse_subentries(content)?,
+                "bg" => {
                     if !content.is_empty() {
-                        base_generics = Punctuated::<GenericParam, Token![,]>::parse_terminated
+                        fresh_bg = Punctuated::<GenericParam, Token![,]>::parse_terminated
                             .parse2(content)?
                             .into_iter()
                             .collect();
                     }
                 }
-                // `@anc` is the carried ancestor chain; `@an` is appended by a base's macro.
-                "anc" | "an" => base_ancestors = parse_ancestors(content)?,
+                "anc" => base_ancestors = parse_ancestors(content)?,
+                "an" => fresh_an = parse_ancestors(content)?,
                 "fetching" => {
                     if !content.is_empty() {
                         fetching = Some(syn::parse2(content)?);
@@ -358,13 +410,49 @@ impl Parse for BuildInput {
             }
         }
 
+        // Resolve the reply against the base that gave it, so the merged lists are absolute and
+        // nothing downstream has to remember which base an entry came from. A path that two bases
+        // both reach (a shared ancestor) is kept once.
+        if let Some(bn) = &base_now {
+            let fix = |p: &Path| {
+                if needs_requalify(p, bn) {
+                    requalify_ancestor(p, bn)
+                } else {
+                    p.clone()
+                }
+            };
+            let seen: HashSet<String> = inherited.iter().map(|e| norm_path(&e.path)).collect();
+            for e in fresh_inh {
+                let path = fix(&e.path);
+                if !seen.contains(&norm_path(&path)) {
+                    inherited.push(SubEntry { path, key: e.key });
+                }
+            }
+            let seen: HashSet<String> = base_ancestors.iter().map(|a| norm_path(&a.path)).collect();
+            for a in fresh_an {
+                let path = fix(&a.path);
+                if !seen.contains(&norm_path(&path)) {
+                    base_ancestors.push(AncIn {
+                        path,
+                        names: a.names,
+                    });
+                }
+            }
+            if !bases.iter().any(|b| norm_path(&b.path) == norm_path(bn)) {
+                bases.push(BaseIn {
+                    path: bn.clone(),
+                    generics: fresh_bg,
+                });
+            }
+        }
+
         Ok(BuildInput {
-            base,
+            bases,
+            base_fetch,
             build: build.ok_or_else(|| Error::new(Span::call_site(), "missing @build"))?,
             nonce,
             visited,
             inherited,
-            base_generics,
             base_ancestors,
             fetching,
             done,
@@ -386,6 +474,27 @@ fn parse_idents(ts: TokenStream) -> Result<Vec<Ident>> {
     parser.parse2(ts)
 }
 
+/// The accumulated state, ready for the next bounce: `fetching` names the type whose definition
+/// will trail it, `bnow` the base whose reply will.
+fn carry(st: &BuildInput, fetching: &TokenStream, bnow: &TokenStream) -> TokenStream {
+    state_tokens(
+        &emit_bases(&st.bases),
+        &{
+            let bf = &st.base_fetch;
+            quote!( #(#bf),* )
+        },
+        bnow,
+        &st.build,
+        &st.nonce,
+        &st.visited,
+        &st.inherited,
+        &emit_ancestors(&st.base_ancestors),
+        fetching,
+        &emit_done(&st.done),
+        &st.rest,
+    )
+}
+
 /// Serialize one `__visitor_build` ping-pong bounce's full state payload. Shared by `entry` (the
 /// first bounce — `inherited`/`base_generics`/`anc`/`done` are always empty, nothing fetched yet)
 /// and `build` (every later bounce, carrying the accumulated state). Content pieces that need
@@ -393,24 +502,26 @@ fn parse_idents(ts: TokenStream) -> Result<Vec<Ident>> {
 /// section-list assembler.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn state_tokens(
-    base: &TokenStream, // base_tokens(&base_path) or quote!()
+    bases: &TokenStream, // emit_bases(&bases)
+    bfetch: &TokenStream,
+    bnow: &TokenStream,
     build: &Path,
     nonce: &TokenStream,
     visited: &[Path],
     inherited: &[SubEntry],
-    base_generics: &[GenericParam],
     anc: &TokenStream, // emit_ancestors(&base_ancestors) or quote!()
     fetching: &TokenStream,
     done: &TokenStream, // emit_done(&done) or quote!()
     rest: &[Path],
 ) -> TokenStream {
     quote! {
-        @base { #base }
+        @bases { #bases }
+        @bfetch { #bfetch }
+        @bnow { #bnow }
         @build { #build }
         @nonce { #nonce }
         @visited { #(#visited),* }
         @inherited { #(for e in inherited), { #{&e.path} as #{&e.key} } }
-        @baseg { #(#base_generics),* }
         @anc { #anc }
         @fetching { #fetching }
         @done { #done }
@@ -453,35 +564,18 @@ pub fn build(input: TokenStream) -> TokenStream {
     }
     st.fetching = None;
 
+    // Ask the next base for its metadata before any type is fetched, so the inherited set is
+    // complete by the time a field is lowered against it.
+    if !st.base_fetch.is_empty() {
+        let next = st.base_fetch.remove(0);
+        let state = carry(&st, &quote!(), &quote!(#next));
+        return quote! { #next::__syan_visited ! { @visited #{&st.build} { #state } } };
+    }
+
     if !st.rest.is_empty() {
         let next = st.rest.remove(0);
-        let BuildInput {
-            base,
-            build,
-            nonce,
-            visited,
-            inherited,
-            base_generics,
-            base_ancestors,
-            done,
-            rest,
-            ..
-        } = &st;
-        let base_ts = base_tokens(base);
-        let done_ts = emit_done(done);
-        let anc_ts = emit_ancestors(base_ancestors);
-        let state = state_tokens(
-            &base_ts,
-            build,
-            nonce,
-            visited,
-            inherited,
-            base_generics,
-            &anc_ts,
-            &quote!(#next),
-            &done_ts,
-            rest,
-        );
+        let state = carry(&st, &quote!(#next), &quote!());
+        let build = &st.build;
         return quote! { #next ! { @ast #build { #state } } };
     }
 

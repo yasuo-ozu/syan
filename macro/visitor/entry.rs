@@ -3,7 +3,8 @@ use super::*;
 // `#[visitor([base =>] T, U, ...)]` attribute: kicks off the metadata ping-pong.
 
 pub(crate) struct VisitorArgs {
-    pub(crate) base: Option<Path>,
+    /// The visitors this one extends — every one of them a supertrait of the generated `Visit`.
+    pub(crate) bases: Vec<Path>,
     pub(crate) types: Vec<Path>,
 }
 
@@ -11,40 +12,30 @@ impl Parse for VisitorArgs {
     fn parse(input: ParseStream) -> Result<Self> {
         if input.is_empty() {
             return Ok(VisitorArgs {
-                base: None,
+                bases: Vec::new(),
                 types: Vec::new(),
             });
         }
-        let first: Path = input.parse()?;
-        let base = if input.peek(Token![=>]) {
-            input.parse::<Token![=>]>()?;
-            Some(first.clone())
-        } else {
-            None
-        };
-        let mut types = Vec::new();
-        if base.is_none() {
-            types.push(first);
-            if input.peek(Token![,]) {
-                input.parse::<Token![,]>()?;
-            }
+        // One comma-separated list, which `=>` turns into the bases: `a, b => T, U`. Without it the
+        // list was the visited types all along.
+        let head: Punctuated<Path, Token![,]> = Punctuated::parse_separated_nonempty(input)?;
+        if !input.peek(Token![=>]) {
+            return Ok(VisitorArgs {
+                bases: Vec::new(),
+                types: head.into_iter().collect(),
+            });
         }
-        let rest: Punctuated<Path, Token![,]> = Punctuated::parse_terminated(input)?;
-        types.extend(rest);
-        Ok(VisitorArgs { base, types })
+        input.parse::<Token![=>]>()?;
+        let types: Punctuated<Path, Token![,]> = Punctuated::parse_terminated(input)?;
+        Ok(VisitorArgs {
+            bases: head.into_iter().collect(),
+            types: types.into_iter().collect(),
+        })
     }
 }
 
 pub(crate) fn last_ident(path: &Path) -> &Ident {
     &path.segments.last().unwrap().ident
-}
-
-/// The `@base { .. }` token payload for a (maybe-present) inheritance base — its path, or empty.
-pub(crate) fn base_tokens(base: &Option<Path>) -> TokenStream {
-    match base {
-        Some(p) => quote!(#p),
-        None => quote!(),
-    }
 }
 
 /// Input to `__visitor_entry`: `@syan { <path> } [base =>] T, U, ...`.
@@ -86,14 +77,14 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
     // `@visited` carries the *full paths* as written, so the generated items name the visited types
     // in the caller's path context. `@fetching` is the path of the type whose def trails the next
     // bounce (so the fetched def is recorded under it).
-    let base_ts = base_tokens(&args.base);
-    let make_state = |fetching: TokenStream, rest: &[Path]| {
+    let make_state = |fetching: TokenStream, rest: &[Path], bfetch: &[Path], bnow: &[Path]| {
         state_tokens(
-            &base_ts,
+            &quote!(),
+            &quote!( #(#bfetch),* ),
+            &quote!( #(#bnow),* ),
             &build,
             &nonce,
             all_types,
-            &[],
             &[],
             &quote!(),
             &fetching,
@@ -102,20 +93,21 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
         )
     };
 
-    match &args.base {
-        // With a base: first fetch the base module's visited-type list, then fetch all types. No type
-        // is fetched yet, so `@fetching` is empty; the first `build` bounce pops `rest`.
-        Some(base) => {
-            let state = make_state(quote!(), all_types);
+    match args.bases.split_first() {
+        // With bases: fetch each one's visited-type list in turn, then all the types. `@bfetch` is
+        // what is left to ask and `@bnow` the one being asked, so its reply can be attributed to it.
+        // No type is fetched yet, so `@fetching` is empty; the first `build` bounce pops `rest`.
+        Some((first, more)) => {
+            let state = make_state(quote!(), all_types, more, std::slice::from_ref(first));
             quote! {
-                #base::__syan_visited ! { @visited #build { #state } }
+                #first::__syan_visited ! { @visited #build { #state } }
             }
         }
         // No base: pop the first type now (so `rest` carries the remainder), recording it under
         // `@fetching`.
         None => {
             let first = &args.types[0];
-            let state = make_state(quote!(#first), &args.types[1..]);
+            let state = make_state(quote!(#first), &args.types[1..], &[], &[]);
             quote! {
                 #first ! { @ast #build { #state } }
             }

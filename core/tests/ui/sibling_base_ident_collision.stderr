@@ -1,0 +1,7 @@
+error: two types in this visitor chain share the last segment `Foo` (`crate::m1::Foo` vs `crate::m2::Foo`); both would answer to `visit_foo` — give one a distinct final ident
+  --> tests/ui/sibling_base_ident_collision.rs:31:5
+   |
+31 |     syan::visit::visitor!(crate::v1, crate::v2 => crate::T);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_build` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)

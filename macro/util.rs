@@ -512,3 +512,8 @@ pub(crate) fn absolutize(wrote: &Path, owner: &Path) -> Option<Path> {
         segments,
     })
 }
+
+/// A generic parameter's name as an `Ident`.
+pub(crate) fn param_name_ident(p: &GenericParam) -> Ident {
+    Ident::new(&param_name(p), Span::call_site())
+}

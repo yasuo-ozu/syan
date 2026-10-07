@@ -6,9 +6,10 @@ use super::*;
 /// A visitor names a type by the last segment of its path, so `a::Foo` and `b::Foo` are one name:
 /// one `visit_foo`, one hook, one entry here. [`check_last_segment_collisions`] catches a pair
 /// inside a single `visitor!(..)` list, and the `#[subast]` checks catch a pair meeting in one
-/// node, but neither looks along the *chain* — where one ancestor contributes each. Left alone the
-/// map silently keeps one of them, and the mismatch surfaces later as `multiple applicable items in
-/// scope` naming a method the user never wrote.
+/// node, but neither looks at what this visitor *inherits* — where an ancestor contributes one, or,
+/// with several bases, each base contributes one and neither has ever seen the other. Left alone
+/// the map silently keeps one of them, and the mismatch surfaces later as `multiple applicable
+/// items in scope` naming a method the user never wrote.
 fn merge_reachable(
     own: impl Iterator<Item = (String, Path)>,
     inherited: impl Iterator<Item = (String, Path)>,
@@ -17,13 +18,20 @@ fn merge_reachable(
     for (key, path) in own {
         out.insert(key, path);
     }
+    let mine: HashSet<String> = out.keys().cloned().collect();
     for (key, path) in inherited {
         if let Some(prev) = out.get(&key) {
             if norm_path(prev) != norm_path(&path) {
-                // Reported at the entry in *this* `visitor!(..)`: the inherited one's span points
-                // into the ancestor that declared it, which is not where the fix goes.
+                // Point at this `visitor!(..)`: either the entry of its own that clashes, or — when
+                // both sides are inherited, which takes two bases — the invocation itself, since
+                // either inherited span lands in an ancestor rather than where the fix goes.
+                let at = if mine.contains(&key) {
+                    syn::spanned::Spanned::span(prev)
+                } else {
+                    Span::call_site()
+                };
                 abort!(
-                    prev,
+                    at,
                     "two types in this visitor chain share the last segment `{}` (`{}` vs `{}`); \
                      both would answer to `visit_{}` — give one a distinct final ident",
                     key,
@@ -109,10 +117,9 @@ pub(crate) struct Model<'a> {
     pub(crate) g_args: Vec<TokenStream>,
     pub(crate) g_def: TokenStream,
     pub(crate) g_use: TokenStream,
-    /// The visitor this one extends, if any — the supertrait of the generated `Visit`.
-    pub(crate) base: &'a Option<Path>,
-    /// The base's args named by the union's idents, for every `base::Visit<..>` reference.
-    pub(crate) base_g_use: TokenStream,
+    /// The visitors this one extends — each a supertrait of the generated `Visit`, spelled with its
+    /// own arity.
+    pub(crate) bases: Vec<Ancestor>,
     /// The transitive ancestor chain, direct base first — carried on so a further extender inherits
     /// resolvable ancestor paths too.
     pub(crate) chain: Vec<AncIn>,
@@ -128,16 +135,11 @@ impl<'a> Model<'a> {
             .map(|p| (last_ident(p).to_string(), p))
             .collect();
         let visited: HashSet<String> = path_of.keys().cloned().collect();
-        // Inherited types, rewritten where the base recorded a path that does not mean the same thing
-        // here (see `needs_requalify`) — so a base and an extender at different nesting depths, or in
-        // different crates, still name the same type.
-        let inherited_paths = st.inherited.iter().map(|e| {
-            let p = match &st.base {
-                Some(b) if needs_requalify(&e.path, b) => requalify_ancestor(&e.path, b),
-                _ => e.path.clone(),
-            };
-            (e.key.to_string(), p)
-        });
+        // Already resolved against the base that supplied them, when that base answered.
+        let inherited_paths = st
+            .inherited
+            .iter()
+            .map(|e| (e.key.to_string(), e.path.clone()));
         let reachable = merge_reachable(
             path_of.iter().map(|(k, p)| (k.clone(), (*p).clone())),
             inherited_paths,
@@ -164,7 +166,18 @@ impl<'a> Model<'a> {
         // the base's, when inheriting), so one visitor can span e.g. `Expr<S, Tokens>` and `BinOp<S>`;
         // each type is referenced with its own subset, and `base_g_use` names the base's args by the
         // union's idents for every `base::Visit<..>` reference.
-        let mut union_params = param_union(&targets, &st.base_generics);
+        // Every base's params are trait-level: the generated `Visit` names each `base::Visit<..>` as
+        // a supertrait, so it has to carry what each of them takes.
+        let base_generics: Vec<GenericParam> = {
+            let mut seen = HashSet::new();
+            st.bases
+                .iter()
+                .flat_map(|b| b.generics.iter())
+                .filter(|g| seen.insert(param_name(g)))
+                .cloned()
+                .collect()
+        };
+        let mut union_params = param_union(&targets, &base_generics);
         sort_lifetimes_first(&mut union_params);
 
         // Params shared by EVERY visited type (∪ the base's, which must stay trait-level to name
@@ -179,7 +192,7 @@ impl<'a> Model<'a> {
             })
             .reduce(|acc, own| acc.intersection(&own).cloned().collect())
             .unwrap_or_default();
-        shared_names.extend(st.base_generics.iter().map(param_name));
+        shared_names.extend(base_generics.iter().map(param_name));
 
         // A union param that some visited type does NOT declare. Such a param can stay a trait param
         // (the union) only while it's *unbounded* — a type lacking it is then harmlessly quantified
@@ -203,7 +216,7 @@ impl<'a> Model<'a> {
         // (above). Make non-shared params per-method generics and go struct-only (no closures — a
         // closure can't be `for<T>` generic). Gated to the no-inheritance case (a recurse/heterogeneous
         // base is out of scope) so the common union+closure path is untouched.
-        let method_mode = st.base.is_none()
+        let method_mode = st.bases.is_empty()
             && (has_concrete_fill(&targets, &shared_names) || has_bounded_unshared);
 
         // Trait params: the full union normally; only the shared subset in method-mode (non-shared
@@ -227,12 +240,27 @@ impl<'a> Model<'a> {
             .iter()
             .map(|p| (param_name(p), p.clone()))
             .collect();
-        let base_args: Vec<TokenStream> = st
-            .base_generics
+        // One `base::Visit<..>` spelling per base, each with that base's own arity.
+        let bases: Vec<Ancestor> = st
+            .bases
             .iter()
-            .map(|bp| by_name[&param_name(bp)].clone())
+            .map(|b| {
+                let path = &b.path;
+                Ancestor {
+                    path: quote!(#path),
+                    g_params: pick(
+                        &b.generics.iter().map(param_name_ident).collect::<Vec<_>>(),
+                        &by_name_param,
+                    ),
+                    g_use: angle(
+                        &b.generics
+                            .iter()
+                            .map(|bp| by_name[&param_name(bp)].clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                }
+            })
             .collect();
-        let base_g_use = angle(&base_args);
 
         // The full transitive ancestor chain (direct base first), so the new visitor's `Driver` can
         // satisfy *every* supertrait obligation — `mid::Visit: base::Visit` means a `mid => new`
@@ -240,30 +268,20 @@ impl<'a> Model<'a> {
         // params are a subset of the union (the base's `@bg` transitively carries its own ancestors'
         // params), looked up by name; each impl is quantified over exactly those params (+ the hook)
         // to avoid E0207.
-        let mut chain: Vec<AncIn> = Vec::new();
-        if let Some(b) = &st.base {
-            chain.push(AncIn {
-                path: b.clone(),
-                names: st
-                    .base_generics
-                    .iter()
-                    .map(|p| Ident::new(&param_name(p), Span::call_site()))
-                    .collect(),
-            });
-            // Requalify transitive ancestors that a `crate::`/`super::`/`self::`-relative *upstream*
-            // intermediate recorded, resolving them against the direct base's full path (no-op for
-            // same-crate / already-concrete chains). This also re-exports them concrete (the chain
-            // feeds `anc_export`), so a further extender inherits resolvable ancestor paths too.
-            let cross_crate = base_host_crate(b).is_some();
-            chain.extend(st.base_ancestors.iter().map(|a| AncIn {
-                path: if cross_crate {
-                    requalify_ancestor(&a.path, b)
-                } else {
-                    a.path.clone()
-                },
-                names: a.names.clone(),
-            }));
-        }
+        // Every base first, then everything they reach. Paths were resolved as each base answered,
+        // and a path two bases share is already deduplicated there, so a diamond yields one impl.
+        let mut chain: Vec<AncIn> = st
+            .bases
+            .iter()
+            .map(|b| AncIn {
+                path: b.path.clone(),
+                names: b.generics.iter().map(param_name_ident).collect(),
+            })
+            .collect();
+        chain.extend(st.base_ancestors.iter().map(|a| AncIn {
+            path: a.path.clone(),
+            names: a.names.clone(),
+        }));
         let ancestors: Vec<Ancestor> = chain
             .iter()
             .map(|a| {
@@ -295,8 +313,7 @@ impl<'a> Model<'a> {
             g_args,
             g_def,
             g_use,
-            base: &st.base,
-            base_g_use,
+            bases,
             chain,
             ancestors,
         }
