@@ -2,12 +2,9 @@ use proc_macro::TokenStream as TokenStream1;
 use proc_macro_error::proc_macro_error;
 use syn::*;
 
-mod ast;
 mod attribute;
 mod recurse;
 mod symbol;
-mod util;
-mod visitor;
 
 use crate::attribute::FindAttribute;
 
@@ -69,14 +66,6 @@ pub fn unparse(input: TokenStream1) -> TokenStream1 {
         &trait_path,
     )
     .into()
-}
-
-#[proc_macro_error]
-#[proc_macro_derive(Ast, attributes(syan, subast, seq, opt, skip))]
-pub fn ast_derive(input: TokenStream1) -> TokenStream1 {
-    let input: DeriveInput = parse_macro_input!(input);
-    let syan = input.attrs.get_syan();
-    ast::derive_ast(&input, random(), &syan).into()
 }
 
 /// Derive `Spanned` — compute the type's span by folding (`Span::migrate`) its fields' spans.
@@ -173,18 +162,4 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     recurse::recurse(attr, input, random())
-}
-
-#[proc_macro_error]
-#[doc(hidden)]
-#[proc_macro]
-pub fn __visitor_entry(input: TokenStream1) -> TokenStream1 {
-    visitor::entry(input.into(), random()).into()
-}
-
-#[proc_macro_error]
-#[doc(hidden)]
-#[proc_macro]
-pub fn __visitor_build(input: TokenStream1) -> TokenStream1 {
-    visitor::build(input.into()).into()
 }

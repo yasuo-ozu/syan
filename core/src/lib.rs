@@ -22,7 +22,14 @@ pub mod span;
 pub mod symbol;
 /// Generic tuple helpers used by the derives.
 pub mod tuple;
-pub mod visit;
+/// Walking a derived tree: the `Ast` derive and `visitor!`, re-exported from the [`ast`] crate.
+///
+/// A node's generated impls name `::ast` by default, so a grammar using `#[derive(Ast)]`
+/// depends on that crate directly; `#[ast(::syan)]` on the type points them here instead.
+/// `visitor!` needs neither, since it reaches the crate through the macro's own `$crate`.
+pub use ast::visit;
+
+mod visit_impls;
 
 #[doc(hidden)]
 pub mod _imp {

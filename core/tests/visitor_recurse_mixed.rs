@@ -252,7 +252,7 @@ mod drill {
         syan::visit::visitor!(crate::drill::ast::Decl, crate::drill::ast::Type);
     }
 
-    use ast::{Cast, Decl, Expr, Type};
+    use self::ast::{Cast, Decl, Expr, Type};
 
     fn assert_is_ast<T: Ast>() {}
 

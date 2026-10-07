@@ -1,4 +1,4 @@
-//! Transparent single-slot wrappers descend as a [`Walk`](syan::visit::Walk).
+//! Transparent single-slot wrappers descend as a [`Walk`](syan::visit::walk::Walk).
 //!
 //! `Box` and `Attempt` ship with impls; a consumer's own wrapper joins with one `Walk`/`WalkMut` pair
 //! at `Thru<H>`, forwarding `H` to what it holds. Written per type rather than blanketed over a
@@ -12,18 +12,18 @@ mod ast {
     #[derive(Debug, Clone)]
     pub struct MyPtr<T>(pub Box<T>);
 
-    impl<M, H, V: ?Sized, T: syan::visit::Walk<M, H, V>>
-        syan::visit::Walk<M, syan::visit::indicator::Thru<H>, V> for MyPtr<T>
+    impl<M, H, V: ?Sized, T: syan::visit::walk::Walk<M, H, V>>
+        syan::visit::walk::Walk<M, syan::visit::walk::Thru<H>, V> for MyPtr<T>
     {
         fn walk(&self, v: &mut V) {
-            <T as syan::visit::Walk<M, H, V>>::walk(&self.0, v)
+            <T as syan::visit::walk::Walk<M, H, V>>::walk(&self.0, v)
         }
     }
-    impl<M, H, V: ?Sized, T: syan::visit::WalkMut<M, H, V>>
-        syan::visit::WalkMut<M, syan::visit::indicator::Thru<H>, V> for MyPtr<T>
+    impl<M, H, V: ?Sized, T: syan::visit::walk::WalkMut<M, H, V>>
+        syan::visit::walk::WalkMut<M, syan::visit::walk::Thru<H>, V> for MyPtr<T>
     {
         fn walk_mut(&mut self, v: &mut V) {
-            <T as syan::visit::WalkMut<M, H, V>>::walk_mut(&mut self.0, v)
+            <T as syan::visit::walk::WalkMut<M, H, V>>::walk_mut(&mut self.0, v)
         }
     }
 

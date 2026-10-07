@@ -22,9 +22,12 @@ newer-type = "0.1.1"
 proc-macro2 = { version = "1.0", optional = true }
 serde = { version = "1.0", optional = true, features = ["derive"] }
 syan-macro = { path = "../macro", version = "0.2.2" }
+ast = { path = "../../ast", version = "0.1.0" }
 decycle = "0.5.2"
 
 [dev-dependencies]
+# The derive names this crate in the code it emits, so a test crate needs it directly.
+ast = { path = "../../ast", version = "0.1.0" }
 template-quote = "0.4"
 type-macro-derive-tricks = "0.2"
 trybuild = { version = "1.0", features = ["diff"] }
