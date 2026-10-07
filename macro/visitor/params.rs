@@ -111,6 +111,8 @@ pub(crate) struct VType {
 /// A transitive supertrait obligation (an ancestor visitor), resolved against the new union: the
 /// ancestor's path, the union params it is parameterized by, and the matching use-side args.
 pub(crate) struct Ancestor {
+    /// See [`AncIn::declares`](super::build_input::AncIn::declares).
+    pub(crate) declares: Vec<Decl>,
     pub(crate) path: TokenStream,
     pub(crate) g_params: Vec<GenericParam>,
     pub(crate) g_use: TokenStream,

@@ -28,6 +28,9 @@ pub(crate) struct BuildInput {
     /// visitor can emit the empty `Driver` impl for every transitive supertrait, not just the direct
     /// base.
     pub(crate) base_ancestors: Vec<AncIn>,
+    /// The direct base's *own* targets, as opposed to what it inherited in turn — the `declares` set
+    /// for the first link of the chain, which `@anc` only carries for the links above it.
+    pub(crate) base_own: Vec<Decl>,
     /// Path of the type whose `@ast`/`@subast` trail in this bounce (so the fetched def is recorded
     /// under the path it was fetched by). Empty before any type is fetched.
     pub(crate) fetching: Option<Path>,
@@ -60,12 +63,62 @@ pub(crate) fn parse_section(input: ParseStream) -> Result<(Ident, TokenStream)> 
 
 /// One transitive-base obligation for multi-level inheritance: an ancestor visitor's path and the
 /// names of its generic params (re-mapped into the extending visitor's union when emitted).
+/// One type a visitor declares a `visit_*` method for, with the arguments that method's parameter
+/// is written with (`Expr` + `<S>`). The arguments are carried rather than recomputed because an
+/// extender knows an ancestor's parameters as a whole but not how each of its types divides them
+/// up, and an override's signature has to match the trait's exactly.
+#[derive(Clone)]
+pub(crate) struct Decl {
+    pub(crate) ident: Ident,
+    pub(crate) args: TokenStream,
+}
+
+impl Parse for Decl {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let ident: Ident = input.parse()?;
+        let args = if input.peek(Token![<]) {
+            let a: AngleBracketedGenericArguments = input.parse()?;
+            quote!(#a)
+        } else {
+            TokenStream::new()
+        };
+        Ok(Decl { ident, args })
+    }
+}
+
+fn parse_decls(ts: TokenStream) -> Result<Vec<Decl>> {
+    let parser = |input: ParseStream| {
+        let mut out = Vec::new();
+        while !input.is_empty() {
+            out.push(input.parse::<Decl>()?);
+        }
+        Ok(out)
+    };
+    parser.parse2(ts)
+}
+
+pub(crate) fn emit_decls(decls: &[Decl]) -> TokenStream {
+    let parts: Vec<TokenStream> = decls
+        .iter()
+        .map(|d| {
+            let (i, a) = (&d.ident, &d.args);
+            quote!(#i #a)
+        })
+        .collect();
+    quote!( #(#parts)* )
+}
+
 pub(crate) struct AncIn {
     pub(crate) path: Path,
     pub(crate) names: Vec<Ident>,
+    /// The types whose `visit_*` methods this ancestor *declares* — its own `visitor!` targets, not
+    /// what it in turn inherited. An override for one of them belongs in the impl of this
+    /// ancestor's trait and nowhere else, so the closure driver needs to know where each inherited
+    /// type's method lives.
+    pub(crate) declares: Vec<Decl>,
 }
 
-/// Parse `@anc { @a { @p {PATH} @n {name…} } … }`.
+/// Parse `@anc { @a { @p {PATH} @n {name…} @d {decl…} } … }`.
 fn parse_ancestors(ts: TokenStream) -> Result<Vec<AncIn>> {
     let parser = |input: ParseStream| {
         let mut out = Vec::new();
@@ -79,11 +132,13 @@ fn parse_ancestors(ts: TokenStream) -> Result<Vec<AncIn>> {
             braced!(content in input);
             let mut path = None;
             let mut names = Vec::new();
+            let mut declares = Vec::new();
             while !content.is_empty() {
                 let (name, inner) = parse_section(&content)?;
                 match name.to_string().as_str() {
                     "p" => path = Some(syn::parse2(inner)?),
                     "n" => names = parse_idents(inner)?,
+                    "d" => declares = parse_decls(inner)?,
                     other => {
                         return Err(Error::new(
                             name.span(),
@@ -92,9 +147,12 @@ fn parse_ancestors(ts: TokenStream) -> Result<Vec<AncIn>> {
                     }
                 }
             }
+            let path: Path =
+                path.ok_or_else(|| Error::new(Span::call_site(), "missing @p in @a"))?;
             out.push(AncIn {
-                path: path.ok_or_else(|| Error::new(Span::call_site(), "missing @p in @a"))?,
+                path,
                 names,
+                declares,
             });
         }
         Ok(out)
@@ -106,9 +164,9 @@ pub(crate) fn emit_ancestors(anc: &[AncIn]) -> TokenStream {
     let blocks: Vec<TokenStream> = anc
         .iter()
         .map(|a| {
-            let path = &a.path;
-            let names = &a.names;
-            quote! { @a { @p { #path } @n { #(#names)* } } }
+            let (path, names) = (&a.path, &a.names);
+            let declares = emit_decls(&a.declares);
+            quote! { @a { @p { #path } @n { #(#names)* } @d { #declares } } }
         })
         .collect();
     quote!( #(#blocks)* )
@@ -125,6 +183,7 @@ pub(crate) fn emit_visited_macro(
     st: &BuildInput,
     g_params: &[GenericParam],
     anc_export: TokenStream,
+    own: &[Decl],
 ) -> TokenStream {
     let all_visible: Vec<TokenStream> = st
         .visited
@@ -138,6 +197,7 @@ pub(crate) fn emit_visited_macro(
             quote!( #p as #k )
         }))
         .collect();
+    let own = emit_decls(own);
     let vmacro = Ident::new(&format!("__syan_visited_{}", st.nonce), Span::call_site());
     quote! {
         // The embedded visited-type / ancestor paths may be `crate::`-rooted by design (they resolve in
@@ -149,11 +209,219 @@ pub(crate) fn emit_visited_macro(
             (@visited $cb:path { $($pre:tt)* }) => {
                 $cb ! {
                     $($pre)* @inh { #(#all_visible),* } @bg { #(#g_params),* } @an { #anc_export }
+                    @own { #own }
                 }
             };
         }
         #[doc(hidden)]
         pub use #vmacro as __syan_visited;
+    }
+}
+
+/// `impl_chain!`, the hidden helper that writes the ancestor impls a visitor would otherwise have
+/// to spell out by hand.
+///
+/// The generated `Visit` has every ancestor's `Visit` as a supertrait, so a visitor type must
+/// implement all of them even when it only overrides methods of this visitor's own types. Each of
+/// those impls is usually empty — every method has a walking default — but Rust has no way to ask
+/// for them, and their generic arity differs per ancestor. This writes them:
+///
+/// ```ignore
+/// top::impl_chain!(top; MyPass);
+/// ```
+///
+/// To act on an inherited node, hand the method to the macro rather than writing an impl of your
+/// own, which would be a second impl of the same trait (E0119). The argument's type may be left
+/// off — the macro knows it, and that is the one thing a caller would otherwise have to look up:
+///
+/// ```ignore
+/// top::impl_chain! { top; MyPass;
+///     fn visit_type(&mut self, i) { self.types += 1; base::visit_type(self, i); }
+/// }
+/// ```
+///
+/// Spelling the type out works too, for a signature you want to read at a glance.
+///
+/// `fn <name>;` with no body hands that ancestor back: nothing is generated for it, and you write
+/// its impls yourself. That is the way out when a body wants ordinary tooling — rustfmt does not
+/// reach inside a macro call:
+///
+/// ```ignore
+/// top::impl_chain! { top; MyPass; fn visit_type; }
+/// impl<S> base::Visit<S> for MyPass { fn visit_type(&mut self, i: &Type<S>) { .. } }
+/// impl<S> base::VisitMut<S> for MyPass {}
+/// ```
+///
+/// Everything is keyed by **method name**, which is unique across a chain — two ancestor *modules*
+/// may share a last segment, so naming the ancestor would not be. One muncher per ancestor keeps
+/// the methods that are its own and drops the rest, accumulating the two sides and the hand-back
+/// markers separately; a last one rejects a name no ancestor declares, which would otherwise be
+/// dropped in silence.
+///
+/// The module path is repeated as an argument because the body cannot name the ancestors any other
+/// way: `$crate` here is *`syan`*, not the expanding crate — `visitor!` reaches the proc macro
+/// through a `macro_rules` wrapper in `syan::visit`, and `$crate` resolves against that definition.
+/// Taking the path instead makes the expansion position-independent: every ancestor is reached as
+/// `<module>::__syan_base…`, the relay chain, which needs no crate name and no re-rooting.
+///
+/// Emitted even with no ancestors (where it expands to nothing) so that code generating a visitor
+/// can call it unconditionally.
+pub(crate) fn emit_impl_chain(nonce: &TokenStream, ancestors: &[Ancestor]) -> TokenStream {
+    let name = Ident::new(&format!("__syan_impl_chain_{nonce}"), Span::call_site());
+    let check = Ident::new(&format!("__syan_anc_{nonce}_check"), Span::call_site());
+    let relay = Ident::new(BASE_RELAY, Span::call_site());
+    let per: Vec<Ident> = (0..ancestors.len())
+        .map(|i| Ident::new(&format!("__syan_anc_{nonce}_{i}"), Span::call_site()))
+        .collect();
+    // Re-exported beside `impl_chain`, under names without the nonce, so the body can reach them as
+    // `<module>::__syan_anc_0!`. A bare name would do for a caller in this crate — a `#[macro_export]`
+    // macro is in its own crate's textual scope — but not for one in another crate, and `$crate` here
+    // means `syan`. The module path the caller passes is the only spelling that works everywhere.
+    let per_pub: Vec<Ident> = (0..ancestors.len())
+        .map(|i| Ident::new(&format!("__syan_anc_{i}"), Span::call_site()))
+        .collect();
+    let check_pub = Ident::new("__syan_anc_check", Span::call_site());
+    // Per declared type: the two method names and the alias the argument's type is named by. The
+    // alias, not the type's own path, because the body is expanded in whatever crate invokes
+    // `impl_chain!` and a `crate::`-rooted path would resolve there.
+    let decl_parts = |a: &Ancestor, hops: &[&Ident]| -> Vec<(Ident, Ident, TokenStream)> {
+        a.declares
+            .iter()
+            .map(|d| {
+                let alias = Ident::new(&format!("__syan_ty_{}", d.ident), Span::call_site());
+                let args = &d.args;
+                (
+                    Side::SHARED.method(&d.ident),
+                    Side::MUT.method(&d.ident),
+                    quote!( $($vm)::+ #(:: #hops)* :: #alias #args ),
+                )
+            })
+            .collect()
+    };
+    let munchers: Vec<TokenStream> = ancestors
+        .iter()
+        .zip(&per)
+        .enumerate()
+        .map(|(i, (a, m))| {
+            let (g_params, g_use) = (&a.g_params, &a.g_use);
+            let me = &per_pub[i];
+            let hops = vec![&relay; i + 1];
+            let parts = decl_parts(a, &hops);
+            quote! {
+                #[macro_export]
+                #[doc(hidden)]
+                macro_rules! #m {
+                    #(for (sh, mt, ty) in &parts) {
+                        // Argument type left off: supply it.
+                        ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)*]
+                         $(#[$at:meta])* fn #sh (&mut $slf:ident, $i:ident) $b:block
+                         $($rest:tt)*) => {
+                            $($vm)::+ ::#me!($($vm)::+; $ty;
+                                [$($k)* $(#[$at])* fn #sh (&mut $slf, $i: & #ty) $b]
+                                [$($km)*] [$($s)*] $($rest)*);
+                        };
+                        ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)*]
+                         $(#[$at:meta])* fn #mt (&mut $slf:ident, $i:ident) $b:block
+                         $($rest:tt)*) => {
+                            $($vm)::+ ::#me!($($vm)::+; $ty; [$($k)*]
+                                [$($km)* $(#[$at])* fn #mt (&mut $slf, $i: &mut #ty) $b]
+                                [$($s)*] $($rest)*);
+                        };
+                        // Written out in full.
+                        ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)*]
+                         $(#[$at:meta])* fn #sh ($($sig:tt)*) $(-> $rt:ty)? $b:block $($rest:tt)*) => {
+                            $($vm)::+ ::#me!($($vm)::+; $ty;
+                                [$($k)* $(#[$at])* fn #sh ($($sig)*) $(-> $rt)? $b]
+                                [$($km)*] [$($s)*] $($rest)*);
+                        };
+                        ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)*]
+                         $(#[$at:meta])* fn #mt ($($sig:tt)*) $(-> $rt:ty)? $b:block $($rest:tt)*) => {
+                            $($vm)::+ ::#me!($($vm)::+; $ty; [$($k)*]
+                                [$($km)* $(#[$at])* fn #mt ($($sig)*) $(-> $rt)? $b]
+                                [$($s)*] $($rest)*);
+                        };
+                        // Handed back: this ancestor is the caller's to write.
+                        ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)*]
+                         fn #sh ; $($rest:tt)*) => {
+                            $($vm)::+ ::#me!($($vm)::+; $ty; [$($k)*] [$($km)*] [$($s)* mine]
+                                $($rest)*);
+                        };
+                        ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)*]
+                         fn #mt ; $($rest:tt)*) => {
+                            $($vm)::+ ::#me!($($vm)::+; $ty; [$($k)*] [$($km)*] [$($s)* mine]
+                                $($rest)*);
+                        };
+                    }
+                    // Someone else's.
+                    ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)*]
+                     $(#[$at:meta])* fn $other:ident ($($sig:tt)*) $(-> $rt:ty)? $b:block
+                     $($rest:tt)*) => {
+                        $($vm)::+ ::#me!($($vm)::+; $ty; [$($k)*] [$($km)*] [$($s)*] $($rest)*);
+                    };
+                    ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)*]
+                     fn $other:ident ; $($rest:tt)*) => {
+                        $($vm)::+ ::#me!($($vm)::+; $ty; [$($k)*] [$($km)*] [$($s)*] $($rest)*);
+                    };
+                    ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] []) => {
+                        impl< #(#g_params,)* > $($vm)::+ #(:: #hops)* ::Visit #g_use for $ty {
+                            $($k)*
+                        }
+                        impl< #(#g_params,)* > $($vm)::+ #(:: #hops)* ::VisitMut #g_use for $ty {
+                            $($km)*
+                        }
+                    };
+                    ($($vm:ident)::+; $ty:ty; [$($k:tt)*] [$($km:tt)*] [$($s:tt)+]) => {};
+                }
+            }
+        })
+        .collect();
+    let all: Vec<Ident> = ancestors
+        .iter()
+        .flat_map(|a| a.declares.iter())
+        .flat_map(|d| Side::both().map(|side| side.method(&d.ident)))
+        .collect();
+    quote! {
+        #(#munchers)*
+
+        // A method no ancestor declares would be dropped by every muncher and quietly do nothing.
+        #[macro_export]
+        #[doc(hidden)]
+        macro_rules! #check {
+            #(
+                ($($vm:ident)::+; $(#[$at:meta])* fn #all ($($sig:tt)*) $(-> $rt:ty)? $b:block
+                 $($rest:tt)*) => {
+                    $($vm)::+ ::#check_pub!($($vm)::+; $($rest)*);
+                };
+                ($($vm:ident)::+; fn #all ; $($rest:tt)*) => {
+                    $($vm)::+ ::#check_pub!($($vm)::+; $($rest)*);
+                };
+            )*
+            ($($vm:ident)::+; $(#[$at:meta])* fn $other:ident $($rest:tt)*) => {
+                ::core::compile_error!(::core::concat!(
+                    "`", ::core::stringify!($other),
+                    "` is not a method of any visitor this one extends; a method of its own trait                      belongs in your `impl Visit`, not in `impl_chain!`"
+                ));
+            };
+            ($($vm:ident)::+;) => {};
+        }
+
+        #[macro_export]
+        #[doc(hidden)]
+        macro_rules! #name {
+            ($($vm:ident)::+; $ty:ty) => { #name!($($vm)::+; $ty;); };
+            ($($vm:ident)::+; $ty:ty; $($body:tt)*) => {
+                $($vm)::+ ::#check_pub!($($vm)::+; $($body)*);
+                #( $($vm)::+ ::#per_pub!($($vm)::+; $ty; [] [] [] $($body)*); )*
+            };
+        }
+        #(
+            #[doc(hidden)]
+            pub use #per as #per_pub;
+        )*
+        #[doc(hidden)]
+        pub use #check as #check_pub;
+        #[doc(hidden)]
+        pub use #name as impl_chain;
     }
 }
 
@@ -193,6 +461,29 @@ pub(crate) fn base_host_crate(base: &Path) -> Option<Ident> {
     } else {
         Some(first.ident.clone())
     }
+}
+
+/// The name each visitor module re-exports its direct base under, so an ancestor is reachable
+/// through the chain rather than by its own path. A base module that is private, or that a
+/// downstream crate cannot otherwise name, is still reachable as `<base>::__syan_base`.
+pub(crate) const BASE_RELAY: &str = "__syan_base";
+
+/// The path to the ancestor `depth` links above `base`, walked through the `__syan_base` re-exports:
+/// `depth` 0 is `base` itself, 1 is its base, and so on.
+///
+/// This is what lets an ancestor chain cross a crate boundary without any path arithmetic: every
+/// link is named relative to the one below it, so no segment of it has to be nameable from the
+/// extending crate. (Contrast `requalify_ancestor`, which rewrites a recorded path and therefore
+/// needs every module on it to be public.)
+pub(crate) fn base_relay(base: &Path, depth: usize) -> Path {
+    let mut p = base.clone();
+    for _ in 0..depth {
+        p.segments.push(PathSegment {
+            ident: Ident::new(BASE_RELAY, Span::call_site()),
+            arguments: PathArguments::None,
+        });
+    }
+    p
 }
 
 /// Resolve a transitive ancestor path that an *upstream* intermediate recorded **relative to its own
@@ -307,6 +598,7 @@ impl Parse for BuildInput {
         let mut inherited = Vec::new();
         let mut base_generics = Vec::new();
         let mut base_ancestors = Vec::new();
+        let mut base_own = Vec::new();
         let mut fetching = None;
         let mut done = Vec::new();
         let mut rest = Vec::new();
@@ -342,6 +634,7 @@ impl Parse for BuildInput {
                 }
                 // `@anc` is the carried ancestor chain; `@an` is appended by a base's macro.
                 "anc" | "an" => base_ancestors = parse_ancestors(content)?,
+                "own" => base_own = parse_decls(content)?,
                 "fetching" => {
                     if !content.is_empty() {
                         fetching = Some(syn::parse2(content)?);
@@ -366,6 +659,7 @@ impl Parse for BuildInput {
             inherited,
             base_generics,
             base_ancestors,
+            base_own,
             fetching,
             done,
             rest,
@@ -400,6 +694,7 @@ pub(crate) fn state_tokens(
     inherited: &[SubEntry],
     base_generics: &[GenericParam],
     anc: &TokenStream, // emit_ancestors(&base_ancestors) or quote!()
+    own: &TokenStream,
     fetching: &TokenStream,
     done: &TokenStream, // emit_done(&done) or quote!()
     rest: &[Path],
@@ -412,6 +707,7 @@ pub(crate) fn state_tokens(
         @inherited { #(for e in inherited), { #{&e.path} as #{&e.key} } }
         @baseg { #(#base_generics),* }
         @anc { #anc }
+        @own { #own }
         @fetching { #fetching }
         @done { #done }
         @rest { #(#rest),* }
@@ -463,6 +759,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             inherited,
             base_generics,
             base_ancestors,
+            base_own,
             done,
             rest,
             ..
@@ -478,6 +775,7 @@ pub fn build(input: TokenStream) -> TokenStream {
             inherited,
             base_generics,
             &anc_ts,
+            &emit_decls(base_own),
             &quote!(#next),
             &done_ts,
             rest,

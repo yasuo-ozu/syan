@@ -243,6 +243,7 @@ impl<'a> Model<'a> {
         let mut chain: Vec<AncIn> = Vec::new();
         if let Some(b) = &st.base {
             chain.push(AncIn {
+                declares: st.base_own.clone(),
                 path: b.clone(),
                 names: st
                     .base_generics
@@ -250,18 +251,15 @@ impl<'a> Model<'a> {
                     .map(|p| Ident::new(&param_name(p), Span::call_site()))
                     .collect(),
             });
-            // Requalify transitive ancestors that a `crate::`/`super::`/`self::`-relative *upstream*
-            // intermediate recorded, resolving them against the direct base's full path (no-op for
-            // same-crate / already-concrete chains). This also re-exports them concrete (the chain
-            // feeds `anc_export`), so a further extender inherits resolvable ancestor paths too.
-            let cross_crate = base_host_crate(b).is_some();
-            chain.extend(st.base_ancestors.iter().map(|a| AncIn {
-                path: if cross_crate {
-                    requalify_ancestor(&a.path, b)
-                } else {
-                    a.path.clone()
-                },
+            // Name each transitive ancestor through the base's `__syan_base` re-export chain rather
+            // than by the path the upstream intermediate recorded. The recorded path has to be
+            // nameable from here, which a private or un-re-exported upstream module is not; a relay
+            // path only ever names the link below it, so the chain crosses a crate boundary (and a
+            // privacy boundary) on its own.
+            chain.extend(st.base_ancestors.iter().enumerate().map(|(i, a)| AncIn {
+                path: base_relay(b, i + 1),
                 names: a.names.clone(),
+                declares: a.declares.clone(),
             }));
         }
         let ancestors: Vec<Ancestor> = chain
@@ -269,6 +267,7 @@ impl<'a> Model<'a> {
             .map(|a| {
                 let path = &a.path;
                 Ancestor {
+                    declares: a.declares.clone(),
                     path: quote!(#path),
                     g_params: pick(&a.names, &by_name_param),
                     g_use: angle(&pick(&a.names, &by_name)),

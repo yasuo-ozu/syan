@@ -96,6 +96,7 @@ pub fn entry(input: TokenStream, nonce: u64) -> TokenStream {
             &[],
             &[],
             &quote!(),
+            &quote!(),
             &fetching,
             &quote!(),
             rest,
