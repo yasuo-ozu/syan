@@ -26,6 +26,18 @@ pub(crate) fn gen_side(
     // `for<T>` generic, so the closure machinery (`&mut V` blanket / `Driver`/`Hook`/`Chain`/
     // `IntoVisitor`) is omitted and the inherent `.visit()` takes `&mut impl Visit` directly.
     let struct_only = m.method_mode;
+    // The union predicates an ancestor impl can state: those about parameters that impl declares.
+    // The rest belong to parameters it does not have, where they would be unconstrained (E0207) —
+    // and they are not its to discharge anyway, since its trait never mentions them.
+    let ancestor_where = |a: &Ancestor| -> TokenStream {
+        let names: HashSet<String> = a.g_params.iter().map(param_name).collect();
+        let preds: Vec<WherePredicate> = union_where
+            .iter()
+            .filter(|p| where_pred_param(p).is_some_and(|id| names.contains(&id.to_string())))
+            .cloned()
+            .collect();
+        where_clause(&preds)
+    };
     let id = |s: &str| Ident::new(s, Span::call_site());
     let visit_tr = side.visit_trait();
     let into_vis_tr = side.ty("IntoVisitor");
@@ -492,10 +504,13 @@ pub(crate) fn gen_side(
         }
         // The new trait extends the base (transitively), so Driver must satisfy *every* ancestor
         // supertrait (via their defaults). Each empty impl is quantified over only that ancestor's
-        // params (+ the wrapped hook) so a wider new-union param is not an unconstrained impl param.
+        // params (+ the wrapped hook) so a wider new-union param is not an unconstrained impl param,
+        // and carries the union predicates those params can state — naming `base::Visit<S>` where the
+        // base keyed it on `S: Bound` asks for the bound here too.
         #(for a in ancestors) {
             impl< #(for p in &a.g_params) { #p, } #p_h >
-                #{&a.path}::#visit_tr #{&a.g_use} for #driver<#p_h> {}
+                #{&a.path}::#visit_tr #{&a.g_use} for #driver<#p_h>
+                #{ancestor_where(a)} {}
         }
 
         #(for s in &sides) {
