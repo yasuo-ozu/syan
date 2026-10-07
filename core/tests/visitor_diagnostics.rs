@@ -23,6 +23,9 @@ fn visitor_diagnostics() {
     // Two different paths ending in the same ident inside one definition: the head match is by last
     // segment, so they cannot be told apart.
     t.compile_fail("tests/ui/ambiguous_last_ident.rs");
+    // The same clash, but spread along an inheritance chain — one type per visitor, never meeting in
+    // a single node or a single `visitor!(..)` list.
+    t.compile_fail("tests/ui/chain_last_ident_collision.rs");
     // A `#[seq]`/`#[opt]` field can't view an inherited (non-targeted) type — clean error, not E0599.
     t.compile_fail("tests/ui/visitor_edit_seq_inherited.rs");
     // Marker on a non-viewable / container-less / non-visited field → clean abort, not a cryptic trait error.

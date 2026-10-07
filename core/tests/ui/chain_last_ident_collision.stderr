@@ -1,0 +1,13 @@
+error: two types in this visitor chain share the last segment `Foo` (`crate::m2::Foo` vs `crate::m1::Foo`); both would answer to `visit_foo` — give one a distinct final ident
+  --> tests/ui/chain_last_ident_collision.rs:11:49
+   |
+11 | pub mod v2 { syan::visit::visitor!(crate::v1 => crate::m2::Foo); }
+   |                                                 ^^^^^^^^^^^^^^
+
+error[E0433]: failed to resolve: could not find `__syan_visited` in `v2`
+  --> tests/ui/chain_last_ident_collision.rs:12:14
+   |
+12 | pub mod v3 { syan::visit::visitor!(crate::v2 => crate::Root); }
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ could not find `__syan_visited` in `v2`
+   |
+   = note: this error originates in the macro `$crate::_imp::syan_macro::__visitor_entry` which comes from the expansion of the macro `syan::visit::visitor` (in Nightly builds, run with -Z macro-backtrace for more info)
