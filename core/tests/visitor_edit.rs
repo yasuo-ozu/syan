@@ -1,7 +1,7 @@
 //! Structural-edit coverage for the container-view model: a field marked `#[seq]` / `#[opt]` gets a
 //! `visit_<t>_seq` / `visit_<t>_opt` method taking a `SeqView` / `OptView` of the owning collection,
 //! edited in place (no clone); an unmarked field gets no such method (just the in-place `visit_<t>_mut`).
-//! Covers `Vec`/`Option`, `view_iter_mut`/`retain_mut`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
+//! Covers `Vec`/`Option`, `&mut v[i]`/`retain_mut`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
 //! and a regression that a plain `visit_*_mut`-only visitor still mutates every element.
 #![allow(dead_code)]
 
@@ -89,7 +89,7 @@ mod plain_mut {
 // ── Vec + Option views on a plain struct: iter_mut / retain_mut / push / set / take ──────────────────────────
 mod views {
     use super::*;
-    use syan::visit::{Ast, OptView, SeqView};
+    use syan::visit::{Ast, OptEdit, SeqEdit};
 
     #[derive(Debug, Ast)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
@@ -109,16 +109,24 @@ mod views {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
-            for s in v.view_iter_mut() {
-                if s.0 == 2 {
-                    *s = Stmt(102, PhantomData);
+        fn visit_stmt_seq_mut<'a, V: SeqEdit<'a, Stmt<S>>>(&mut self, v: &'a mut V)
+        where
+            Stmt<S>: 'a,
+        {
+            // The view carries no borrow, so reading and editing mix freely in one body. Elements
+            // come through `SeqView`'s `IndexMut` supertrait.
+            for i in 0..v.len() {
+                if v[i].0 == 2 {
+                    v[i] = Stmt(102, PhantomData);
                 }
             }
             v.retain_mut(|s| s.0 != 0);
             v.push(Stmt(7, PhantomData));
         }
-        fn visit_stmt_opt_mut<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
+        fn visit_stmt_opt_mut<'a, O: OptEdit<'a, Stmt<S>>>(&mut self, v: &'a mut O)
+        where
+            Stmt<S>: 'a,
+        {
             match v.get().map(|s| s.0) {
                 Some(0) => v.clear(),
                 Some(2) => v.set(Stmt(102, PhantomData)),
@@ -215,7 +223,7 @@ mod views {
 mod rec {
     use super::*;
     use syan::parse::recurse;
-    use syan::visit::SeqView;
+    use syan::visit::SeqEdit;
 
     #[recurse]
     mod ast {
@@ -236,12 +244,15 @@ mod rec {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_expr_seq_mut<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
-            for e in v.view_iter_mut() {
-                match e {
+        fn visit_expr_seq_mut<'a, V: SeqEdit<'a, ast::Expr<S>>>(&mut self, v: &'a mut V)
+        where
+            ast::Expr<S>: 'a,
+        {
+            for i in 0..v.len() {
+                match &mut v[i] {
                     ast::Expr::Lit(0, _) => {} // dropped by retain below
-                    ast::Expr::Lit(2, _) => *e = ast::Expr::Lit(99, PhantomData),
-                    _ => v::visit_expr_mut(self, e), // descend nested `Many`
+                    e @ ast::Expr::Lit(2, _) => *e = ast::Expr::Lit(99, PhantomData),
+                    e => v::visit_expr_mut(self, e), // descend nested `Many`
                 }
             }
             v.retain_mut(|e| !matches!(e, ast::Expr::Lit(0, _)));
@@ -341,7 +352,7 @@ mod rec_opt {
 //    view methods — usage is collected through the drill walk. ────────────────────────────────────
 mod drill {
     use super::*;
-    use syan::visit::{Ast, OptView, SeqView};
+    use syan::visit::{Ast, OptEdit, SeqEdit};
 
     #[derive(Debug, Ast)]
     pub struct Leaf<S>(pub i64, pub PhantomData<S>);
@@ -369,10 +380,16 @@ mod drill {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_leaf_seq_mut<V: SeqView<Leaf<S>>>(&mut self, v: &mut V) {
+        fn visit_leaf_seq_mut<'a, V: SeqEdit<'a, Leaf<S>>>(&mut self, v: &'a mut V)
+        where
+            Leaf<S>: 'a,
+        {
             v.retain_mut(|l| l.0 != 0); // drop zeros from the drilled Vec
         }
-        fn visit_leaf_opt_mut<O: OptView<Leaf<S>>>(&mut self, v: &mut O) {
+        fn visit_leaf_opt_mut<'a, O: OptEdit<'a, Leaf<S>>>(&mut self, v: &'a mut O)
+        where
+            Leaf<S>: 'a,
+        {
             if matches!(v.get(), Some(l) if l.0 == 0) {
                 v.clear(); // drop a zero from the drilled Option
             }
@@ -409,7 +426,7 @@ mod drill {
 mod rec_cross {
     use super::*;
     use syan::parse::recurse;
-    use syan::visit::SeqView;
+    use syan::visit::SeqEdit;
 
     #[recurse]
     mod ast {
@@ -437,10 +454,13 @@ mod rec_cross {
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq_mut<V: SeqView<ast::Stmt<S>>>(&mut self, v: &mut V) {
-            for s in v.view_iter_mut() {
-                if !matches!(s, ast::Stmt::Nop(0, _)) {
-                    v::visit_stmt_mut(self, s); // descend (Stmt::Expr -> nested Block)
+        fn visit_stmt_seq_mut<'a, V: SeqEdit<'a, ast::Stmt<S>>>(&mut self, v: &'a mut V)
+        where
+            ast::Stmt<S>: 'a,
+        {
+            for i in 0..v.len() {
+                if !matches!(&v[i], ast::Stmt::Nop(0, _)) {
+                    v::visit_stmt_mut(self, &mut v[i]); // descend (Stmt::Expr -> nested Block)
                 }
             }
             v.retain_mut(|s| !matches!(s, ast::Stmt::Nop(0, _)));

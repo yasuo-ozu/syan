@@ -5,7 +5,7 @@
 //! advice has to be visitable. It was not: the group peeled to a wrapper level like any other, and
 //! nothing implemented the descent for it, so the whole node failed to compile.
 //!
-//! A group is descent-only. It holds exactly one `T`, so `SeqView`'s `push`/`remove` and `OptView`'s
+//! A group is descent-only. It holds exactly one `T`, so `SeqEdit`'s `push`/`remove` and `OptEdit`'s
 //! `take` have nothing to mean, and `#[seq]`/`#[opt]` on such a field stays an error — pinned by
 //! `tests/ui/visitor_edit_marker_boxed.rs`'s sibling case in `visitor_diagnostics`. The delimiters
 //! are punctuation tokens and are never visited.
