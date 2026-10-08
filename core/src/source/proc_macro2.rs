@@ -224,9 +224,8 @@ impl<T: Default + core::fmt::Display> Unparse<proc_macro2::TokenTree> for Symbol
 macro_rules! impl_for_group {
     ($($t0:ident $(:: $t:ident)*, $delim:path),* $(,)?) => {
         $(
-            // The `GroupShape` form, used by `#[derive(Parse)]` for a `#[group]` field: same
-            // single-`TokenTree::Group` consumption, but the content type is a METHOD generic, so
-            // the resulting obligation never mentions it.
+            // Consumes a single `TokenTree::Group`. The content type is a METHOD generic, so the
+            // obligation never mentions it; `Parse for Group<T, O, C>` routes through this too.
             impl GroupShape<proc_macro2::TokenTree> for $t0 $(::$t)*<(), Span> {
                 fn parse_group<Slot, __S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(
                     stream: &mut __S,
@@ -244,40 +243,6 @@ macro_rules! impl_for_group {
                                 slot: (),
                                 close: WithSpan { span: group.span_close().into(), slot: Default::default() },
                             }))
-                        }
-                        Some(token) => {
-                            let __span = crate::span::Spanned::span(&token);
-                            stream.push(token);
-                            Err(ParseError::group(__span))
-                        }
-                        None => Err(ParseError::eof(Span::default())),
-                    }
-                }
-            }
-
-            impl<T> Parse<proc_macro2::TokenTree> for $t0 $(::$t)*<T, Span>
-            where
-                T: Parse<proc_macro2::TokenTree>,
-                T::Error: Into<ParseError<Span>>,
-            {
-                type Error = ParseError<Span>;
-
-                fn parse_stream<__S: crate::parse::parse_stream::ParseStream<Atom = proc_macro2::TokenTree>>(stream: &mut __S) -> Result<Self, Self::Error> {
-                    match stream.next() {
-                        Some(proc_macro2::TokenTree::Group(group)) if group.delimiter() == $delim => {
-                            let mut inner_stream = Stream::new(group.stream());
-                            let slot = T::parse_stream(&mut inner_stream).map_err(Into::into)?;
-                            return Ok(Group {
-                                open: WithSpan {
-                                    span: group.span_open().into(),
-                                    slot: Default::default(),
-                                },
-                                slot,
-                                close: WithSpan {
-                                    span: group.span_close().into(),
-                                    slot: Default::default(),
-                                },
-                            });
                         }
                         Some(token) => {
                             let __span = crate::span::Spanned::span(&token);
