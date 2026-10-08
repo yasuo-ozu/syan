@@ -110,7 +110,7 @@ pub(crate) trait Adt {
     ) -> TokenStream {
         let (tp_atom, trait_fullpath, generic_params, ty_generics) =
             atom_impl_header(generics, trait_path);
-        proc_macro_error::append_dummy(quote! {
+        proc_macro_error3::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
                 type Error = ::core::convert::Infallible;
                 fn parse_stream<__SyanMacro_S: #syan::parse::parse_stream::ParseStream<Atom = #tp_atom>>(
@@ -254,7 +254,7 @@ pub(crate) trait Adt {
     ) -> TokenStream {
         let (tp_atom, trait_fullpath, generic_params, ty_generics) =
             atom_impl_header(generics, trait_path);
-        proc_macro_error::append_dummy(quote! {
+        proc_macro_error3::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
                 fn unparse<__Syan_Emitter: #syan::parse::unparse::Emitter<#tp_atom>>(&self, _: &mut __Syan_Emitter) -> ::core::result::Result<(), <__Syan_Emitter as #syan::parse::unparse::Emitter<#tp_atom>>::Error> {
                     ::core::unimplemented!()
@@ -374,7 +374,7 @@ pub(crate) trait Adt {
 
         add_spanned_param_predicates(&mut where_predicates, generics, syan, &tp_span);
         generic_params.push(parse_quote!(#tp_span: #syan::span::Span));
-        proc_macro_error::append_dummy(quote! {
+        proc_macro_error3::append_dummy(quote! {
             impl< #generic_params > #trait_fullpath for #ident #ty_generics {
                 type Span = #tp_span;
 
