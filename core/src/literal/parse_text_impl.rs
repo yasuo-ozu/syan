@@ -25,7 +25,7 @@ macro_rules! impl_integer_for_text_atom {
                 stream: &mut __S,
             ) -> Result<Self, Self::Error> {
                 let as_char: fn(&$slot) -> char = $as_char;
-                let span = stream.peek().map(|a| a.span.clone()).unwrap_or_default();
+                let span = stream.pos();
 
                 let mut value = String::new();
                 let mut taken = Vec::new();

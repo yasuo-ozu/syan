@@ -43,6 +43,15 @@ struct Many<S> {
     end: Option<Token![S => ;]>,
 }
 
+#[derive(Parse, Serialize, Deserialize)]
+#[serde(bound(serialize = "S: Serialize", deserialize = "S: Deserialize<'de>"))]
+struct Whole<S> {
+    items: Vec<Integer>,
+    eof: syan::nested::Eof,
+    #[serde(skip)]
+    _s: core::marker::PhantomData<S>,
+}
+
 /// Encode, decode, re-encode: equal encodings mean the value survived intact.
 fn roundtrip<T>(v: &T) -> (String, String)
 where
@@ -138,4 +147,22 @@ fn punctuated_has_a_stable_encoding() {
     let bad = format!(r#"{{"items":[{one}],"puncts":[{one},{one}]}}"#);
     let e = serde_json::from_str::<Punctuated<Integer, Integer>>(&bad).unwrap_err();
     assert!(e.to_string().contains("one fewer punct"), "{e}");
+}
+
+#[test]
+fn a_node_ending_in_eof_round_trips() {
+    // `Eof` is a marker: it carries nothing, so it encodes as a unit struct and reads back as
+    // itself. A grammar that ends with one still round-trips whole.
+    let w: Whole<Text> = Parse::parse("1 2 3").expect("parses to the end");
+    assert_eq!(w.items.len(), 3);
+    let (first, second) = roundtrip(&w);
+    assert_eq!(first, second);
+    let back: Whole<Text> = serde_json::from_str(&first).unwrap();
+    assert_eq!(back.items.len(), 3);
+    assert_eq!(back.eof, syan::nested::Eof);
+    assert_eq!(
+        serde_json::to_string(&w.eof).unwrap(),
+        "null",
+        "a marker encodes as unit"
+    );
 }

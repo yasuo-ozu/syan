@@ -94,6 +94,12 @@ impl<I: Iterator> Tape<I> {
         self.buf.len() + self.extra.len()
     }
 
+    /// The wrapped iterator. A source that tracks a cursor reads its position through this once
+    /// [`peek`](Self::peek) reports end of input.
+    pub fn source(&self) -> &I {
+        &self.iter
+    }
+
     /// Drop the served prefix once nothing can rewind onto it.
     fn release(&mut self) {
         if self.saves.is_empty() && self.pos > 0 {

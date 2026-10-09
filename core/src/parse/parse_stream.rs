@@ -1,6 +1,6 @@
 //! The [`ParseStream`] trait: the rewindable stream of atoms a parser reads from.
 
-use crate::span::{Span, Spanned};
+use crate::span::{Span, SpanOf, Spanned};
 
 /// The stream a parser reads from: pull atoms, look one ahead, and rewind.
 ///
@@ -47,6 +47,19 @@ pub trait ParseStream {
     /// to a parse failure. `Ok(())` for a source that cannot fail.
     fn get_error(&mut self) -> Result<(), Self::Error>;
 
+    /// Where the cursor is: the span of the next atom, or, at end of input, the position just past
+    /// the last atom served.
+    ///
+    /// The default answers with `Span::default()` at end of input, which is a position that exists
+    /// in no source; a stream that tracks its own cursor should override it so that a failure at end
+    /// of input still reports where the input ran out.
+    fn pos(&mut self) -> SpanOf<Self::Atom>
+    where
+        Self::Atom: Spanned,
+    {
+        self.peek().map(Spanned::span).unwrap_or_default()
+    }
+
     /// Skip the separator atoms if exists. Returns whether we skipped some separators.
     ///
     /// This function may or may not returns `true` with multiple calling.
@@ -64,9 +77,9 @@ pub trait ParseStream {
         Self: Sized,
         Self::Atom: Spanned<Span = S>,
     {
-        let first_peek = self.peek().map(|a| a.span()).unwrap_or_default();
+        let first_peek = self.pos();
         if self.skip_sep() == is_joint {
-            let last_peek = self.peek().map(|a| a.span()).unwrap_or_default();
+            let last_peek = self.pos();
             let span = first_peek.migrate(last_peek);
             if is_joint {
                 Err(crate::error::ParseError::spacing(span, true))
@@ -145,5 +158,12 @@ where
 
     fn skip_sep(&mut self) -> bool {
         T::skip_sep(self)
+    }
+
+    fn pos(&mut self) -> SpanOf<Self::Atom>
+    where
+        Self::Atom: Spanned,
+    {
+        T::pos(self)
     }
 }

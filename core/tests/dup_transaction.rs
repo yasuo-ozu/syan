@@ -491,16 +491,20 @@ fn wrappers_forward_every_method() {
 // ===========================================================================
 
 use std::any::type_name;
-use std::sync::Mutex;
+use std::cell::RefCell;
 
-static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+// Thread-local, not a `static Mutex`: four tests record into this and the harness runs them in
+// parallel, so a shared registry hands one test another's type names.
+thread_local! {
+    static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
 
 fn note<S: ?Sized>() {
-    SEEN.lock().unwrap().push(type_name::<S>().to_string());
+    SEEN.with(|seen| seen.borrow_mut().push(type_name::<S>().to_string()));
 }
 
 fn taken() -> Vec<String> {
-    let mut v = std::mem::take(&mut *SEEN.lock().unwrap());
+    let mut v = SEEN.with(|seen| std::mem::take(&mut *seen.borrow_mut()));
     v.sort();
     v.dedup();
     v
