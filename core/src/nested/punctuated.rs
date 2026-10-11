@@ -176,6 +176,32 @@ impl<Item, Punct> Punctuated<Item, Punct> {
         }
     }
 
+    /// Visit every item in place, then drop those for which `f` returns `false`.
+    ///
+    /// One pass. Doing it by repeated [`remove`](Self::remove) would be O(n²), because each removal
+    /// shifts the tail — and that is what a generic caller gets from
+    /// [`SeqEdit::retain_mut`](visiting::visit::SeqEdit::retain_mut)'s provided body, which is why this
+    /// exists and why the `SeqEdit` impl forwards to it.
+    ///
+    /// The separators are the crate's own bookkeeping, so they are not offered to `f`: a kept item
+    /// keeps whatever punctuation it needs for its new position.
+    pub fn retain_mut(&mut self, mut f: impl FnMut(&mut Item) -> bool) {
+        let Some((mut first, mut rest)) = self.inner.0.take() else {
+            return;
+        };
+        let keep_first = f(&mut first);
+        rest.retain_mut(|(_, item)| f(item));
+        self.inner.0 = if keep_first {
+            Some((first, rest))
+        } else if rest.is_empty() {
+            None
+        } else {
+            // The old head went; promote the next survivor and drop the separator that preceded it.
+            let (_, new_first) = rest.remove(0);
+            Some((Box::new(new_first), rest))
+        };
+    }
+
     /// Remove and return the item at `index`, or `None` if out of bounds. The neighbouring punctuation
     /// is dropped with it.
     pub fn remove(&mut self, index: usize) -> Option<Item> {

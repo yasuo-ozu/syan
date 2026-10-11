@@ -39,6 +39,15 @@ impl<'a, T: 'a, P: Default + 'a> SeqEdit<'a, T> for Punctuated<T, P> {
     fn remove(&mut self, i: usize) -> T {
         Punctuated::remove(self, i).expect("index in bounds")
     }
+    fn push(&mut self, value: T) {
+        Punctuated::push(self, value);
+    }
+    // The provided body shrinks by repeated `remove`, and each of those shifts the tail. A
+    // generated `visit_<t>_seq_mut` override holds its slot as a generic `V`, so it always reaches
+    // the trait method and never an inherent one — the quadratic cost would be real.
+    fn retain_mut(&mut self, f: impl FnMut(&mut T) -> bool) {
+        Punctuated::retain_mut(self, f);
+    }
 }
 
 // The root of the view traits: `SeqView` has `Elements` as a supertrait, so this is what makes
