@@ -45,8 +45,8 @@ pub(crate) trait FindAttribute {
 fn is_derive_helper_attr(attr: &Attribute) -> bool {
     [
         "group", "syan", "joint", "alone", "default",
-        // `#[derive(Ast)]`'s view markers: strip them off a `#[group]`-cloned substruct (which carries no
-        // `Ast` derive to register them), else `#[group] #[seq] Punctuated<..>` fails with "cannot find
+        // `#[derive(Visiting)]`'s view markers: strip them off a `#[group]`-cloned substruct (which carries no
+        // `Visiting` derive to register them), else `#[group] #[seq] Punctuated<..>` fails with "cannot find
         // attribute `seq`".
         "seq", "opt", "skip",
     ]

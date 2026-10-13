@@ -1,5 +1,5 @@
-error: `#[subast(..)]` path `crate::Cast<()>` carries generic arguments; a subast entry names a type by path only (it is used as a metadata-macro fetch target and a match scrutinee, where `<..>` is illegal). Drop the arguments — write `crate::Cast`.
-  --> tests/ui/audit_subast_generic_args.rs:18:10
+error: `visiting(..)` path `crate::Cast<()>` carries generic arguments; a follow-list entry names a type by path only (it is used as a metadata-macro fetch target and a match scrutinee, where `<..>` is illegal). Drop the arguments — write `crate::Cast`.
+  --> tests/ui/audit_subast_generic_args.rs:18:12
    |
-18 | #[subast(crate::Cast<()>)] // generic args — rejected at the derive
-   |          ^^^^^^^^^^^^^^^
+18 | #[visiting(crate::Cast<()>)] // generic args — rejected at the derive
+   |            ^^^^^^^^^^^^^^^

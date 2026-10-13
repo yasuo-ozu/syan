@@ -53,26 +53,26 @@ fn failure_rewinds_stream() {
     assert_eq!(pair.1.value, "6");
 }
 
-// A `visitor!()` walks straight through `Attempt` (a transparent `Deref` wrapper, like `Box`) to its
+// A `define_visit!()` walks straight through `Attempt` (a transparent `Deref` wrapper, like `Box`) to its
 // inner AST type — directly and behind containers.
 mod vis {
     use core::marker::PhantomData;
     use syan::nested::Attempt;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
-    #[subast()]
+    #[derive(Visiting)]
+    #[visiting()]
     pub struct Leaf<S>(pub PhantomData<S>);
 
-    #[derive(Ast)]
-    #[subast(crate::vis::Leaf)]
+    #[derive(Visiting)]
+    #[visiting(crate::vis::Leaf)]
     pub struct Holder<S> {
         pub a: Attempt<Leaf<S>>,
         pub va: Vec<Attempt<Leaf<S>>>,
         pub av: Attempt<Vec<Leaf<S>>>,
     }
 
-    syan::visit::visitor!(crate::vis::Leaf, crate::vis::Holder);
+    syan::visit::define_visit!(crate::vis::Leaf, crate::vis::Holder);
 }
 
 #[test]

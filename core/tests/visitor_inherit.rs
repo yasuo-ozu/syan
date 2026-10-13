@@ -1,36 +1,36 @@
-//! Visitor inheritance `visitor!(base => New)`: wider arity, multi-level, and over `#[recurse]` bases.
+//! Visitor inheritance `define_visit!(base => New)`: wider arity, multi-level, and over `#[recurse]` bases.
 #![allow(dead_code)]
 
 // A `New` visitor inherits its base's methods (supertrait) and adds methods for the new types.
 mod basic {
     use core::marker::PhantomData;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
+    #[derive(Visiting)]
     pub enum Type<S> {
         Unit(PhantomData<S>),
     }
 
-    #[derive(Ast)]
-    #[subast(crate::basic::Type)]
+    #[derive(Visiting)]
+    #[visiting(crate::basic::Type)]
     pub enum Expr<S> {
         Typed(Box<Type<S>>),
         Lit(PhantomData<S>),
     }
 
-    #[derive(Ast)]
-    #[subast(crate::basic::Expr)]
+    #[derive(Visiting)]
+    #[visiting(crate::basic::Expr)]
     pub enum Stmt<S> {
         E(Box<Expr<S>>),
         Empty(PhantomData<S>),
     }
 
     pub mod base {
-        syan::visit::visitor!(super::Type, super::Expr);
+        syan::visit::define_visit!(super::Type, super::Expr);
     }
 
     pub mod ext {
-        syan::visit::visitor!(super::base => super::Stmt);
+        syan::visit::define_visit!(super::base => super::Stmt);
     }
 
     #[derive(Default)]
@@ -69,29 +69,29 @@ mod basic {
     }
 }
 
-// An *inherited* type is walked without the extending node repeating it in `#[subast]`: `ext`
+// An *inherited* type is walked without the extending node repeating it in `#[visiting]`: `ext`
 // learns the base's list from the base itself, so the entry would only say what it already knows.
 // (Every other module here still writes one, so this is the only place that pins it.)
 mod inherited_needs_no_subast {
     use core::marker::PhantomData;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
+    #[derive(Visiting)]
     pub enum Expr<S> {
         Lit(PhantomData<S>),
     }
 
-    #[derive(Ast)] // deliberately no `#[subast(crate::inherited_needs_no_subast::Expr)]`
+    #[derive(Visiting)] // deliberately no `#[visiting(crate::inherited_needs_no_subast::Expr)]`
     pub enum Stmt<S> {
         E(Box<Expr<S>>),
         Empty(PhantomData<S>),
     }
 
     pub mod base {
-        syan::visit::visitor!(super::Expr);
+        syan::visit::define_visit!(super::Expr);
     }
     pub mod ext {
-        syan::visit::visitor!(super::base => super::Stmt);
+        syan::visit::define_visit!(super::base => super::Stmt);
     }
 
     #[derive(Default)]
@@ -120,33 +120,33 @@ mod inherited_needs_no_subast {
 // would be E0107).
 mod arity {
     use core::marker::PhantomData;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
+    #[derive(Visiting)]
     pub enum Type<S> {
         Unit(PhantomData<S>),
     }
 
-    #[derive(Ast)]
-    #[subast(crate::arity::Type)]
+    #[derive(Visiting)]
+    #[visiting(crate::arity::Type)]
     pub enum Expr<S> {
         Typed(Box<Type<S>>),
         Lit(PhantomData<S>),
     }
 
-    #[derive(Ast)]
-    #[subast(crate::arity::Expr)]
+    #[derive(Visiting)]
+    #[visiting(crate::arity::Expr)]
     pub enum Stmt<S, T> {
         E(Box<Expr<S>>),
         Tagged(PhantomData<T>),
     }
 
     pub mod base {
-        syan::visit::visitor!(crate::arity::Type, crate::arity::Expr);
+        syan::visit::define_visit!(crate::arity::Type, crate::arity::Expr);
     }
 
     pub mod ext {
-        syan::visit::visitor!(crate::arity::base => crate::arity::Stmt);
+        syan::visit::define_visit!(crate::arity::base => crate::arity::Stmt);
     }
 
     #[derive(Default)]
@@ -197,42 +197,42 @@ mod arity {
 // (`base::Visit` too), carried through the `@an` ancestor chain in `__syan_visited`.
 mod multilevel {
     use core::marker::PhantomData;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
+    #[derive(Visiting)]
     pub enum Type<S> {
         Unit(PhantomData<S>),
     }
 
-    #[derive(Ast)]
-    #[subast(crate::multilevel::Type)]
+    #[derive(Visiting)]
+    #[visiting(crate::multilevel::Type)]
     pub enum Expr<S> {
         Typed(Box<Type<S>>),
         Lit(PhantomData<S>),
     }
 
-    #[derive(Ast)]
-    #[subast(crate::multilevel::Expr)]
+    #[derive(Visiting)]
+    #[visiting(crate::multilevel::Expr)]
     pub enum Stmt<S> {
         E(Box<Expr<S>>),
         Empty(PhantomData<S>),
     }
 
-    #[derive(Ast)]
-    #[subast(crate::multilevel::Stmt)]
+    #[derive(Visiting)]
+    #[visiting(crate::multilevel::Stmt)]
     pub enum Item<S> {
         S(Box<Stmt<S>>),
         Nil(PhantomData<S>),
     }
 
     pub mod base {
-        syan::visit::visitor!(crate::multilevel::Type, crate::multilevel::Expr);
+        syan::visit::define_visit!(crate::multilevel::Type, crate::multilevel::Expr);
     }
     pub mod mid {
-        syan::visit::visitor!(crate::multilevel::base => crate::multilevel::Stmt);
+        syan::visit::define_visit!(crate::multilevel::base => crate::multilevel::Stmt);
     }
     pub mod top {
-        syan::visit::visitor!(crate::multilevel::mid => crate::multilevel::Item);
+        syan::visit::define_visit!(crate::multilevel::mid => crate::multilevel::Item);
     }
 
     fn sample() -> Item<()> {
@@ -291,15 +291,15 @@ mod multilevel {
 
     // 3-level chain AND arity widening at the leaf: top2's union is <S, T> while mid/base are <S>;
     // each transitive ancestor impl must be quantified over only its own param (S), leaving T out.
-    #[derive(Ast)]
-    #[subast(crate::multilevel::Stmt)]
+    #[derive(Visiting)]
+    #[visiting(crate::multilevel::Stmt)]
     pub enum Item2<S, T> {
         S(Box<Stmt<S>>),
         Tag(PhantomData<T>),
     }
 
     pub mod top2 {
-        syan::visit::visitor!(crate::multilevel::mid => crate::multilevel::Item2);
+        syan::visit::define_visit!(crate::multilevel::mid => crate::multilevel::Item2);
     }
 
     impl<S, T> top2::Visit<S, T> for Counter {
@@ -325,15 +325,15 @@ mod multilevel {
 mod over_recurse {
     use core::marker::PhantomData;
     use syan::parse::recurse;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Bin(Box<Expr<S>>),
             Lit(PhantomData<S>),
@@ -341,18 +341,18 @@ mod over_recurse {
     }
 
     mod base {
-        syan::visit::visitor!(crate::over_recurse::ast::Expr);
+        syan::visit::define_visit!(crate::over_recurse::ast::Expr);
     }
 
     // (a) acyclic New extends recurse base
-    #[derive(Ast)]
-    #[subast(crate::over_recurse::ast::Expr)]
+    #[derive(Visiting)]
+    #[visiting(crate::over_recurse::ast::Expr)]
     pub struct Program<S> {
         pub body: ast::Expr<S>,
     }
 
     mod nv {
-        syan::visit::visitor!(crate::over_recurse::base => crate::over_recurse::Program);
+        syan::visit::define_visit!(crate::over_recurse::base => crate::over_recurse::Program);
     }
 
     #[derive(Default)]
@@ -389,10 +389,10 @@ mod over_recurse {
     #[recurse]
     mod new_ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Stmt<S> {
             Seq(Box<Stmt<S>>),
             Nop(PhantomData<S>),
@@ -400,7 +400,7 @@ mod over_recurse {
     }
 
     mod nv2 {
-        syan::visit::visitor!(crate::over_recurse::base => crate::over_recurse::new_ast::Stmt);
+        syan::visit::define_visit!(crate::over_recurse::base => crate::over_recurse::new_ast::Stmt);
     }
 
     #[derive(Default)]
@@ -442,15 +442,15 @@ mod over_recurse {
 mod over_recurse_mid {
     use core::marker::PhantomData;
     use syan::parse::recurse;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Bin(Box<Expr<S>>),
             Lit(PhantomData<S>),
@@ -458,27 +458,27 @@ mod over_recurse_mid {
     }
 
     mod base {
-        syan::visit::visitor!(crate::over_recurse_mid::ast::Expr);
+        syan::visit::define_visit!(crate::over_recurse_mid::ast::Expr);
     }
 
-    #[derive(Ast)]
-    #[subast(crate::over_recurse_mid::ast::Expr)]
+    #[derive(Visiting)]
+    #[visiting(crate::over_recurse_mid::ast::Expr)]
     pub struct Program<S> {
         pub body: ast::Expr<S>,
     }
 
     mod mid {
-        syan::visit::visitor!(crate::over_recurse_mid::base => crate::over_recurse_mid::Program);
+        syan::visit::define_visit!(crate::over_recurse_mid::base => crate::over_recurse_mid::Program);
     }
 
-    #[derive(Ast)]
-    #[subast(crate::over_recurse_mid::Program)]
+    #[derive(Visiting)]
+    #[visiting(crate::over_recurse_mid::Program)]
     pub struct Module<S> {
         pub prog: Program<S>,
     }
 
     mod nv {
-        syan::visit::visitor!(crate::over_recurse_mid::mid => crate::over_recurse_mid::Module);
+        syan::visit::define_visit!(crate::over_recurse_mid::mid => crate::over_recurse_mid::Module);
     }
 
     #[derive(Default)]

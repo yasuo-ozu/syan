@@ -9,20 +9,20 @@ use core::marker::PhantomData;
 mod vecdeque {
     use super::*;
     use std::collections::VecDeque;
-    use syan::visit::{Ast, SeqEdit};
+    use syan::visit::{SeqEdit, Visiting};
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::vecdeque::Stmt)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::vecdeque::Stmt)]
     pub struct Holder<S> {
         #[seq]
         pub items: VecDeque<Stmt<S>>,
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Holder, super::Stmt);
+        syan::visit::define_visit!(super::Holder, super::Stmt);
     }
 
     struct Editor;
@@ -64,23 +64,23 @@ mod vecdeque {
 mod punct {
     use super::*;
     use syan::nested::punctuated::Punctuated;
-    use syan::visit::{Ast, SeqEdit};
+    use syan::visit::{SeqEdit, Visiting};
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct Comma;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::punct::Stmt)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::punct::Stmt)]
     pub struct Holder<S> {
         #[seq]
         pub items: Punctuated<Stmt<S>, Comma>,
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Holder, super::Stmt);
+        syan::visit::define_visit!(super::Holder, super::Stmt);
     }
 
     struct Editor;
@@ -118,20 +118,20 @@ mod punct {
 // ── a closure still visits every element of a Vec / Option slot (via the default seq/opt descent) ──
 mod closure_over_slot {
     use super::*;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::closure_over_slot::Stmt)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::closure_over_slot::Stmt)]
     pub struct Block<S> {
         pub stmts: Vec<Stmt<S>>,
         pub tail: Option<Stmt<S>>,
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Block, super::Stmt);
+        syan::visit::define_visit!(super::Block, super::Stmt);
     }
 
     #[test]

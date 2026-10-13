@@ -1,42 +1,42 @@
-//! A `visitor!()` spanning acyclic-outer types and a `#[recurse]` cycle: extra params, closures,
+//! A `define_visit!()` spanning acyclic-outer types and a `#[recurse]` cycle: extra params, closures,
 //! drill-in.
 #![allow(dead_code)]
 
-// One `visitor!()` spanning an acyclic outer type and a `#[recurse]` cycle, crossed by a single `.visit()`.
+// One `define_visit!()` spanning an acyclic outer type and a `#[recurse]` cycle, crossed by a single `.visit()`.
 mod one_visitor {
     use core::marker::PhantomData;
     use syan::parse::recurse;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast(crate::one_visitor::ast::Stmt)]
+        #[derive(Visiting)]
+        #[visiting(crate::one_visitor::ast::Stmt)]
         pub enum Expr<S> {
             Stmt(Box<Stmt<S>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast(crate::one_visitor::ast::Expr)]
+        #[derive(Visiting)]
+        #[visiting(crate::one_visitor::ast::Expr)]
         pub enum Stmt<S> {
             Expr(Box<Expr<S>>),
             Nop(PhantomData<S>),
         }
     }
 
-    #[derive(Ast)]
-    #[subast(crate::one_visitor::ast::Expr)]
+    #[derive(Visiting)]
+    #[visiting(crate::one_visitor::ast::Expr)]
     pub struct Program<S> {
         pub body: Vec<ast::Expr<S>>,
         pub tail: ast::Expr<S>,
     }
 
     mod v {
-        syan::visit::visitor!(
+        syan::visit::define_visit!(
             crate::one_visitor::Program,
             crate::one_visitor::ast::Expr,
             crate::one_visitor::ast::Stmt
@@ -89,25 +89,25 @@ mod extra_param {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Nest(Box<Expr<S>>),
             Lit(PhantomData<S>),
         }
     }
 
-    #[derive(syan::visit::Ast)]
-    #[subast(crate::extra_param::ast::Expr)]
+    #[derive(syan::visit::Visiting)]
+    #[visiting(crate::extra_param::ast::Expr)]
     pub struct Program<S, T> {
         pub body: ast::Expr<S>,
         pub tag: PhantomData<T>,
     }
 
     mod v {
-        syan::visit::visitor!(crate::extra_param::Program, crate::extra_param::ast::Expr);
+        syan::visit::define_visit!(crate::extra_param::Program, crate::extra_param::ast::Expr);
     }
 
     #[test]
@@ -131,40 +131,40 @@ mod closure {
     #[syan::parse::recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Nest(Box<Expr<S>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Type<S> {
             Int(PhantomData<S>),
             Bool(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast(crate::closure::ast::Param, crate::closure::ast::Type)]
+        #[derive(Visiting)]
+        #[visiting(crate::closure::ast::Param, crate::closure::ast::Type)]
         pub struct Decl<S> {
             pub params: Vec<Param<S>>,
             pub ret: Type<S>,
-            // A recurse-cycle node as a field: not in `#[subast]`, so a leaf for the acyclic visitor.
+            // A recurse-cycle node as a field: not in `#[visiting]`, so a leaf for the acyclic visitor.
             pub body: Expr<S>,
         }
 
-        #[derive(Ast)]
-        #[subast(crate::closure::ast::Type)]
+        #[derive(Visiting)]
+        #[visiting(crate::closure::ast::Type)]
         pub struct Param<S> {
             pub ty: Type<S>,
         }
     }
 
     mod v {
-        syan::visit::visitor!(crate::closure::ast::Decl, crate::closure::ast::Type);
+        syan::visit::define_visit!(crate::closure::ast::Decl, crate::closure::ast::Type);
     }
 
     fn sample() -> ast::Decl<()> {
@@ -206,55 +206,55 @@ mod closure {
     }
 }
 
-// Drill-in and `#[recurse]` in the same module; a cycle-typed field not in `#[subast]` stays a leaf.
+// Drill-in and `#[recurse]` in the same module; a cycle-typed field not in `#[visiting]` stays a leaf.
 mod drill {
     use core::marker::PhantomData;
     use syan::parse::recurse;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
+        #[derive(Visiting)]
         pub enum Expr<S> {
             Stmt(Box<Stmt<S>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
+        #[derive(Visiting)]
         pub enum Stmt<S> {
             Expr(Box<Expr<S>>),
             Nop(PhantomData<S>),
         }
 
-        #[derive(Ast)]
+        #[derive(Visiting)]
         pub enum Type<S> {
             Unit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast(crate::drill::ast::Type)]
+        #[derive(Visiting)]
+        #[visiting(crate::drill::ast::Type)]
         pub struct Cast<S>(pub Type<S>);
 
-        #[derive(Ast)]
-        #[subast(crate::drill::ast::Cast)]
+        #[derive(Visiting)]
+        #[visiting(crate::drill::ast::Cast)]
         pub struct Decl<S> {
             pub cast: Cast<S>,
-            // A recurse'd alias field. Not in `#[subast]`, so a leaf for the visitor.
+            // A recurse'd alias field. Not in `#[visiting]`, so a leaf for the visitor.
             pub body: Expr<S>,
         }
     }
 
     pub mod visit {
         // `Cast` is unlisted and drilled through to `Type`.
-        syan::visit::visitor!(crate::drill::ast::Decl, crate::drill::ast::Type);
+        syan::visit::define_visit!(crate::drill::ast::Decl, crate::drill::ast::Type);
     }
 
     use self::ast::{Cast, Decl, Expr, Type};
 
-    fn assert_is_ast<T: Ast>() {}
+    fn assert_is_ast<T: Visiting>() {}
 
     #[test]
     fn ast_markers_hold_for_both_recurse_aliases_and_acyclic_types() {
@@ -316,18 +316,18 @@ mod drill {
         #[recurse]
         mod ast {
             use core::marker::PhantomData;
-            use syan::visit::Ast;
+            use syan::visit::Visiting;
 
-            #[derive(Ast)]
-            #[subast(crate::drill::unlisted::ast::Cast)]
+            #[derive(Visiting)]
+            #[visiting(crate::drill::unlisted::ast::Cast)]
             pub enum Expr<S> {
                 Bin(Box<Expr<S>>),
                 Cast(Box<Cast<S>>),
                 Lit(PhantomData<S>),
             }
 
-            #[derive(Ast)]
-            #[subast(crate::drill::unlisted::ast::Expr)]
+            #[derive(Visiting)]
+            #[visiting(crate::drill::unlisted::ast::Expr)]
             pub enum Cast<S> {
                 Inner(Box<Expr<S>>),
                 Nope(PhantomData<S>),
@@ -335,7 +335,7 @@ mod drill {
         }
 
         mod v {
-            syan::visit::visitor!(crate::drill::unlisted::ast::Expr);
+            syan::visit::define_visit!(crate::drill::unlisted::ast::Expr);
         }
 
         #[derive(Default)]

@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 mod ast {
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
     /// A consumer wrapper that joins the walk by forwarding to what it holds.
     #[derive(Debug, Clone)]
@@ -27,13 +27,13 @@ mod ast {
         }
     }
 
-    #[derive(Debug, Clone, Ast)]
+    #[derive(Debug, Clone, Visiting)]
     pub enum Node {
         Leaf(i64),
     }
 
-    #[derive(Debug, Clone, Ast)]
-    #[subast(crate::ast::Node)]
+    #[derive(Debug, Clone, Visiting)]
+    #[visiting(crate::ast::Node)]
     pub struct Holder {
         pub boxed: Box<Node>,
         pub mine: MyPtr<Node>,
@@ -42,7 +42,7 @@ mod ast {
     }
 
     pub mod v {
-        syan::visit::visitor!(crate::ast::Node, crate::ast::Holder);
+        syan::visit::define_visit!(crate::ast::Node, crate::ast::Holder);
     }
 }
 

@@ -113,8 +113,8 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// (`limit = N` was removed; the ranked ladder's height is not user-tunable.)
 ///
 /// The user's types are emitted verbatim — genuine recursive enums/structs, one type at all depths, no
-/// engine type and no depth parameter. `#[derive(Ast)]`, `Debug`, `#[subast]`, user `impl`s and every
-/// non-structural derive land on them directly, and `syan::visit::visitor!(<cycle types>)` over them is
+/// engine type and no depth parameter. `#[derive(Visiting)]`, `Debug`, `#[visiting]`, user `impl`s and every
+/// non-structural derive land on them directly, and `syan::visit::define_visit!(<cycle types>)` over them is
 /// an **ordinary acyclic visitor** (closures included).
 ///
 /// # What it does

@@ -1,14 +1,14 @@
 //! Walk and view impls for this crate's own containers.
 //!
-//! The traits live in [`ast::visit`]; these types are ours, so the impls belong here — a foreign
+//! The traits live in [`visiting::visit`]; these types are ours, so the impls belong here — a foreign
 //! trait for a local type. [`Punctuated`](crate::nested::Punctuated) is an edit target like `Vec`;
 //! [`Attempt`](crate::nested::Attempt) and [`Group`](crate::nested::group::Group) hold exactly one
 //! node, so they are descent-only.
 
 use crate::nested::punctuated::{Iter, IterMut};
 use crate::nested::{group::Group, Attempt, Punctuated};
-use ast::visit::{Elements, SeqEdit, SeqView};
-use ast::walk::{Thru, Walk, WalkMut};
+use visiting::visit::{Elements, SeqEdit, SeqView};
+use visiting::walk::{Thru, Walk, WalkMut};
 
 // `SeqView` reaches elements through these, so they come first. Both panic past the end, like every
 // other indexed container.

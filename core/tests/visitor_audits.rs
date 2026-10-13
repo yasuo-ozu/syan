@@ -1,7 +1,7 @@
 //! Visitor codegen audit regression pins: union lifetime order, followed-ref mut leaf,
 //! recurse helper hygiene, and non-root lifetime threading. Compiling is the check.
 #![allow(dead_code)]
-// `visitor!()` fetching a `#[recurse]` module's metadata misattributes a spurious "unused import"
+// `define_visit!()` fetching a `#[recurse]` module's metadata misattributes a spurious "unused import"
 // to the `use ... recurse;` line, though `#[recurse]` does use it. Cosmetic span artifact.
 #![allow(unused_imports)]
 
@@ -9,23 +9,23 @@
 // listed before a lifetime param.
 mod union_lifetime_order {
     use core::marker::PhantomData;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
-    #[subast()]
+    #[derive(Visiting)]
+    #[visiting()]
     pub struct Outer<S> {
         pub _p: PhantomData<S>,
     }
 
-    #[derive(Ast)]
-    #[subast()]
+    #[derive(Visiting)]
+    #[visiting()]
     pub struct Inner<'a> {
         pub _p: PhantomData<&'a ()>,
     }
 
     mod v {
         // Outer (type param `S`) listed BEFORE Inner (lifetime `'a`) → union order is `[S, 'a]`.
-        syan::visit::visitor!(
+        syan::visit::define_visit!(
             crate::union_lifetime_order::Outer,
             crate::union_lifetime_order::Inner
         );
@@ -41,22 +41,22 @@ mod union_lifetime_order {
 // A followed shared-reference field (`&T`) must be a leaf on the mut side, else `&mut **r`
 // through a `&` is E0596. The shared side still visits it.
 mod followed_ref_mut {
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
-    #[subast()]
+    #[derive(Visiting)]
+    #[visiting()]
     pub struct Leaf<S> {
         pub _p: core::marker::PhantomData<S>,
     }
 
-    #[derive(Ast)]
-    #[subast(crate::followed_ref_mut::Leaf)]
+    #[derive(Visiting)]
+    #[visiting(crate::followed_ref_mut::Leaf)]
     pub struct Holder<'a, S> {
         pub r: &'a Leaf<S>,
     }
 
     mod v {
-        syan::visit::visitor!(
+        syan::visit::define_visit!(
             crate::followed_ref_mut::Holder,
             crate::followed_ref_mut::Leaf
         );
@@ -74,10 +74,10 @@ mod recurse_helper_hygiene {
     #[recurse]
     mod m {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S, __V> {
             Nest(Box<Expr<S, __V>>),
             Lit(PhantomData<(S, __V)>),
@@ -85,7 +85,7 @@ mod recurse_helper_hygiene {
     }
 
     mod v {
-        syan::visit::visitor!(crate::recurse_helper_hygiene::m::Expr);
+        syan::visit::define_visit!(crate::recurse_helper_hygiene::m::Expr);
     }
 
     #[test]
@@ -100,20 +100,20 @@ mod recurse_nonroot_lifetime {
     #[recurse]
     mod m {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             // `Expr<S>` has no `'a`, so this fill must be concrete — and `&mut Box<Stmt<'_, S>>` is
             // invariant, so the mut walk cannot descend into it at any lifetime. `#[skip]` is the
-            // only way to say so; before Option A the empty `#[subast()]` said it by omission.
+            // only way to say so; before Option A the empty `#[visiting()]` said it by omission.
             Stmt(#[skip] Box<Stmt<'static, S>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Stmt<'a, S> {
             Back(Box<Expr<S>>),
             Tag(PhantomData<(&'a (), S)>),
@@ -121,7 +121,7 @@ mod recurse_nonroot_lifetime {
     }
 
     mod v {
-        syan::visit::visitor!(
+        syan::visit::define_visit!(
             crate::recurse_nonroot_lifetime::m::Expr,
             crate::recurse_nonroot_lifetime::m::Stmt
         );

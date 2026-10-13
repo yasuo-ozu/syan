@@ -9,7 +9,7 @@ fn visitor_diagnostics() {
         return;
     }
     let t = trybuild::TestCases::new();
-    // `visitor!()` over a cycle that follows an unlisted intermediate forming a cycle of unlisted
+    // `define_visit!()` over a cycle that follows an unlisted intermediate forming a cycle of unlisted
     // intermediates (list one of them to break it).
     t.compile_fail("tests/ui/visitor_recurse_unlisted_coroot.rs");
 }

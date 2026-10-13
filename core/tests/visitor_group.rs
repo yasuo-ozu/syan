@@ -18,13 +18,13 @@ use syan::symbol::chars;
 
 mod ast {
     use super::*;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Qubit(pub i64);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::ast::Qubit)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::ast::Qubit)]
     pub struct Stmt {
         /// The shape the aliases produce: a group wrapping a container.
         pub listed: GroupBracket<Vec<Qubit>, Span>,
@@ -33,7 +33,7 @@ mod ast {
     }
 
     pub mod v {
-        syan::visit::visitor!(crate::ast::Qubit, crate::ast::Stmt);
+        syan::visit::define_visit!(crate::ast::Qubit, crate::ast::Stmt);
     }
 }
 

@@ -10,22 +10,22 @@ use core::marker::PhantomData;
 // ── fixed position: a followed type held directly in a field gets only `visit_*_mut` (no seq/opt) ──
 mod fixed {
     use super::*;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub enum Leaf<S> {
         A(PhantomData<S>),
         B(PhantomData<S>),
     }
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::fixed::Leaf)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::fixed::Leaf)]
     pub struct Wrap<S> {
         pub inner: Leaf<S>, // fixed slot — descended in place, never structurally edited
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Wrap, super::Leaf);
+        syan::visit::define_visit!(super::Wrap, super::Leaf);
     }
 
     // Only `visit_leaf_mut` exists for `Leaf` (it is never held in a Vec/Option) — mutate it in place.
@@ -52,19 +52,19 @@ mod fixed {
 // ── plain `visit_*_mut` is unchanged: a `()`-returning override still runs for every Vec element ──
 mod plain_mut {
     use super::*;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct N<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::plain_mut::N)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::plain_mut::N)]
     pub struct Holder<S> {
         pub items: Vec<N<S>>,
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Holder, super::N);
+        syan::visit::define_visit!(super::Holder, super::N);
     }
 
     struct Doubler;
@@ -89,13 +89,13 @@ mod plain_mut {
 // ── Vec + Option views on a plain struct: iter_mut / retain_mut / push / set / take ──────────────────────────
 mod views {
     use super::*;
-    use syan::visit::{Ast, OptEdit, SeqEdit};
+    use syan::visit::{OptEdit, SeqEdit, Visiting};
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::views::Stmt)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::views::Stmt)]
     pub struct Block<S> {
         #[seq]
         pub stmts: Vec<Stmt<S>>,
@@ -104,7 +104,7 @@ mod views {
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Block, super::Stmt);
+        syan::visit::define_visit!(super::Block, super::Stmt);
     }
 
     struct Editor;
@@ -228,10 +228,10 @@ mod rec {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Debug, Ast)]
-        #[subast()]
+        #[derive(Debug, Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Many(#[seq] Vec<Expr<S>>), // self-recursive Vec-like slot (Vec gives the indirection) -> visit_expr_seq_mut
             Lit(i64, PhantomData<S>),
@@ -239,7 +239,7 @@ mod rec {
     }
 
     mod v {
-        syan::visit::visitor!(crate::rec::ast::Expr);
+        syan::visit::define_visit!(crate::rec::ast::Expr);
     }
 
     struct Editor;
@@ -291,10 +291,10 @@ mod rec_opt {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Debug, Ast)]
-        #[subast()]
+        #[derive(Debug, Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             // Self-recursive `Option<Box<_>>`: descended per level (`Option` → `Box` → `Expr`). It is
             // NOT a `#[opt]` edit target — the `Box` is needed for finite size, but a `#[opt]` view needs
@@ -305,7 +305,7 @@ mod rec_opt {
     }
 
     mod v {
-        syan::visit::visitor!(crate::rec_opt::ast::Expr);
+        syan::visit::define_visit!(crate::rec_opt::ast::Expr);
     }
 
     struct Bump;
@@ -352,14 +352,14 @@ mod rec_opt {
 //    view methods — usage is collected through the drill walk. ────────────────────────────────────
 mod drill {
     use super::*;
-    use syan::visit::{Ast, OptEdit, SeqEdit};
+    use syan::visit::{OptEdit, SeqEdit, Visiting};
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Leaf<S>(pub i64, pub PhantomData<S>);
 
     // Unlisted intermediate (drilled through, no `visit_mid`): holds `Leaf` Vec-like AND Option-like.
-    #[derive(Debug, Ast)]
-    #[subast(crate::drill::Leaf)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::drill::Leaf)]
     pub struct Mid<S> {
         #[seq]
         pub leaves: Vec<Leaf<S>>,
@@ -367,15 +367,15 @@ mod drill {
         pub last: Option<Leaf<S>>,
     }
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::drill::Mid)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::drill::Mid)]
     pub struct Top<S> {
         pub mid: Mid<S>, // Mid sits in a fixed slot; the visitor drills through it
     }
 
     pub mod v {
         // `Mid` is NOT listed → drilled; `Leaf` is reached (and edited) through it.
-        syan::visit::visitor!(super::Top, super::Leaf);
+        syan::visit::define_visit!(super::Top, super::Leaf);
     }
 
     struct Editor;
@@ -431,17 +431,17 @@ mod rec_cross {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Debug, Ast)]
-        #[subast(crate::rec_cross::ast::Stmt)]
+        #[derive(Debug, Visiting)]
+        #[visiting(crate::rec_cross::ast::Stmt)]
         pub enum Expr<S> {
             Block(#[seq] Vec<Stmt<S>>), // cross-edge: holds `Stmt` Vec-like -> visit_stmt_seq_mut
             Lit(i64, PhantomData<S>),
         }
 
-        #[derive(Debug, Ast)]
-        #[subast(crate::rec_cross::ast::Expr)]
+        #[derive(Debug, Visiting)]
+        #[visiting(crate::rec_cross::ast::Expr)]
         pub enum Stmt<S> {
             Expr(Box<Expr<S>>), // back-edge to the root
             Nop(i64, PhantomData<S>),
@@ -449,7 +449,7 @@ mod rec_cross {
     }
 
     mod v {
-        syan::visit::visitor!(crate::rec_cross::ast::Expr, crate::rec_cross::ast::Stmt);
+        syan::visit::define_visit!(crate::rec_cross::ast::Expr, crate::rec_cross::ast::Stmt);
     }
 
     struct Editor;
