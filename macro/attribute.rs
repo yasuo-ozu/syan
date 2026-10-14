@@ -1,5 +1,5 @@
 use proc_macro2::{Spacing, Span, TokenStream};
-use proc_macro_error::abort;
+use proc_macro_error3::abort;
 use std::collections::VecDeque;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;

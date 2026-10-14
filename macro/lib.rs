@@ -1,5 +1,5 @@
 use proc_macro::TokenStream as TokenStream1;
-use proc_macro_error::proc_macro_error;
+use proc_macro_error3::proc_macro_error;
 use syn::*;
 
 mod attribute;
@@ -158,7 +158,12 @@ pub fn symbol(input: TokenStream1) -> TokenStream1 {
 /// The last shape is unsupportable by anything: its instantiation family is infinite, so the *type* is
 /// already unusable (`E0320` on any concrete binding) and the parse fn family exceeds the
 /// monomorphization limit. Move the differing part into its own type outside the cycle.
+// Two entry points, not one. The body reports through proc-macro-error **3**, but it hands the
+// module to `decycle`, which reports through **1.x** — and either crate's API panics outright if its
+// own `entry_point` is not on the stack. Stacking both makes each one's thread-local state live for
+// the whole call. Drop the 1.x line once `decycle` moves.
 #[proc_macro_error]
+#[proc_macro_error::proc_macro_error]
 #[proc_macro_attribute]
 pub fn recurse(attr: TokenStream1, input: TokenStream1) -> TokenStream1 {
     recurse::recurse(attr, input, random())

@@ -23,6 +23,9 @@ path = "lib.rs"
 proc-macro2 = "1.0"
 quote = "1.0"
 template-quote = "0.4"
+proc-macro-error3 = { version = "3", default-features = false }
+# Only for `#[recurse]`: `decycle` still reports through proc-macro-error 1.x, whose API panics
+# unless *its* `entry_point` is on the stack. See the stacked attributes in `lib.rs`.
 proc-macro-error = { version = "1.0", default-features = false }
 derive-syn-parse = "0.2.0"
 itertools = "0.14.0"

@@ -29,7 +29,7 @@ use decycle::analysis::EdgeKind;
 use decycle::safegraph::VecGraph;
 use proc_macro::TokenStream as TokenStream1;
 use proc_macro2::{Ident, Span, TokenStream};
-use proc_macro_error::{abort, set_dummy};
+use proc_macro_error3::{abort, set_dummy};
 use std::collections::HashSet;
 use syn::punctuated::Punctuated;
 use syn::{DeriveInput, Field, Fields, Item, ItemMod, Path, Token};

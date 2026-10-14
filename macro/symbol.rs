@@ -1,5 +1,5 @@
 use proc_macro2::{Span, TokenStream, TokenTree};
-use proc_macro_error::abort;
+use proc_macro_error3::abort;
 use syn::parse::{Parse, ParseStream};
 use syn::*;
 use template_quote::quote;
