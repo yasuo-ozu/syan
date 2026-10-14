@@ -7,10 +7,10 @@ use syan::parse::recurse;
 #[recurse(limit = 0)]
 mod m {
     use core::marker::PhantomData;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
-    #[subast()]
+    #[derive(Visiting)]
+    #[visiting()]
     pub enum Expr<S> {
         Nested(Box<Expr<S>>),
         Lit(PhantomData<S>),

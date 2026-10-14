@@ -9,10 +9,10 @@ mod containers {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         #[allow(clippy::vec_box)]
         pub enum Expr<S> {
             // A Box wrapping the Option (`cont_box`) — patterns don't auto-deref Box.
@@ -28,7 +28,7 @@ mod containers {
     }
 
     mod v_ast {
-        syan::visit::visitor!(crate::containers::ast::Expr);
+        syan::visit::define_visit!(crate::containers::ast::Expr);
     }
 
     #[derive(Default)]
@@ -103,10 +103,10 @@ mod container_of_tuple {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         #[allow(clippy::type_complexity)]
         pub enum Expr<S> {
             Pair((Box<Expr<S>>, Box<Expr<S>>)),
@@ -117,7 +117,7 @@ mod container_of_tuple {
     }
 
     mod v {
-        syan::visit::visitor!(crate::container_of_tuple::ast::Expr);
+        syan::visit::define_visit!(crate::container_of_tuple::ast::Expr);
     }
 
     #[derive(Default)]

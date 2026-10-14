@@ -1,7 +1,7 @@
 //! Structural-edit coverage for the container-view model: a field marked `#[seq]` / `#[opt]` gets a
 //! `visit_<t>_seq` / `visit_<t>_opt` method taking a `SeqView` / `OptView` of the owning collection,
 //! edited in place (no clone); an unmarked field gets no such method (just the in-place `visit_<t>_mut`).
-//! Covers `Vec`/`Option`, `view_iter_mut`/`retain_mut`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
+//! Covers `Vec`/`Option`, `&mut v[i]`/`retain_mut`/`push`/`set`/`take`, `#[recurse]` cycles, a drilled intermediate,
 //! and a regression that a plain `visit_*_mut`-only visitor still mutates every element.
 #![allow(dead_code)]
 
@@ -10,22 +10,22 @@ use core::marker::PhantomData;
 // ── fixed position: a followed type held directly in a field gets only `visit_*_mut` (no seq/opt) ──
 mod fixed {
     use super::*;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub enum Leaf<S> {
         A(PhantomData<S>),
         B(PhantomData<S>),
     }
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::fixed::Leaf)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::fixed::Leaf)]
     pub struct Wrap<S> {
         pub inner: Leaf<S>, // fixed slot — descended in place, never structurally edited
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Wrap, super::Leaf);
+        syan::visit::define_visit!(super::Wrap, super::Leaf);
     }
 
     // Only `visit_leaf_mut` exists for `Leaf` (it is never held in a Vec/Option) — mutate it in place.
@@ -52,19 +52,19 @@ mod fixed {
 // ── plain `visit_*_mut` is unchanged: a `()`-returning override still runs for every Vec element ──
 mod plain_mut {
     use super::*;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct N<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::plain_mut::N)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::plain_mut::N)]
     pub struct Holder<S> {
         pub items: Vec<N<S>>,
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Holder, super::N);
+        syan::visit::define_visit!(super::Holder, super::N);
     }
 
     struct Doubler;
@@ -89,13 +89,13 @@ mod plain_mut {
 // ── Vec + Option views on a plain struct: iter_mut / retain_mut / push / set / take ──────────────────────────
 mod views {
     use super::*;
-    use syan::visit::{Ast, OptView, SeqView};
+    use syan::visit::{OptEdit, SeqEdit, Visiting};
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::views::Stmt)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::views::Stmt)]
     pub struct Block<S> {
         #[seq]
         pub stmts: Vec<Stmt<S>>,
@@ -104,21 +104,29 @@ mod views {
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Block, super::Stmt);
+        syan::visit::define_visit!(super::Block, super::Stmt);
     }
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
-            for s in v.view_iter_mut() {
-                if s.0 == 2 {
-                    *s = Stmt(102, PhantomData);
+        fn visit_stmt_seq_mut<'a, V: SeqEdit<'a, Stmt<S>>>(&mut self, v: &'a mut V)
+        where
+            Stmt<S>: 'a,
+        {
+            // The view carries no borrow, so reading and editing mix freely in one body. Elements
+            // come through `SeqView`'s `IndexMut` supertrait.
+            for i in 0..v.len() {
+                if v[i].0 == 2 {
+                    v[i] = Stmt(102, PhantomData);
                 }
             }
             v.retain_mut(|s| s.0 != 0);
             v.push(Stmt(7, PhantomData));
         }
-        fn visit_stmt_opt_mut<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
+        fn visit_stmt_opt_mut<'a, O: OptEdit<'a, Stmt<S>>>(&mut self, v: &'a mut O)
+        where
+            Stmt<S>: 'a,
+        {
             match v.get().map(|s| s.0) {
                 Some(0) => v.clear(),
                 Some(2) => v.set(Stmt(102, PhantomData)),
@@ -215,15 +223,15 @@ mod views {
 mod rec {
     use super::*;
     use syan::parse::recurse;
-    use syan::visit::SeqView;
+    use syan::visit::SeqEdit;
 
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Debug, Ast)]
-        #[subast()]
+        #[derive(Debug, Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Many(#[seq] Vec<Expr<S>>), // self-recursive Vec-like slot (Vec gives the indirection) -> visit_expr_seq_mut
             Lit(i64, PhantomData<S>),
@@ -231,17 +239,20 @@ mod rec {
     }
 
     mod v {
-        syan::visit::visitor!(crate::rec::ast::Expr);
+        syan::visit::define_visit!(crate::rec::ast::Expr);
     }
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_expr_seq_mut<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
-            for e in v.view_iter_mut() {
-                match e {
+        fn visit_expr_seq_mut<'a, V: SeqEdit<'a, ast::Expr<S>>>(&mut self, v: &'a mut V)
+        where
+            ast::Expr<S>: 'a,
+        {
+            for i in 0..v.len() {
+                match &mut v[i] {
                     ast::Expr::Lit(0, _) => {} // dropped by retain below
-                    ast::Expr::Lit(2, _) => *e = ast::Expr::Lit(99, PhantomData),
-                    _ => v::visit_expr_mut(self, e), // descend nested `Many`
+                    e @ ast::Expr::Lit(2, _) => *e = ast::Expr::Lit(99, PhantomData),
+                    e => v::visit_expr_mut(self, e), // descend nested `Many`
                 }
             }
             v.retain_mut(|e| !matches!(e, ast::Expr::Lit(0, _)));
@@ -280,10 +291,10 @@ mod rec_opt {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Debug, Ast)]
-        #[subast()]
+        #[derive(Debug, Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             // Self-recursive `Option<Box<_>>`: descended per level (`Option` → `Box` → `Expr`). It is
             // NOT a `#[opt]` edit target — the `Box` is needed for finite size, but a `#[opt]` view needs
@@ -294,7 +305,7 @@ mod rec_opt {
     }
 
     mod v {
-        syan::visit::visitor!(crate::rec_opt::ast::Expr);
+        syan::visit::define_visit!(crate::rec_opt::ast::Expr);
     }
 
     struct Bump;
@@ -341,14 +352,14 @@ mod rec_opt {
 //    view methods — usage is collected through the drill walk. ────────────────────────────────────
 mod drill {
     use super::*;
-    use syan::visit::{Ast, OptView, SeqView};
+    use syan::visit::{OptEdit, SeqEdit, Visiting};
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Leaf<S>(pub i64, pub PhantomData<S>);
 
     // Unlisted intermediate (drilled through, no `visit_mid`): holds `Leaf` Vec-like AND Option-like.
-    #[derive(Debug, Ast)]
-    #[subast(crate::drill::Leaf)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::drill::Leaf)]
     pub struct Mid<S> {
         #[seq]
         pub leaves: Vec<Leaf<S>>,
@@ -356,23 +367,29 @@ mod drill {
         pub last: Option<Leaf<S>>,
     }
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::drill::Mid)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::drill::Mid)]
     pub struct Top<S> {
         pub mid: Mid<S>, // Mid sits in a fixed slot; the visitor drills through it
     }
 
     pub mod v {
         // `Mid` is NOT listed → drilled; `Leaf` is reached (and edited) through it.
-        syan::visit::visitor!(super::Top, super::Leaf);
+        syan::visit::define_visit!(super::Top, super::Leaf);
     }
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_leaf_seq_mut<V: SeqView<Leaf<S>>>(&mut self, v: &mut V) {
+        fn visit_leaf_seq_mut<'a, V: SeqEdit<'a, Leaf<S>>>(&mut self, v: &'a mut V)
+        where
+            Leaf<S>: 'a,
+        {
             v.retain_mut(|l| l.0 != 0); // drop zeros from the drilled Vec
         }
-        fn visit_leaf_opt_mut<O: OptView<Leaf<S>>>(&mut self, v: &mut O) {
+        fn visit_leaf_opt_mut<'a, O: OptEdit<'a, Leaf<S>>>(&mut self, v: &'a mut O)
+        where
+            Leaf<S>: 'a,
+        {
             if matches!(v.get(), Some(l) if l.0 == 0) {
                 v.clear(); // drop a zero from the drilled Option
             }
@@ -409,22 +426,22 @@ mod drill {
 mod rec_cross {
     use super::*;
     use syan::parse::recurse;
-    use syan::visit::SeqView;
+    use syan::visit::SeqEdit;
 
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Debug, Ast)]
-        #[subast(crate::rec_cross::ast::Stmt)]
+        #[derive(Debug, Visiting)]
+        #[visiting(crate::rec_cross::ast::Stmt)]
         pub enum Expr<S> {
             Block(#[seq] Vec<Stmt<S>>), // cross-edge: holds `Stmt` Vec-like -> visit_stmt_seq_mut
             Lit(i64, PhantomData<S>),
         }
 
-        #[derive(Debug, Ast)]
-        #[subast(crate::rec_cross::ast::Expr)]
+        #[derive(Debug, Visiting)]
+        #[visiting(crate::rec_cross::ast::Expr)]
         pub enum Stmt<S> {
             Expr(Box<Expr<S>>), // back-edge to the root
             Nop(i64, PhantomData<S>),
@@ -432,15 +449,18 @@ mod rec_cross {
     }
 
     mod v {
-        syan::visit::visitor!(crate::rec_cross::ast::Expr, crate::rec_cross::ast::Stmt);
+        syan::visit::define_visit!(crate::rec_cross::ast::Expr, crate::rec_cross::ast::Stmt);
     }
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq_mut<V: SeqView<ast::Stmt<S>>>(&mut self, v: &mut V) {
-            for s in v.view_iter_mut() {
-                if !matches!(s, ast::Stmt::Nop(0, _)) {
-                    v::visit_stmt_mut(self, s); // descend (Stmt::Expr -> nested Block)
+        fn visit_stmt_seq_mut<'a, V: SeqEdit<'a, ast::Stmt<S>>>(&mut self, v: &'a mut V)
+        where
+            ast::Stmt<S>: 'a,
+        {
+            for i in 0..v.len() {
+                if !matches!(&v[i], ast::Stmt::Nop(0, _)) {
+                    v::visit_stmt_mut(self, &mut v[i]); // descend (Stmt::Expr -> nested Block)
                 }
             }
             v.retain_mut(|s| !matches!(s, ast::Stmt::Nop(0, _)));

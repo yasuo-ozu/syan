@@ -22,8 +22,8 @@
 //! (`ranked::nesting`).
 //!
 //! The user's types stay exactly as written — genuine natural recursive enums/structs, one type at all
-//! depths — so `#[derive(Ast)]`, `visitor!(…)`, `Debug`, user `impl`s and every other non-structural
-//! derive are untouched, and a `visitor!` over a `#[recurse]` cycle is an ordinary acyclic visitor.
+//! depths — so `#[derive(Visiting)]`, `define_visit!(…)`, `Debug`, user `impl`s and every other non-structural
+//! derive are untouched, and a `define_visit!` over a `#[recurse]` cycle is an ordinary acyclic visitor.
 
 use decycle::analysis::EdgeKind;
 use decycle::safegraph::VecGraph;
@@ -273,7 +273,7 @@ fn build_prelude(ex: &Expansion, routed: &[(&'static str, Path)], syan: &Path) -
 }
 
 /// Emit the module — through decycle when a cycle member derives a routed trait, verbatim otherwise
-/// (an `Ast`-only cycle has no obligation to break).
+/// (an `Visiting`-only cycle has no obligation to break).
 fn emit(
     module: ItemMod,
     prelude: Vec<Item>,
@@ -444,7 +444,7 @@ fn strip_structural_derives(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
 
 /// The helper attributes the structural derives register. Once those derives are gone from the natural
 /// type, an unconsumed helper is a hard "cannot find attribute" error — so they are stripped. The
-/// visitor markers `#[subast]`/`#[seq]`/`#[opt]` are NOT in this list: `#[derive(Ast)]` stays on the
+/// visitor markers `#[visiting]`/`#[seq]`/`#[opt]` are NOT in this list: `#[derive(Visiting)]` stays on the
 /// natural type and consumes them.
 fn is_structural_helper(attr: &syn::Attribute) -> bool {
     ["group", "joint", "alone", "default"]
@@ -464,7 +464,7 @@ fn strip_field_helper_attrs(fields: &mut Fields) {
 
 /// The public **natural** form of a cycle type: the user's item verbatim, minus the structural derives
 /// (which `#[recurse]` expands itself, and whose output decycle then contracts) and minus their now
-/// unconsumed helper attributes. Everything else — `Ast`, `Debug`, `Default`, `#[subast]`, `#[seq]`,
+/// unconsumed helper attributes. Everything else — `Visiting`, `Debug`, `Default`, `#[visiting]`, `#[seq]`,
 /// docs, generics, `where`-clauses — is preserved exactly, which is what makes the public API a plain
 /// recursive type.
 fn make_natural_item(item: &Item) -> Item {

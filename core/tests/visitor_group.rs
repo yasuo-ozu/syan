@@ -5,7 +5,7 @@
 //! advice has to be visitable. It was not: the group peeled to a wrapper level like any other, and
 //! nothing implemented the descent for it, so the whole node failed to compile.
 //!
-//! A group is descent-only. It holds exactly one `T`, so `SeqView`'s `push`/`remove` and `OptView`'s
+//! A group is descent-only. It holds exactly one `T`, so `SeqEdit`'s `push`/`remove` and `OptEdit`'s
 //! `take` have nothing to mean, and `#[seq]`/`#[opt]` on such a field stays an error — pinned by
 //! `tests/ui/visitor_edit_marker_boxed.rs`'s sibling case in `visitor_diagnostics`. The delimiters
 //! are punctuation tokens and are never visited.
@@ -18,13 +18,13 @@ use syan::symbol::chars;
 
 mod ast {
     use super::*;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Qubit(pub i64);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::ast::Qubit)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::ast::Qubit)]
     pub struct Stmt {
         /// The shape the aliases produce: a group wrapping a container.
         pub listed: GroupBracket<Vec<Qubit>, Span>,
@@ -33,7 +33,7 @@ mod ast {
     }
 
     pub mod v {
-        syan::visit::visitor!(crate::ast::Qubit, crate::ast::Stmt);
+        syan::visit::define_visit!(crate::ast::Qubit, crate::ast::Stmt);
     }
 }
 

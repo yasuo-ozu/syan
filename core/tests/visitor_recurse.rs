@@ -1,9 +1,9 @@
 //! Visiting a `#[recurse]` cycle: struct/closure/mut visitors over single and disjoint-param
-//! cycles. `#[recurse]` exposes the cycle as natural recursive types, so `visitor!()` builds an
+//! cycles. `#[recurse]` exposes the cycle as natural recursive types, so `define_visit!()` builds an
 //! ordinary acyclic visitor (one `visit_*` per type, no depth parameter).
 #![allow(dead_code)]
 
-// visitor!() over a two-type cycle: struct Visit, Visit::visit_*, and the visit_mut mirror.
+// define_visit!() over a two-type cycle: struct Visit, Visit::visit_*, and the visit_mut mirror.
 mod via_visitor {
     use core::marker::PhantomData;
     use syan::parse::recurse;
@@ -11,17 +11,17 @@ mod via_visitor {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast(crate::via_visitor::ast::Stmt)]
+        #[derive(Visiting)]
+        #[visiting(crate::via_visitor::ast::Stmt)]
         pub enum Expr<S> {
             Stmt(Box<Stmt<S>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast(crate::via_visitor::ast::Expr)]
+        #[derive(Visiting)]
+        #[visiting(crate::via_visitor::ast::Expr)]
         pub enum Stmt<S> {
             Expr(Box<Expr<S>>),
             Nop(PhantomData<S>),
@@ -29,7 +29,7 @@ mod via_visitor {
     }
 
     mod v {
-        syan::visit::visitor!(crate::via_visitor::ast::Expr, crate::via_visitor::ast::Stmt);
+        syan::visit::define_visit!(crate::via_visitor::ast::Expr, crate::via_visitor::ast::Stmt);
     }
 
     #[derive(Default)]
@@ -110,10 +110,10 @@ mod via_visitor {
     #[recurse]
     mod tree {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Add(Box<Expr<S>>, Box<Expr<S>>),
             Lit(PhantomData<S>),
@@ -121,7 +121,7 @@ mod via_visitor {
     }
 
     mod v_tree {
-        syan::visit::visitor!(crate::via_visitor::tree::Expr);
+        syan::visit::define_visit!(crate::via_visitor::tree::Expr);
     }
 
     #[test]
@@ -136,7 +136,7 @@ mod via_visitor {
     }
 }
 
-// One visitor!() over two disjoint-param cycles (Expr<S> + Foo<T>) — a union-param acyclic visitor.
+// One define_visit!() over two disjoint-param cycles (Expr<S> + Foo<T>) — a union-param acyclic visitor.
 mod disjoint_params {
     use core::marker::PhantomData;
     use syan::parse::recurse;
@@ -144,17 +144,17 @@ mod disjoint_params {
     #[recurse]
     mod m {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Nest(Box<Expr<S>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Foo<T> {
             Nest(Box<Foo<T>>),
             Lit(PhantomData<T>),
@@ -162,7 +162,7 @@ mod disjoint_params {
     }
 
     mod v {
-        syan::visit::visitor!(
+        syan::visit::define_visit!(
             crate::disjoint_params::m::Expr,
             crate::disjoint_params::m::Foo
         );

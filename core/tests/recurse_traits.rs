@@ -82,10 +82,10 @@ mod unparse_spanned {
     #[recurse]
     mod sp {
         use syan::span::{Spanned, WithSpan};
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast, Spanned)]
-        #[subast()]
+        #[derive(Visiting, Spanned)]
+        #[visiting()]
         pub enum Expr<S: syan::span::Span> {
             Node {
                 head: WithSpan<u32, S>,
@@ -178,17 +178,17 @@ mod unparse_spanned {
     #[recurse]
     mod mts {
         use syan::span::{Span, Spanned, WithSpan};
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast, Spanned)]
-        #[subast(crate::unparse_spanned::mts::Stmt)]
+        #[derive(Visiting, Spanned)]
+        #[visiting(crate::unparse_spanned::mts::Stmt)]
         pub enum Expr<S: Span> {
             Wrap(Box<Stmt<S>>),
             Leaf(WithSpan<u32, S>),
         }
 
-        #[derive(Ast, Spanned)]
-        #[subast(crate::unparse_spanned::mts::Expr)]
+        #[derive(Visiting, Spanned)]
+        #[visiting(crate::unparse_spanned::mts::Expr)]
         pub enum Stmt<S: Span> {
             Wrap(Box<Expr<S>>),
             Tag(WithSpan<u8, S>),
@@ -269,10 +269,10 @@ mod group_ful {
     mod sp {
         use syan::nested::group::GroupBrace;
         use syan::span::{Span, Spanned, WithSpan};
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast, Spanned)]
-        #[subast()]
+        #[derive(Visiting, Spanned)]
+        #[visiting()]
         pub enum Expr<S: Span> {
             Atom(WithSpan<u32, S>),
             Block {

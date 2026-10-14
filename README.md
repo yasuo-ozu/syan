@@ -140,22 +140,22 @@ call stack. `#[recurse]` routes the cyclic obligations through the
 
 ## Visitors
 
-Walking a tree is a separate derive. `#[derive(Ast)]` marks a node, `#[subast(..)]` names the other
-nodes it can reach, and `visitor!` generates the traversal.
+Walking a tree is a separate derive. `#[derive(Visiting)]` marks a node, `#[visiting(..)]` names the other
+nodes it can reach, and `define_visit!` generates the traversal.
 
 ```rust
 mod ast {
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Ast)]
-    #[subast(crate::ast::Expr)]
+    #[derive(Visiting)]
+    #[visiting(crate::ast::Expr)]
     pub enum Expr {
         Lit(u32),
         Neg(Box<Expr>),
     }
 
     pub mod visit {
-        syan::visit::visitor!(super::Expr);
+        syan::visit::define_visit!(super::Expr);
     }
 }
 

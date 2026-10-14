@@ -9,28 +9,33 @@ use core::marker::PhantomData;
 mod vecdeque {
     use super::*;
     use std::collections::VecDeque;
-    use syan::visit::{Ast, SeqView};
+    use syan::visit::{SeqEdit, Visiting};
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::vecdeque::Stmt)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::vecdeque::Stmt)]
     pub struct Holder<S> {
         #[seq]
         pub items: VecDeque<Stmt<S>>,
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Holder, super::Stmt);
+        syan::visit::define_visit!(super::Holder, super::Stmt);
     }
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
-            for s in v.view_iter_mut() {
-                if s.0 == 2 {
-                    *s = Stmt(102, PhantomData);
+        fn visit_stmt_seq_mut<'a, V: SeqEdit<'a, Stmt<S>>>(&mut self, v: &'a mut V)
+        where
+            Stmt<S>: 'a,
+        {
+            // The view carries no borrow, so reading and editing mix freely in one body. Elements
+            // come through `SeqView`'s `IndexMut` supertrait.
+            for i in 0..v.len() {
+                if v[i].0 == 2 {
+                    v[i] = Stmt(102, PhantomData);
                 }
             }
             v.retain_mut(|s| s.0 != 0);
@@ -59,28 +64,31 @@ mod vecdeque {
 mod punct {
     use super::*;
     use syan::nested::punctuated::Punctuated;
-    use syan::visit::{Ast, SeqView};
+    use syan::visit::{SeqEdit, Visiting};
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct Comma;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::punct::Stmt)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::punct::Stmt)]
     pub struct Holder<S> {
         #[seq]
         pub items: Punctuated<Stmt<S>, Comma>,
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Holder, super::Stmt);
+        syan::visit::define_visit!(super::Holder, super::Stmt);
     }
 
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
+        fn visit_stmt_seq_mut<'a, V: SeqEdit<'a, Stmt<S>>>(&mut self, v: &'a mut V)
+        where
+            Stmt<S>: 'a,
+        {
             v.retain_mut(|s| s.0 != 0); // drop zeros
             v.push(Stmt(9, PhantomData)); // `Comma: Default` synthesizes the separator
         }
@@ -110,20 +118,20 @@ mod punct {
 // ── a closure still visits every element of a Vec / Option slot (via the default seq/opt descent) ──
 mod closure_over_slot {
     use super::*;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
+    #[derive(Debug, Visiting)]
     pub struct Stmt<S>(pub i64, pub PhantomData<S>);
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::closure_over_slot::Stmt)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::closure_over_slot::Stmt)]
     pub struct Block<S> {
         pub stmts: Vec<Stmt<S>>,
         pub tail: Option<Stmt<S>>,
     }
 
     pub mod v {
-        syan::visit::visitor!(super::Block, super::Stmt);
+        syan::visit::define_visit!(super::Block, super::Stmt);
     }
 
     #[test]

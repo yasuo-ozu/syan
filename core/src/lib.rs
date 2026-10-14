@@ -1,6 +1,6 @@
 #![doc(html_logo_url = "https://raw.githubusercontent.com/yasuo-ozu/syan/main/syan.png")]
 // The README's visitor example needs an explicit `fn main` so its `mod ast` lands at the crate
-// root: `#[subast(..)]` only accepts `crate`-rooted paths.
+// root: `#[visiting(..)]` only accepts `crate`-rooted paths.
 #![allow(clippy::needless_doctest_main)]
 #![doc = include_str!("../README.md")]
 extern crate self as syan;
@@ -22,7 +22,14 @@ pub mod span;
 pub mod symbol;
 /// Generic tuple helpers used by the derives.
 pub mod tuple;
-pub mod visit;
+/// Walking a derived tree: the `Visiting` derive and `define_visit!`, re-exported from the [`ast`] crate.
+///
+/// A node's generated impls name `::visiting` by default, so a grammar using `#[derive(Visiting)]`
+/// depends on that crate directly; `#[ast(::syan)]` on the type points them here instead.
+/// `define_visit!` needs neither, since it reaches the crate through the macro's own `$crate`.
+pub use visiting::visit;
+
+mod visit_impls;
 
 #[doc(hidden)]
 pub mod _imp {

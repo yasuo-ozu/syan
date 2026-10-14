@@ -246,14 +246,14 @@ mod fixes {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             ToStmt(Box<Stmt<S>>),
             // NOTE: this variant used to be `Foreign(super::other::Stmt)` — an unrelated type whose
-            // last segment collides with the cycle type `Stmt`. `#[derive(Ast)]` now rejects that
+            // last segment collides with the cycle type `Stmt`. `#[derive(Visiting)]` now rejects that
             // outright (a head is matched by last segment, so the two cannot be told apart); the
             // shape moved to `tests/ui/ambiguous_last_ident.rs`. What remains here is the part that
             // still holds: a foreign field is a leaf.
@@ -261,8 +261,8 @@ mod fixes {
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Stmt<S> {
             Back(Box<Expr<S>>),
             Nop(PhantomData<S>),
@@ -270,13 +270,13 @@ mod fixes {
     }
 
     mod v_ast {
-        syan::visit::visitor!(crate::fixes::ast::Expr, crate::fixes::ast::Stmt);
+        syan::visit::define_visit!(crate::fixes::ast::Expr, crate::fixes::ast::Stmt);
     }
 
     #[test]
     fn bug7_foreign_field_is_a_leaf() {
-        // A field of a type the visitor does not know is a leaf; compiling the `visitor!()` is the
-        // check. The name-collision half of the original bug7 is now refused by `#[derive(Ast)]` —
+        // A field of a type the visitor does not know is a leaf; compiling the `define_visit!()` is the
+        // check. The name-collision half of the original bug7 is now refused by `#[derive(Visiting)]` —
         // see `tests/ui/ambiguous_last_ident.rs`.
         struct V;
         impl v_ast::Visit<()> for V {}
@@ -284,7 +284,7 @@ mod fixes {
     }
 }
 
-// A cycle deriving NO routed trait (`Ast` only) has no obligation for decycle to break, so
+// A cycle deriving NO routed trait (`Visiting` only) has no obligation for decycle to break, so
 // `#[recurse]` emits the module directly instead of handing it over — the `used_traits.is_empty()`
 // path in `emit`. A `where`-clause on the cycle type must survive that path intact.
 //
@@ -294,15 +294,15 @@ mod fixes {
 mod no_routed_trait {
     use core::marker::PhantomData;
     use syan::parse::recurse;
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
     #[recurse]
     mod ast_only {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S>
         where
             S: Clone,
@@ -312,7 +312,7 @@ mod no_routed_trait {
         }
     }
 
-    fn assert_ast<T: Ast>() {}
+    fn assert_ast<T: Visiting>() {}
 
     #[test]
     fn ast_only_cycle_with_where_clause_compiles() {

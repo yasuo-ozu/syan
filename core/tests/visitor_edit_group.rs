@@ -11,7 +11,7 @@ use syan::literal::Integer;
 use syan::nested::group::{GroupBrace, GroupParen};
 use syan::parse::{Parse, Unparse};
 use syan::symbol::Token;
-use syan::visit::{Ast, OptView, SeqView};
+use syan::visit::{OptEdit, SeqEdit, Visiting};
 use template_quote::quote;
 use type_macro_derive_tricks::macro_derive;
 
@@ -19,7 +19,7 @@ use type_macro_derive_tricks::macro_derive;
 type Sp = syan::source::proc_macro2::Span;
 
 /// A leaf statement `N ;`.
-#[macro_derive(Ast, Parse, Unparse, Debug)]
+#[macro_derive(Visiting, Parse, Unparse, Debug)]
 pub struct Stmt<S> {
     pub n: Integer,
     pub semi: Token![S => ;],
@@ -27,8 +27,8 @@ pub struct Stmt<S> {
 
 /// `{ stmts… } ( tail? )` — a brace group holding a `#[seq]` `Vec` and a paren group holding a `#[opt]`
 /// `Option`. Each grouped field is *both* a parse group (`#[group(...)]`) and a structural-edit view.
-#[macro_derive(Ast, Parse, Unparse, Debug)]
-#[subast(crate::Stmt)]
+#[macro_derive(Visiting, Parse, Unparse, Debug)]
+#[visiting(crate::Stmt)]
 pub struct Doc<S> {
     pub brace: GroupBrace<(), S>,
     #[group(self.brace)]
@@ -41,16 +41,22 @@ pub struct Doc<S> {
 }
 
 mod v {
-    syan::visit::visitor!(crate::Stmt, crate::Doc);
+    syan::visit::define_visit!(crate::Stmt, crate::Doc);
 }
 
 /// Drop `0 ;` statements from the grouped `Vec`; clear the grouped `Option` tail if it is `7 ;`.
 struct Editor;
 impl<S> v::VisitMut<S> for Editor {
-    fn visit_stmt_seq_mut<V: SeqView<Stmt<S>>>(&mut self, v: &mut V) {
+    fn visit_stmt_seq_mut<'a, V: SeqEdit<'a, Stmt<S>>>(&mut self, v: &'a mut V)
+    where
+        Stmt<S>: 'a,
+    {
         v.retain_mut(|s| s.n.value != "0");
     }
-    fn visit_stmt_opt_mut<O: OptView<Stmt<S>>>(&mut self, v: &mut O) {
+    fn visit_stmt_opt_mut<'a, O: OptEdit<'a, Stmt<S>>>(&mut self, v: &'a mut O)
+    where
+        Stmt<S>: 'a,
+    {
         if matches!(v.get(), Some(s) if s.n.value == "7") {
             v.take();
         }
@@ -84,7 +90,7 @@ fn edit_grouped_seq_and_opt() {
     );
     assert!(
         doc.tail.is_none(),
-        "the #[group] #[opt] tail (`7 ;`) was cleared via OptView"
+        "the #[group] #[opt] tail (`7 ;`) was cleared via OptEdit"
     );
 
     // The brace/paren group delimiters survive the edit + Unparse.
@@ -137,7 +143,7 @@ fn empty_groups_edit_is_noop() {
 mod rec {
     use super::Sp;
     use syan::parse::{recurse, Parse};
-    use syan::visit::SeqView;
+    use syan::visit::SeqEdit;
     use template_quote::quote;
 
     #[recurse]
@@ -145,11 +151,11 @@ mod rec {
         use syan::literal::Integer;
         use syan::nested::group::GroupBrace;
         use syan::parse::{Parse, Unparse};
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
         use type_macro_derive_tricks::macro_derive;
 
-        #[macro_derive(Ast, Parse, Unparse, Debug)]
-        #[subast(crate::rec::ast::Expr)]
+        #[macro_derive(Visiting, Parse, Unparse, Debug)]
+        #[visiting(crate::rec::ast::Expr)]
         pub enum Expr<S> {
             Block {
                 brace: GroupBrace<(), S>,
@@ -163,15 +169,18 @@ mod rec {
     }
 
     mod v {
-        syan::visit::visitor!(crate::rec::ast::Expr);
+        syan::visit::define_visit!(crate::rec::ast::Expr);
     }
 
     // Descend every grouped block, then drop `0` literals at each depth.
     struct Editor;
     impl<S> v::VisitMut<S> for Editor {
-        fn visit_expr_seq_mut<V: SeqView<ast::Expr<S>>>(&mut self, v: &mut V) {
-            for e in v.view_iter_mut() {
-                v::visit_expr_mut(self, e); // recurse into nested blocks
+        fn visit_expr_seq_mut<'a, V: SeqEdit<'a, ast::Expr<S>>>(&mut self, v: &'a mut V)
+        where
+            ast::Expr<S>: 'a,
+        {
+            for i in 0..v.len() {
+                v::visit_expr_mut(self, &mut v[i]); // recurse into nested blocks
             }
             v.retain_mut(|e| !matches!(e, ast::Expr::Lit(i) if i.value == "0"));
         }

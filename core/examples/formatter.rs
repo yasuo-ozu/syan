@@ -67,7 +67,7 @@ pub mod ast {
     }
 }
 
-use ast::{Atom, Expr, Op};
+use crate::ast::{Atom, Expr, Op};
 
 /// `(start, end, is_line)` for every comment, in source order.
 fn comments(src: &str) -> Vec<(usize, usize, bool)> {

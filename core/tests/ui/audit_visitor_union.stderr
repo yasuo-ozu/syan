@@ -1,5 +1,11 @@
-error: no AST definitions resolved for the visitor
-  --> tests/ui/audit_visitor_union.rs:14:34
+error: `#[derive(Visiting)]` works on a struct or an enum; a union has no walkable fields
+ --> tests/ui/audit_visitor_union.rs:8:11
+  |
+8 | pub union U {
+  |           ^
+
+error[E0433]: failed to resolve: could not find `U` in the crate root
+  --> tests/ui/audit_visitor_union.rs:14:39
    |
-14 |     syan::visit::visitor!(crate::U);
-   |                                  ^
+14 |     syan::visit::define_visit!(crate::U);
+   |                                       ^ could not find `U` in the crate root

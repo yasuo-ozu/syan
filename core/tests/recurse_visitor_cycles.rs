@@ -1,8 +1,8 @@
-//! `#[recurse]` generics + multi-cycle/multi-root shapes, visited via `visitor!`.
+//! `#[recurse]` generics + multi-cycle/multi-root shapes, visited via `define_visit!`.
 //! Each source test is a mod so their crate-root items (`Counter`, `Expr`, …) don't collide.
 #![allow(dead_code)]
 
-// `#[recurse]` cycle types carrying lifetime / type / const generic params, visited via `visitor!`.
+// `#[recurse]` cycle types carrying lifetime / type / const generic params, visited via `define_visit!`.
 mod generics {
     use core::marker::PhantomData;
     use syan::parse::recurse;
@@ -13,10 +13,10 @@ mod generics {
     #[recurse]
     mod lt {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<'a, S> {
             Nest(Box<Expr<'a, S>>),
             Lit(PhantomData<(&'a (), S)>),
@@ -24,7 +24,7 @@ mod generics {
     }
 
     mod v_lt {
-        syan::visit::visitor!(crate::generics::lt::Expr);
+        syan::visit::define_visit!(crate::generics::lt::Expr);
     }
 
     impl<'a, S> v_lt::Visit<'a, S> for Counter {
@@ -45,10 +45,10 @@ mod generics {
     #[recurse]
     mod ct {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S, const N: usize> {
             Nest(Box<Expr<S, N>>),
             Lit(PhantomData<(S, [(); N])>),
@@ -56,7 +56,7 @@ mod generics {
     }
 
     mod v_ct {
-        syan::visit::visitor!(crate::generics::ct::Expr);
+        syan::visit::define_visit!(crate::generics::ct::Expr);
     }
 
     impl<S, const N: usize> v_ct::Visit<S, N> for Counter {
@@ -82,10 +82,10 @@ mod generics {
     #[recurse]
     mod ct_char {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S, const C: char> {
             Nest(Box<Expr<S, C>>),
             Lit(PhantomData<S>),
@@ -93,7 +93,7 @@ mod generics {
     }
 
     mod v_ct_char {
-        syan::visit::visitor!(crate::generics::ct_char::Expr);
+        syan::visit::define_visit!(crate::generics::ct_char::Expr);
     }
 
     impl<S, const C: char> v_ct_char::Visit<S, C> for Counter {
@@ -118,17 +118,17 @@ mod generics {
     #[recurse]
     mod multi {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast(crate::generics::multi::Stmt)]
+        #[derive(Visiting)]
+        #[visiting(crate::generics::multi::Stmt)]
         pub enum Expr<S, T> {
             Stmt(Box<Stmt<S, T>>),
             Lit(PhantomData<(S, T)>),
         }
 
-        #[derive(Ast)]
-        #[subast(crate::generics::multi::Expr)]
+        #[derive(Visiting)]
+        #[visiting(crate::generics::multi::Expr)]
         pub enum Stmt<S, T> {
             Expr(Box<Expr<S, T>>),
             Nop(PhantomData<(S, T)>),
@@ -136,7 +136,7 @@ mod generics {
     }
 
     mod v_multi {
-        syan::visit::visitor!(crate::generics::multi::Expr, crate::generics::multi::Stmt);
+        syan::visit::define_visit!(crate::generics::multi::Expr, crate::generics::multi::Stmt);
     }
 
     impl<S, T> v_multi::Visit<S, T> for Counter {
@@ -165,17 +165,17 @@ mod generics {
     #[recurse]
     mod het {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast(crate::generics::het::Stmt)]
+        #[derive(Visiting)]
+        #[visiting(crate::generics::het::Stmt)]
         pub enum Expr<S> {
             Stmt(Box<Stmt<S, u8>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast(crate::generics::het::Expr)]
+        #[derive(Visiting)]
+        #[visiting(crate::generics::het::Expr)]
         pub enum Stmt<S, T> {
             Back(Box<Expr<S>>),
             Tag(PhantomData<(S, T)>),
@@ -183,7 +183,7 @@ mod generics {
     }
 
     mod v_het {
-        syan::visit::visitor!(crate::generics::het::Expr, crate::generics::het::Stmt);
+        syan::visit::define_visit!(crate::generics::het::Expr, crate::generics::het::Stmt);
     }
 
     impl<S> v_het::Visit<S> for Counter {
@@ -208,7 +208,7 @@ mod generics {
     }
 }
 
-// Several *independent* cycles (separate SCCs) in one `#[recurse]` module, visited via one `visitor!`.
+// Several *independent* cycles (separate SCCs) in one `#[recurse]` module, visited via one `define_visit!`.
 mod multi_cycle {
     use core::marker::PhantomData;
     use syan::parse::recurse;
@@ -220,17 +220,17 @@ mod multi_cycle {
     #[recurse]
     mod vis {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Expr<S> {
             Nest(Box<Expr<S>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast()]
+        #[derive(Visiting)]
+        #[visiting()]
         pub enum Type<S> {
             Arrow(Box<Type<S>>),
             Unit(PhantomData<S>),
@@ -238,7 +238,7 @@ mod multi_cycle {
     }
 
     mod v_vis {
-        syan::visit::visitor!(crate::multi_cycle::vis::Expr, crate::multi_cycle::vis::Type);
+        syan::visit::define_visit!(crate::multi_cycle::vis::Expr, crate::multi_cycle::vis::Type);
     }
 
     impl<S> v_vis::Visit<S> for Counter {
@@ -276,18 +276,18 @@ mod multiroot {
     #[recurse]
     mod ast {
         use core::marker::PhantomData;
-        use syan::visit::Ast;
+        use syan::visit::Visiting;
 
-        #[derive(Ast)]
-        #[subast(crate::multiroot::ast::B)]
+        #[derive(Visiting)]
+        #[visiting(crate::multiroot::ast::B)]
         pub enum A<S> {
             Me(Box<A<S>>),
             ToB(Box<B<S>>),
             Lit(PhantomData<S>),
         }
 
-        #[derive(Ast)]
-        #[subast(crate::multiroot::ast::A)]
+        #[derive(Visiting)]
+        #[visiting(crate::multiroot::ast::A)]
         pub enum B<S> {
             Me(Box<B<S>>),
             ToA(Box<A<S>>),
@@ -296,7 +296,7 @@ mod multiroot {
     }
 
     mod v_ast {
-        syan::visit::visitor!(crate::multiroot::ast::A, crate::multiroot::ast::B);
+        syan::visit::define_visit!(crate::multiroot::ast::A, crate::multiroot::ast::B);
     }
 
     #[derive(Default)]

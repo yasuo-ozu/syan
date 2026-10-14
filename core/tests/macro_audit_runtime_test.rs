@@ -62,7 +62,7 @@ fn symbol_leaks_raw_ident_prefix() {
     );
 }
 
-// ── BUG: visitor!() silently skips a node held in a map's VALUE slot ─────────────────────────────
+// ── BUG: define_visit!() silently skips a node held in a map's VALUE slot ─────────────────────────────
 // `peel` (macro/util.rs) classifies a field by walking wrapper levels *without matching any
 // container by name* — an elegant design that makes user wrappers work with no registration. It
 // finds the head through `first_ty_arg(seg)?`: the FIRST type argument. That is correct for every
@@ -80,36 +80,36 @@ fn symbol_leaks_raw_ident_prefix() {
 //
 // This generalises past maps: `Result<Node, E>` is traversed and `Result<E, Node>` is not.
 mod visitor_map_value {
-    use syan::visit::Ast;
+    use syan::visit::Visiting;
 
-    #[derive(Debug, Ast)]
-    #[subast()]
+    #[derive(Debug, Visiting)]
+    #[visiting()]
     pub enum Node {
         Leaf(i64),
     }
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::visitor_map_value::Node)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::visitor_map_value::Node)]
     pub struct HashHolder {
         pub field: std::collections::HashMap<String, Node>,
     }
 
-    #[derive(Debug, Ast)]
-    #[subast(crate::visitor_map_value::Node)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::visitor_map_value::Node)]
     pub struct BTreeHolder {
         pub field: std::collections::BTreeMap<i64, Node>,
     }
 
     // The control: `Vec` is the same arity-1 shape and is traversed, so the difference below is the
     // slot, not "syan cannot see into containers".
-    #[derive(Debug, Ast)]
-    #[subast(crate::visitor_map_value::Node)]
+    #[derive(Debug, Visiting)]
+    #[visiting(crate::visitor_map_value::Node)]
     pub struct VecHolder {
         pub field: Vec<Node>,
     }
 
     mod v {
-        syan::visit::visitor!(
+        syan::visit::define_visit!(
             crate::visitor_map_value::Node,
             crate::visitor_map_value::HashHolder,
             crate::visitor_map_value::BTreeHolder,
